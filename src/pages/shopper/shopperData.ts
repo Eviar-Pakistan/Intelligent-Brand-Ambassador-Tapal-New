@@ -11,3 +11,12 @@ export const surveyOptions = [
   'Tapal Danedar',
   'Other / Local brand',
 ]
+
+export const selectionReasons = [
+  'Better taste',
+  'Richer aroma',
+  'Good for the family',
+  'Better price',
+  'Stronger cup',
+  'Always available',
+]

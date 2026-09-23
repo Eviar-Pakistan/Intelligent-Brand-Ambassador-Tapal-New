@@ -3,8 +3,8 @@ import { useState, type ReactNode } from 'react'
 import { Button } from '../../components/ui'
 import { useDemo } from '../../context/AppContext'
 import { useBrand } from '../../context/BrandContext'
-import { Gift, Leaf, Lock, Percent, Sparkles, Ticket } from 'lucide-react'
-import { productCategories, surveyOptions } from './shopperData'
+import { Check, Gift, Leaf, Lock, Percent, Sparkles, Ticket } from 'lucide-react'
+import { productCategories, selectionReasons, surveyOptions } from './shopperData'
 import { getShopperStore } from '../../lib/storeRegistry'
 
 export function ShopperLandingPage() {
@@ -317,64 +317,181 @@ function Bubble({ children, side }: { children: ReactNode; side: 'user' | 'bot' 
   )
 }
 
+const SURVEY_STEPS = 3
+const genderOptions = ['Male', 'Female']
+
 export function ShopperSurveyPage() {
+  const [step, setStep] = useState(1)
+  const [name, setName] = useState('')
+  const [phone, setPhone] = useState('')
+  const [gender, setGender] = useState<string | null>(null)
+  const [age, setAge] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
+  const [reasons, setReasons] = useState<string[]>([])
   const [consent, setConsent] = useState(true)
-  const step = 2
+
+  const profileReady = name.trim() !== '' && phone.trim() !== '' && gender != null && age.trim() !== ''
+  const canContinue =
+    step === 1 ? profileReady : step === 2 ? selected != null : reasons.length > 0 && consent
+
+  function toggleReason(opt: string) {
+    setReasons((current) => (current.includes(opt) ? current.filter((item) => item !== opt) : [...current, opt]))
+  }
 
   return (
     <div className="flex min-h-[calc(100dvh-4rem)] flex-col p-4 sm:p-5">
       <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-        Question {step} of 5
+        Question {step} of {SURVEY_STEPS}
       </div>
-      <h2 className="text-xl font-bold">Which tea do you currently use?</h2>
-      <p className="mt-2 text-sm text-slate-500">
-        Captures preferred tea brand, pack size, cups per day, frequency, price sensitivity & more.
-      </p>
-      <div className="mt-6 space-y-3">
-        {surveyOptions.map((opt) => (
-          <button
-            key={opt}
-            onClick={() => setSelected(opt)}
-            className={`flex w-full items-center gap-3 rounded-2xl border px-4 py-3.5 text-left text-sm font-medium ${
-              selected === opt
-                ? 'border-brand-500 bg-brand-50 text-brand-700'
-                : 'border-slate-200 bg-white text-slate-700'
-            }`}
-          >
-            <span
-              className={`flex h-4 w-4 items-center justify-center rounded-full border ${
-                selected === opt ? 'border-brand-500' : 'border-slate-300'
-              }`}
-            >
-              {selected === opt && <span className="h-2 w-2 rounded-full bg-brand-500" />}
-            </span>
-            {opt}
-          </button>
-        ))}
-      </div>
-      <label className="mt-6 flex items-start gap-2 text-xs text-slate-500">
-        <input
-          type="checkbox"
-          className="mt-0.5"
-          checked={consent}
-          onChange={(e) => setConsent(e.target.checked)}
-        />
-        I consent to store my preference data for campaign insights (CRM sync).
-      </label>
+
+      {step === 1 && (
+        <>
+          <h2 className="text-xl font-bold">Enter your details</h2>
+          <div className="mt-6 space-y-3">
+            <SurveyField label="Name" value={name} onChange={setName} placeholder="Your name" />
+            <SurveyField
+              label="Number"
+              value={phone}
+              onChange={setPhone}
+              placeholder="03xx xxxxxxx"
+              inputMode="tel"
+            />
+            <div>
+              <div className="mb-2 text-xs font-semibold text-slate-500">Gender</div>
+              <div className="grid grid-cols-2 gap-3">
+                {genderOptions.map((opt) => (
+                  <SurveyChoice key={opt} label={opt} selected={gender === opt} onSelect={() => setGender(opt)} />
+                ))}
+              </div>
+            </div>
+            <SurveyField label="Age" value={age} onChange={setAge} placeholder="Age" inputMode="numeric" />
+          </div>
+        </>
+      )}
+
+      {step === 2 && (
+        <>
+          <h2 className="text-xl font-bold">Which tea do you currently use?</h2>
+          <p className="mt-2 text-sm text-slate-500">
+            Captures preferred tea brand, pack size, cups per day, frequency, price sensitivity & more.
+          </p>
+          <div className="mt-6 space-y-3">
+            {surveyOptions.map((opt) => (
+              <SurveyChoice key={opt} label={opt} selected={selected === opt} onSelect={() => setSelected(opt)} />
+            ))}
+          </div>
+        </>
+      )}
+
+      {step === 3 && (
+        <>
+          <h2 className="text-xl font-bold">Reason for selection</h2>
+          <p className="mt-2 text-sm text-slate-500">Why did you choose this tea? Select all that apply.</p>
+          <div className="mt-6 space-y-3">
+            {selectionReasons.map((opt) => (
+              <SurveyChoice
+                key={opt}
+                label={opt}
+                multiple
+                selected={reasons.includes(opt)}
+                onSelect={() => toggleReason(opt)}
+              />
+            ))}
+          </div>
+          <label className="mt-6 flex items-start gap-2 text-xs text-slate-500">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={consent}
+              onChange={(e) => setConsent(e.target.checked)}
+            />
+            I consent to store my preference data for campaign insights (CRM sync).
+          </label>
+        </>
+      )}
+
       <div className="mt-auto pt-8">
         <div className="mb-4 flex justify-center gap-2">
-          {[1, 2, 3, 4, 5].map((n) => (
+          {Array.from({ length: SURVEY_STEPS }, (_, i) => i + 1).map((n) => (
             <span key={n} className={`h-2 w-2 rounded-full ${n <= step ? 'bg-brand-500' : 'bg-slate-200'}`} />
           ))}
         </div>
-        <Link to={selected && consent ? '/shopper/product' : '#'}>
-          <Button className="w-full" disabled={!selected || !consent}>
+        {step < SURVEY_STEPS ? (
+          <Button className="w-full" disabled={!canContinue} onClick={() => setStep((s) => s + 1)}>
             Continue
           </Button>
-        </Link>
+        ) : (
+          <Link to={canContinue ? '/shopper/product' : '#'}>
+            <Button className="w-full" disabled={!canContinue}>
+              Continue
+            </Button>
+          </Link>
+        )}
       </div>
     </div>
+  )
+}
+
+function SurveyField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  inputMode,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  placeholder: string
+  inputMode?: 'tel' | 'numeric'
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-xs font-semibold text-slate-500">{label}</span>
+      <input
+        value={value}
+        inputMode={inputMode}
+        onChange={(e) => onChange(inputMode === 'numeric' ? e.target.value.replace(/\D/g, '') : e.target.value)}
+        className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3.5 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+        placeholder={placeholder}
+      />
+    </label>
+  )
+}
+
+function SurveyChoice({
+  label,
+  selected,
+  onSelect,
+  multiple = false,
+}: {
+  label: string
+  selected: boolean
+  onSelect: () => void
+  multiple?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`flex w-full items-center gap-3 rounded-2xl border px-4 py-3.5 text-left text-sm font-medium ${
+        selected ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-slate-200 bg-white text-slate-700'
+      }`}
+    >
+      <span
+        className={`flex h-4 w-4 shrink-0 items-center justify-center border ${
+          multiple ? 'rounded' : 'rounded-full'
+        } ${selected ? (multiple ? 'border-brand-500 bg-brand-500' : 'border-brand-500') : 'border-slate-300'}`}
+      >
+        {selected &&
+          (multiple ? (
+            <Check className="text-white" size={12} strokeWidth={3} />
+          ) : (
+            <span className="h-2 w-2 rounded-full bg-brand-500" />
+          ))}
+      </span>
+      {label}
+    </button>
   )
 }
 

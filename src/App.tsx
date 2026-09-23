@@ -42,6 +42,7 @@ import {
 } from './pages/ba/BaPages'
 import { BaDailySalesPage, BaOtherBrandsPage, BaStockReportPage } from './pages/ba/BaCheckoutPages'
 import { BaComplaintPage } from './pages/ba/BaComplaintPage'
+import { BaAccessPage } from './pages/ba/BaAccessPage'
 import { ComplaintsProvider } from './context/ComplaintsContext'
 import {
   ShopperAiPage,
@@ -130,6 +131,9 @@ export default function App() {
               <Route path="stores" element={<SupervisorStoresPage />} />
               <Route path="bas" element={<SupervisorBasPage />} />
             </Route>
+
+            {/* Personal BA link — signs that ambassador in, then opens their app */}
+            <Route path="/ba/open/:token" element={<BaAccessPage />} />
 
             {/* Brand Ambassador — full-screen mobile app */}
             <Route path="/ba" element={<BaShell />}>

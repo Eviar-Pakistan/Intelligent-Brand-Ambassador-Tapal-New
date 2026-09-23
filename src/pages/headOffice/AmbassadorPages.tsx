@@ -7,7 +7,6 @@ import {
   Card,
   Modal,
   PageHeader,
-  PasswordField,
   ProgressRing,
   ScoreBars,
   SearchInput,
@@ -16,16 +15,16 @@ import {
   TableScroll,
   Tabs,
 } from '../../components/ui'
-import { Check, Download, FileSpreadsheet, KeyRound, Upload, UserPlus } from 'lucide-react'
+import { Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus } from 'lucide-react'
 import {
+  baAccessUrl,
   baEmailInUse,
   createBaAccount,
   createBaAccounts,
   downloadAmbassadorTemplate,
-  downloadBaCredentials,
-  generatePassword,
+  downloadBaLinks,
+  isDemoBa,
   parseAmbassadorFile,
-  setBaLogin,
   useBaAccounts,
   type AmbassadorParseResult,
   type BaAccount,
@@ -35,8 +34,6 @@ import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
 import { shiftLabelFromTimes, useSchedule } from '../../context/ScheduleContext'
 
 const validEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
-
-type Credentials = { name: string; email: string; password: string; updated: boolean }
 
 const allLifecycle: LifecycleStage[] = [
   'Recruited',
@@ -53,39 +50,56 @@ const timeFieldClass =
 const modalFieldClass =
   'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500'
 
-/** The BA's sign-in details, shown once — passwords are stored hashed and cannot be looked up later. */
-function CredentialsModal({ credentials, onClose }: { credentials: Credentials | null; onClose: () => void }) {
+function AccountLinkPanel({ account }: { account: BaAccount }) {
   const [copied, setCopied] = useState(false)
-  const url = `${window.location.origin}/login`
-  const text = credentials
-    ? `Brand Ambassador sign in\n${url}\nEmail: ${credentials.email}\nPassword: ${credentials.password}`
-    : ''
+  const url = baAccessUrl(account)
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(text)
+      await navigator.clipboard.writeText(url)
       setCopied(true)
       window.setTimeout(() => setCopied(false), 2000)
     } catch {
-      // clipboard blocked — the details are selectable above
+      // clipboard blocked — the link is selectable above
     }
   }
 
   return (
-    <Modal open={!!credentials} onClose={onClose} title={credentials?.updated ? 'Login updated' : 'Ambassador created'}>
-      {credentials && (
+    <div className="space-y-3">
+      <pre className="rounded-xl bg-slate-50 px-4 py-3 font-mono text-xs break-all whitespace-pre-wrap text-slate-700">
+        {url}
+      </pre>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="secondary" onClick={() => void copy()}>
+          <Copy size={14} /> {copied ? 'Copied!' : 'Copy link'}
+        </Button>
+        <Button type="button" onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}>
+          <ExternalLink size={14} /> Open account
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function AccountLinkModal({
+  account,
+  title,
+  onClose,
+}: {
+  account: BaAccount | null
+  title: string
+  onClose: () => void
+}) {
+  return (
+    <Modal open={!!account} onClose={onClose} title={title}>
+      {account && (
         <div className="space-y-4 text-sm">
           <p className="text-slate-600">
-            Share these sign-in details with {credentials.name}. The password is shown only now — it is stored
-            hashed and cannot be looked up later (use “Manage login” to set a new one).
+            Share this link with {account.name}. Opening it takes them straight into their account. There is no
+            password.
           </p>
-          <pre className="rounded-xl bg-slate-50 px-4 py-3 font-mono text-xs break-all whitespace-pre-wrap text-slate-700">
-            {text}
-          </pre>
-          <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => void copy()}>
-              {copied ? 'Copied!' : 'Copy details'}
-            </Button>
+          <AccountLinkPanel account={account} />
+          <div className="flex justify-end">
             <Button onClick={onClose}>Done</Button>
           </div>
         </div>
@@ -101,9 +115,9 @@ function CreateAmbassadorModal({
 }: {
   open: boolean
   onClose: () => void
-  onCreated: (credentials: Credentials) => void
+  onCreated: (account: BaAccount) => void
 }) {
-  const fresh = () => ({ name: '', city: '', email: '', phone: '', password: generatePassword() })
+  const fresh = () => ({ name: '', city: '', email: '', phone: '' })
   const [form, setForm] = useState(fresh)
   const [error, setError] = useState<string | null>(null)
 
@@ -116,11 +130,10 @@ function CreateAmbassadorModal({
   function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.name.trim()) return setError('Name is required.')
-    if (!validEmail(form.email)) return setError('Enter a valid email — the ambassador signs in with it.')
+    if (!validEmail(form.email)) return setError('Enter a valid email.')
     if (baEmailInUse(form.email)) return setError('Another ambassador already uses this email.')
-    if (form.password.length < 6) return setError('Password must be at least 6 characters.')
-    createBaAccount(form)
-    onCreated({ name: form.name.trim(), email: form.email.trim(), password: form.password, updated: false })
+    const account = createBaAccount(form)
+    onCreated(account)
     close()
   }
 
@@ -141,24 +154,16 @@ function CreateAmbassadorModal({
           <input value={form.city} onChange={set('city')} className={modalFieldClass} />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block font-medium text-slate-700">Email * (sign-in name)</span>
+          <span className="mb-1 block font-medium text-slate-700">Email *</span>
           <input type="email" value={form.email} onChange={set('email')} className={modalFieldClass} />
         </label>
         <label className="block text-sm">
           <span className="mb-1 block font-medium text-slate-700">Phone</span>
           <input type="tel" value={form.phone} onChange={set('phone')} className={modalFieldClass} />
         </label>
-        <PasswordField
-          value={form.password}
-          onChange={(password) => {
-            setForm({ ...form, password })
-            setError(null)
-          }}
-          onGenerate={() => {
-            setForm({ ...form, password: generatePassword() })
-            setError(null)
-          }}
-        />
+        <p className="text-xs text-slate-500">
+          After you create the ambassador, you get a personal link. They open that link to enter their account.
+        </p>
         {error && (
           <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>
         )}
@@ -173,8 +178,6 @@ function CreateAmbassadorModal({
   )
 }
 
-type BulkCredentials = { name: string; email: string; password: string }
-
 /** Download the template → fill it in → upload it → review → create many ambassador accounts at once. */
 function BulkAmbassadorModal({
   open,
@@ -183,7 +186,7 @@ function BulkAmbassadorModal({
 }: {
   open: boolean
   onClose: () => void
-  onCreated: (accounts: BaAccount[], credentials: BulkCredentials[]) => void
+  onCreated: (accounts: BaAccount[]) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
@@ -263,13 +266,9 @@ function BulkAmbassadorModal({
               <Button
                 className="w-full"
                 onClick={() => {
-                  const inputs = result.rows.map((r) => r.input)
-                  const created = createBaAccounts(inputs)
+                  const created = createBaAccounts(result.rows.map((r) => r.input))
                   close()
-                  onCreated(
-                    created,
-                    inputs.map((i) => ({ name: i.name, email: i.email, password: i.password })),
-                  )
+                  onCreated(created)
                 }}
               >
                 Create {result.rows.length} {result.rows.length === 1 ? 'ambassador' : 'ambassadors'}
@@ -282,86 +281,12 @@ function BulkAmbassadorModal({
   )
 }
 
-/** View an ambassador's login email, or set a new password for them. */
-function ManageLoginModal({ account, onClose, onSaved }: { account: BaAccount | null; onClose: () => void; onSaved: (c: Credentials) => void }) {
-  const [draft, setDraft] = useState<{ id: string; email: string; password: string } | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const current =
-    account && draft?.id === account.id
-      ? draft
-      : account
-        ? { id: account.id, email: account.email, password: generatePassword() }
-        : null
-
-  function close() {
-    setDraft(null)
-    setError(null)
-    onClose()
-  }
-
-  function save() {
-    if (!account || !current) return
-    if (!validEmail(current.email)) return setError('Enter a valid email.')
-    if (baEmailInUse(current.email, account.id)) return setError('Another ambassador already uses this email.')
-    if (current.password.length < 6) return setError('Password must be at least 6 characters.')
-    setBaLogin(account.id, current.email, current.password)
-    onSaved({ name: account.name, email: current.email.trim(), password: current.password, updated: true })
-    close()
-  }
-
-  return (
-    <Modal open={!!account} onClose={close} title={account ? `Login · ${account.name}` : 'Login'}>
-      {account && current && (
-        <div className="space-y-4 text-sm">
-          <label className="block">
-            <span className="mb-1 block font-medium text-slate-700">Email (sign-in name)</span>
-            <input
-              className={modalFieldClass}
-              type="email"
-              value={current.email}
-              onChange={(e) => {
-                setDraft({ ...current, email: e.target.value })
-                setError(null)
-              }}
-            />
-          </label>
-          <PasswordField
-            value={current.password}
-            onChange={(password) => {
-              setDraft({ ...current, password })
-              setError(null)
-            }}
-            onGenerate={() => {
-              setDraft({ ...current, password: generatePassword() })
-              setError(null)
-            }}
-          />
-          {!account.passwordHash && (
-            <p className="text-xs text-amber-700">This ambassador has no password yet, so they cannot sign in.</p>
-          )}
-          {error && (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>
-          )}
-          <div className="flex flex-col gap-2 sm:flex-row-reverse">
-            <Button onClick={save}>Save login</Button>
-            <Button variant="secondary" onClick={close}>
-              Cancel
-            </Button>
-          </div>
-        </div>
-      )}
-    </Modal>
-  )
-}
-
 function AmbassadorDetailModal({
   account,
   onClose,
-  onManageLogin,
 }: {
   account: BaAccount | null
   onClose: () => void
-  onManageLogin: (account: BaAccount) => void
 }) {
   return (
     <Modal open={!!account} onClose={onClose} title={account ? account.name : 'Ambassador'}>
@@ -384,9 +309,10 @@ function AmbassadorDetailModal({
             </p>
           )}
 
-          <Button variant="secondary" onClick={() => onManageLogin(account)}>
-            <KeyRound size={14} /> Manage login
-          </Button>
+          <div>
+            <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">Account link</div>
+            <AccountLinkPanel account={account} />
+          </div>
         </div>
       )}
     </Modal>
@@ -398,13 +324,10 @@ export function AmbassadorsPage() {
   const [q, setQ] = useState('')
   const accounts = useBaAccounts()
   const [createOpen, setCreateOpen] = useState(false)
-  const [credentials, setCredentials] = useState<Credentials | null>(null)
+  const [linkPrompt, setLinkPrompt] = useState<{ account: BaAccount; title: string } | null>(null)
   const [bulkOpen, setBulkOpen] = useState(false)
-  const [bulkCreated, setBulkCreated] = useState<{ accounts: BaAccount[]; credentials: BulkCredentials[] } | null>(
-    null,
-  )
+  const [bulkCreated, setBulkCreated] = useState<BaAccount[] | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
-  const [loginTarget, setLoginTarget] = useState<BaAccount | null>(null)
 
   const filtered = ambassadors.filter((a) => {
     const matchTab = tab === 'All' || a.status === tab
@@ -412,6 +335,7 @@ export function AmbassadorsPage() {
     return matchTab && matchQ
   })
   const filteredAccounts = accounts.filter((a) => {
+    if (isDemoBa(a.id)) return false
     const matchTab = tab === 'All' || (a.status === 'Invited' ? tab === 'Pending' : a.status === tab)
     return matchTab && a.name.toLowerCase().includes(q.toLowerCase())
   })
@@ -452,7 +376,7 @@ export function AmbassadorsPage() {
               <th className="px-4 py-3">Check-in</th>
               <th className="px-4 py-3">Check-out</th>
               <th className="px-4 py-3">Data filled</th>
-              <th className="px-4 py-3">Login</th>
+              <th className="px-4 py-3">Open link</th>
             </tr>
           </thead>
           <tbody>
@@ -476,8 +400,12 @@ export function AmbassadorsPage() {
                   <StatusBadge status="Pending" />
                 </td>
                 <td className="px-4 py-3">
-                  <Button variant="secondary" size="sm" onClick={() => setLoginTarget(a)}>
-                    <KeyRound size={13} /> Manage
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setLinkPrompt({ account: a, title: `${a.name} · account link` })}
+                  >
+                    <ExternalLink size={13} /> Open link
                   </Button>
                 </td>
               </tr>
@@ -501,7 +429,19 @@ export function AmbassadorsPage() {
                 <td className="px-4 py-3">
                   <StatusBadge status={a.dataFilled} />
                 </td>
-                <td className="px-4 py-3 text-slate-400">—</td>
+                <td className="px-4 py-3">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      const account = accounts.find((acc) => acc.id === a.id)
+                      if (!account) return
+                      setLinkPrompt({ account, title: `${a.name} · account link` })
+                    }}
+                  >
+                    <ExternalLink size={13} /> Open link
+                  </Button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -512,30 +452,34 @@ export function AmbassadorsPage() {
       <CreateAmbassadorModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}
-        onCreated={(c) => {
+        onCreated={(account) => {
           setCreateOpen(false)
-          setCredentials(c)
+          setLinkPrompt({ account, title: 'Ambassador created' })
         }}
       />
 
-      <CredentialsModal credentials={credentials} onClose={() => setCredentials(null)} />
+      <AccountLinkModal
+        account={linkPrompt?.account ?? null}
+        title={linkPrompt?.title ?? 'Account link'}
+        onClose={() => setLinkPrompt(null)}
+      />
 
       <BulkAmbassadorModal
         open={bulkOpen}
         onClose={() => setBulkOpen(false)}
-        onCreated={(created, creds) => setBulkCreated({ accounts: created, credentials: creds })}
+        onCreated={(created) => setBulkCreated(created)}
       />
 
       <Modal open={!!bulkCreated} onClose={() => setBulkCreated(null)} title="Ambassadors created">
         {bulkCreated && (
           <div className="space-y-4">
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-800">
-              {bulkCreated.accounts.length} {bulkCreated.accounts.length === 1 ? 'ambassador' : 'ambassadors'}{' '}
-              created. Download their sign-in details now — passwords cannot be looked up later.
+              {bulkCreated.length} {bulkCreated.length === 1 ? 'ambassador' : 'ambassadors'} created. Share each
+              account link — opening it enters that ambassador&apos;s account.
             </div>
-            <ul className="max-h-64 space-y-1 overflow-y-auto rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
-              {bulkCreated.accounts.map((a) => (
-                <li key={a.id}>
+            <ul className="max-h-64 space-y-2 overflow-y-auto rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              {bulkCreated.map((a) => (
+                <li key={a.id} className="flex items-center justify-between gap-3">
                   <button
                     type="button"
                     onClick={() => {
@@ -545,14 +489,30 @@ export function AmbassadorsPage() {
                     className="font-medium hover:text-brand-600"
                   >
                     {a.name}
-                  </button>{' '}
-                  <span className="text-xs text-slate-400">{a.city || '—'}</span>
+                  </button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setBulkCreated(null)
+                      setLinkPrompt({ account: a, title: `${a.name} · account link` })
+                    }}
+                  >
+                    <ExternalLink size={13} /> Open link
+                  </Button>
                 </li>
               ))}
             </ul>
             <div className="flex flex-col gap-2 sm:flex-row-reverse">
-              <Button className="w-full" onClick={() => void downloadBaCredentials(bulkCreated.credentials)}>
-                <Download size={14} /> Download sign-in details
+              <Button
+                className="w-full"
+                onClick={() =>
+                  void downloadBaLinks(
+                    bulkCreated.map((a) => ({ name: a.name, email: a.email, url: baAccessUrl(a) })),
+                  )
+                }
+              >
+                <Download size={14} /> Download account links
               </Button>
               <Button variant="secondary" onClick={() => setBulkCreated(null)}>
                 Done
@@ -565,19 +525,6 @@ export function AmbassadorsPage() {
       <AmbassadorDetailModal
         account={accounts.find((a) => a.id === detailId) ?? null}
         onClose={() => setDetailId(null)}
-        onManageLogin={(a) => {
-          setDetailId(null)
-          setLoginTarget(a)
-        }}
-      />
-
-      <ManageLoginModal
-        account={loginTarget}
-        onClose={() => setLoginTarget(null)}
-        onSaved={(c) => {
-          setLoginTarget(null)
-          setCredentials(c)
-        }}
       />
     </div>
   )

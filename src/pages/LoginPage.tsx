@@ -4,7 +4,7 @@ import { roleMeta, useRole } from '../context/AppContext'
 import { useBrand } from '../context/BrandContext'
 import { Button } from '../components/ui'
 import { authenticate, emailInUse, signIn, signOut } from '../lib/supervisors'
-import { authenticateBa, baEmailInUse, baSignIn, baSignOut } from '../lib/baAccounts'
+import { baEmailInUse, baSignOut } from '../lib/baAccounts'
 
 export function LoginPage() {
   const navigate = useNavigate()
@@ -30,16 +30,9 @@ export function LoginPage() {
       return
     }
 
-    // An email that belongs to a Brand Ambassador must sign in with their password
+    // Ambassadors do not use this form. They open the personal link Head Office gives them.
     if (baEmailInUse(email)) {
-      const account = authenticateBa(email, password)
-      if (!account) {
-        setError('Incorrect email or password.')
-        return
-      }
-      setRole('ba')
-      baSignIn(account.id)
-      navigate(roleMeta.ba.home)
+      setError('Brand Ambassadors open their personal account link. Ask Head Office for it.')
       return
     }
 

@@ -1,15 +1,15 @@
 import { useSyncExternalStore } from 'react'
+import { ambassadors } from '../data/mock'
 import type { AnswerMetrics, AssessmentResult } from './baAssessment'
-import { generatePassword, hashPassword } from './supervisors'
 
 /**
- * Ambassadors Head Office creates, each with their own sign-in (set at creation time, no
- * invite link). A newly created BA can only use Training — video, then verbal assessment —
- * until they are certified; after that they sign in to the full BA app.
+ * Ambassadors Head Office creates. Each one gets a personal account link — there is no
+ * email/password sign-in. Opening the link signs that ambassador into their account.
+ * A newly created BA can only use Training — video, then verbal assessment — until they
+ * are certified; after that the same link opens the full BA app.
  *
  * There is no backend, so accounts and the signed-in session live in this browser's
- * localStorage. Passwords are salted and hashed rather than stored as text, but this is
- * demo-grade access control: anyone with access to the browser can read or change the data.
+ * localStorage. Anyone with the link can open that account on this browser.
  */
 
 export type BaStatus = 'Invited' | 'Training' | 'Certified'
@@ -26,22 +26,103 @@ export type BaAccount = {
   /** Answers submitted so far (one per assessment question) */
   answers: AnswerMetrics[]
   result: AssessmentResult | null
-  passwordSalt: string
-  passwordHash: string
+  /** Secret used in the personal account link. */
+  accessToken: string
 }
 
-export { generatePassword }
+function newAccessToken() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** Sample ambassadors from the Head Office table. Their links stay the same on every device. */
+const DEMO_ACCESS_TOKENS: Record<string, string> = {
+  ayesha: 'demo-ayesha',
+  hamza: 'demo-hamza',
+  sara: 'demo-sara',
+  fatima: 'demo-fatima',
+  bilal: 'demo-bilal',
+}
+
+function demoAccountStatus(status: string): BaStatus {
+  if (status === 'Certified' || status === 'Deployed') return 'Certified'
+  if (status === 'Training') return 'Training'
+  return 'Invited'
+}
+
+function demoAccounts(): BaAccount[] {
+  return ambassadors.map((a) => ({
+    id: a.id,
+    name: a.name,
+    city: a.city,
+    email: `${a.id}@tapal.demo`,
+    phone: '',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    status: demoAccountStatus(a.status),
+    videoWatched: a.status !== 'Pending',
+    answers: [],
+    result: null,
+    accessToken: DEMO_ACCESS_TOKENS[a.id] ?? `demo-${a.id}`,
+  }))
+}
+
+export function isDemoBa(id: string) {
+  return ambassadors.some((a) => a.id === id)
+}
+
+function withDemoAccounts(list: BaAccount[]): BaAccount[] {
+  const ids = new Set(list.map((a) => a.id))
+  const missing = demoAccounts().filter((d) => !ids.has(d.id))
+  return missing.length ? [...list, ...missing] : list
+}
 
 const STORAGE_KEY = 'ba-accounts-v1'
 const SESSION_KEY = 'ba-session-v1'
+
+function normalizeAccount(raw: Partial<BaAccount> & { passwordHash?: string }): BaAccount | null {
+  if (!raw.id || !raw.name) return null
+  return {
+    id: raw.id,
+    name: raw.name,
+    city: raw.city ?? '',
+    email: raw.email ?? '',
+    phone: raw.phone ?? '',
+    createdAt: raw.createdAt ?? new Date().toISOString(),
+    status: raw.status ?? 'Invited',
+    videoWatched: !!raw.videoWatched,
+    answers: Array.isArray(raw.answers) ? raw.answers : [],
+    result: raw.result ?? null,
+    accessToken: raw.accessToken || newAccessToken(),
+  }
+}
 
 function load(): BaAccount[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? (parsed as BaAccount[]) : []
+    if (!Array.isArray(parsed)) return withDemoAccounts([])
+    const list = withDemoAccounts(
+      parsed
+        .map((item) => normalizeAccount(item as Partial<BaAccount>))
+        .filter((a): a is BaAccount => !!a),
+    )
+    const needsSave =
+      list.length !== parsed.length ||
+      parsed.some(
+        (item) =>
+          item &&
+          typeof item === 'object' &&
+          (!('accessToken' in item) || !item.accessToken || 'passwordHash' in item),
+      )
+    if (needsSave) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+      } catch {
+        // keep the in-memory list
+      }
+    }
+    return list
   } catch {
-    return []
+    return withDemoAccounts([])
   }
 }
 
@@ -80,18 +161,13 @@ export function useBaAccounts() {
 
 const normEmail = (email: string) => email.trim().toLowerCase()
 
-/** True when another ambassador already signs in with this email. */
+/** True when another ambassador already uses this email. */
 export function baEmailInUse(email: string, exceptId?: string) {
   const e = normEmail(email)
   return !!e && accounts.some((a) => a.id !== exceptId && normEmail(a.email) === e)
 }
 
-function newCredentials(password: string) {
-  const salt = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('')
-  return { passwordSalt: salt, passwordHash: hashPassword(salt, password) }
-}
-
-export type BaAccountFields = { name: string; city: string; email: string; phone: string; password: string }
+export type BaAccountFields = { name: string; city: string; email: string; phone: string }
 
 function toAccount(fields: BaAccountFields): BaAccount {
   return {
@@ -105,8 +181,21 @@ function toAccount(fields: BaAccountFields): BaAccount {
     videoWatched: false,
     answers: [],
     result: null,
-    ...newCredentials(fields.password),
+    accessToken: newAccessToken(),
   }
+}
+
+export function baAccessPath(token: string) {
+  return `/ba/open/${token}`
+}
+
+/** Full URL the ambassador opens to enter their account. */
+export function baAccessUrl(account: BaAccount) {
+  return `${window.location.origin}${baAccessPath(account.accessToken)}`
+}
+
+export function findBaByAccessToken(token: string): BaAccount | null {
+  return accounts.find((a) => a.accessToken === token) ?? null
 }
 
 export function createBaAccount(fields: BaAccountFields): BaAccount {
@@ -126,19 +215,7 @@ export function updateBaAccount(id: string, patch: Partial<BaAccount>) {
   commit(accounts.map((a) => (a.id === id ? { ...a, ...patch } : a)))
 }
 
-/** Sets (or resets) the email and password an ambassador signs in with. */
-export function setBaLogin(id: string, email: string, password: string) {
-  commit(accounts.map((a) => (a.id === id ? { ...a, email: email.trim(), ...newCredentials(password) } : a)))
-}
-
-// ─── Signing in ──────────────────────────────────────────────────────────────
-
-/** The ambassador these credentials belong to, or null. */
-export function authenticateBa(email: string, password: string): BaAccount | null {
-  const found = accounts.find((a) => normEmail(a.email) === normEmail(email))
-  if (!found || !found.passwordHash) return null
-  return hashPassword(found.passwordSalt, password) === found.passwordHash ? found : null
-}
+// ─── Signing in (via the personal account link) ─────────────────────────────
 
 const sessionListeners = new Set<() => void>()
 let sessionCache: string | null | undefined
@@ -197,7 +274,6 @@ const COLUMNS = [
   { key: 'city', header: 'City', width: 16 },
   { key: 'email', header: 'Email *', width: 28 },
   { key: 'phone', header: 'Phone', width: 18 },
-  { key: 'password', header: 'Password', width: 18 },
 ] as const
 
 /** Downloads the .xlsx a user fills in to create many ambassador accounts at once. */
@@ -210,13 +286,13 @@ export async function downloadAmbassadorTemplate() {
     ['How to fill the ambassador template'],
     [],
     [`1. Add one ambassador per row on the "${SHEET}" sheet, starting on row 2. Do not change the header row.`],
-    ['2. Name and Email are required — the BA signs in with their email. City and Phone are optional.'],
-    ['3. Password is optional. Leave it blank and one is generated automatically; or set your own (6+ characters).'],
+    ['2. Name and Email are required. City and Phone are optional. There is no password.'],
+    ['3. Each ambassador gets a personal account link after creation. They open that link to enter their account.'],
     ['4. An email already used by another ambassador is skipped.'],
-    ['5. Save the file, then upload it on the Ambassadors page. Sign-in details can be downloaded after creation.'],
+    ['5. Save the file, then upload it on the Ambassadors page. Account links can be downloaded after creation.'],
     [],
     COLUMNS.map((c) => c.header),
-    ['Ayesha Khan', 'Lahore', 'ayesha.khan@example.com', '0300-1234567', ''],
+    ['Ayesha Khan', 'Lahore', 'ayesha.khan@example.com', '0300-1234567'],
   ])
   help['!cols'] = COLUMNS.map((c) => ({ wch: c.width }))
 
@@ -271,12 +347,10 @@ export async function parseAmbassadorFile(file: File): Promise<AmbassadorParseRe
     const city = cell(r, 'city')
     const email = cell(r, 'email')
     const phone = cell(r, 'phone')
-    const password = cell(r, 'password') || generatePassword()
     const problems: string[] = []
     if (!name) problems.push('Name is required')
     if (!email) problems.push('Email is required')
     else if (!validEmail(email)) problems.push(`Email looks invalid (found "${email}")`)
-    if (password.length < 6) problems.push('Password must be at least 6 characters')
 
     if (email) {
       const key = normEmail(email)
@@ -289,23 +363,22 @@ export async function parseAmbassadorFile(file: File): Promise<AmbassadorParseRe
       errors.push(`Row ${rowNo}${name ? ` (${name})` : ''}: ${problems.join('; ')}.`)
       return
     }
-    rows.push({ row: rowNo, input: { name, city, email, phone, password } })
+    rows.push({ row: rowNo, input: { name, city, email, phone } })
   })
 
   if (rows.length === 0 && errors.length === 0) errors.push('No ambassadors found. Add one per row under the header.')
   return { rows, errors }
 }
 
-/** Downloads a sheet of ambassador sign-in details, shown only once — passwords are hashed after this. */
-export async function downloadBaCredentials(list: { name: string; email: string; password: string }[]) {
+/** Downloads each ambassador's personal account link. */
+export async function downloadBaLinks(list: { name: string; email: string; url: string }[]) {
   const XLSX = await import('xlsx')
-  const url = `${window.location.origin}/login`
   const sheet = XLSX.utils.aoa_to_sheet([
-    ['Name', 'Email', 'Password', 'Sign in at'],
-    ...list.map((a) => [a.name, a.email, a.password, url]),
+    ['Name', 'Email', 'Account link'],
+    ...list.map((a) => [a.name, a.email, a.url]),
   ])
-  sheet['!cols'] = [{ wch: 24 }, { wch: 28 }, { wch: 18 }, { wch: 36 }]
+  sheet['!cols'] = [{ wch: 24 }, { wch: 28 }, { wch: 56 }]
   const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, sheet, 'Sign-in details')
-  XLSX.writeFile(wb, 'Tapal_Ambassador_Sign_In_Details.xlsx')
+  XLSX.utils.book_append_sheet(wb, sheet, 'Account links')
+  XLSX.writeFile(wb, 'Tapal_Ambassador_Account_Links.xlsx')
 }

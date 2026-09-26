@@ -1,10 +1,13 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
-import { RotateCcw, Search } from 'lucide-react'
-import { Card, CardHeader, cn, KpiCard, StatusBadge, TableScroll } from '../../components/ui'
+import { FileSpreadsheet, RotateCcw, Search } from 'lucide-react'
+import { Button, Card, CardHeader, cn, KpiCard, StatusBadge, TableScroll } from '../../components/ui'
+import { BulkTargetModal } from './AmbassadorPages'
 import {
   aggregateBaPerformance,
+  applySkuFilter,
   baPerformanceMonths,
+  baPerformanceSkus,
   baPerformanceTowns,
   collectPeriodRecords,
   getStoresForTown,
@@ -30,6 +33,12 @@ import {
   defaultChartOptions,
 } from '../../lib/chartjs'
 import type { ChartData, ChartOptions } from 'chart.js'
+import {
+  achievementPct,
+  currentMonthKey,
+  formatTargetMonth,
+  useBaTargets,
+} from '../../lib/baTargets'
 
 function EmptyRow({ cols }: { cols: number }) {
   return (
@@ -44,24 +53,13 @@ function EmptyRow({ cols }: { cols: number }) {
 type FilterPanelProps = {
   title: string
   options: string[]
-  value: string | null
-  onChange: (value: string | null) => void
-  allowAll?: boolean
-  allLabel?: string
+  value: string[]
+  onChange: (value: string[]) => void
   fill?: boolean
   className?: string
 }
 
-function FilterPanel({
-  title,
-  options,
-  value,
-  onChange,
-  allowAll,
-  allLabel = 'All',
-  fill,
-  className,
-}: FilterPanelProps) {
+function FilterPanel({ title, options, value, onChange, fill, className }: FilterPanelProps) {
   const [query, setQuery] = useState('')
 
   const filtered = useMemo(() => {
@@ -69,6 +67,10 @@ function FilterPanel({
     if (!q) return options
     return options.filter((o) => o.toLowerCase().includes(q))
   }, [options, query])
+
+  function toggle(option: string) {
+    onChange(value.includes(option) ? value.filter((item) => item !== option) : [...value, option])
+  }
 
   return (
     <div
@@ -80,17 +82,22 @@ function FilterPanel({
     >
       <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/60 px-3 py-2">
         <span className="text-[11px] font-medium tracking-wide text-slate-500 uppercase">{title}</span>
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] font-medium text-slate-400">
+            {value.length === 0 ? 'All' : `${value.length} selected`}
+          </span>
         <button
           type="button"
           title="Clear filter"
           onClick={() => {
-            onChange(allowAll ? null : options[0] ?? null)
+            onChange([])
             setQuery('')
           }}
           className="rounded-md p-1 text-slate-400 transition hover:bg-white hover:text-slate-600"
         >
           <RotateCcw size={12} />
         </button>
+        </div>
       </div>
       <div className="border-b border-slate-50 px-2 py-1.5">
         <div className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2 py-1.5">
@@ -109,33 +116,22 @@ function FilterPanel({
           fill ? 'max-h-52 sm:max-h-60 lg:max-h-72' : 'max-h-36',
         )}
       >
-        {allowAll && (
-          <button
-            type="button"
-            onClick={() => onChange(null)}
-            className={`block w-full px-3 py-2 text-left text-xs transition ${
-              value === null
-                ? 'bg-brand-50/80 text-brand-700'
-                : 'text-slate-600 hover:bg-slate-50'
-            }`}
-          >
-            {allLabel}
-          </button>
-        )}
-        {filtered.map((option) => (
-          <button
-            key={option}
-            type="button"
-            onClick={() => onChange(option)}
-            className={`block w-full px-3 py-2 text-left text-xs transition ${
-              value === option
-                ? 'bg-brand-50/80 text-brand-700'
-                : 'text-slate-600 hover:bg-slate-50'
-            }`}
-          >
-            {option}
-          </button>
-        ))}
+        {filtered.map((option) => {
+          const selected = value.includes(option)
+          return (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => toggle(option)}
+              className={`block w-full px-3 py-2 text-left text-xs transition ${
+                selected ? 'bg-brand-50/80 text-brand-700' : 'text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              {option}
+            </button>
+          )
+        })}
         {filtered.length === 0 && (
           <p className="px-3 py-4 text-center text-xs text-slate-400">No matches</p>
         )}
@@ -148,20 +144,25 @@ const CHART_HEIGHT = 'h-[220px]'
 
 function ChartCard({
   title,
+  action,
   children,
   className,
+  plotClassName = CHART_HEIGHT,
 }: {
   title: string
+  action?: ReactNode
   children: ReactNode
   className?: string
+  plotClassName?: string
 }) {
   return (
     <Card padding={false} className={cn('h-full', className)}>
-      <div className="flex h-11 shrink-0 items-center border-b border-slate-50 px-4">
+      <div className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-50 px-4 py-2">
         <h3 className="truncate text-sm font-medium text-slate-700">{title}</h3>
+        {action}
       </div>
       <div className="p-3 sm:p-4">
-        <div className={cn('relative w-full', CHART_HEIGHT)}>{children}</div>
+        <div className={cn('relative w-full', plotClassName)}>{children}</div>
       </div>
     </Card>
   )
@@ -222,6 +223,16 @@ function dateRangeForMonth(monthName: string) {
   return { from: dateInputValue(from), to: dateInputValue(to) }
 }
 
+function dateRangeForMonths(months: string[]) {
+  const indexes = months
+    .map((month) => MONTH_ORDER.indexOf(month))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)
+  const first = dateRangeForMonth(MONTH_ORDER[indexes[0]])
+  const last = dateRangeForMonth(MONTH_ORDER[indexes[indexes.length - 1]])
+  return { from: first.from, to: last.to }
+}
+
 function parseDateInput(value: string) {
   const [y, m, d] = value.split('-').map(Number)
   if (!y || !m || !d) return null
@@ -253,12 +264,32 @@ function dateRangeForPreset(preset: DatePreset, customFrom: string, customTo: st
 }
 
 export function BaPerformanceDashboardPage() {
-  const [town, setTown] = useState<string | null>(null)
-  const [month, setMonth] = useState<string | null>(() => monthForPreset('mtd'))
-  const [store, setStore] = useState<string | null>(null)
+  const [towns, setTowns] = useState<string[]>([])
+  const [months, setMonths] = useState<string[]>(() => {
+    const month = monthForPreset('mtd')
+    return month ? [month] : []
+  })
+  const [stores, setStores] = useState<string[]>([])
+  const [skus, setSkus] = useState<string[]>([])
   const [datePreset, setDatePreset] = useState<DatePreset>('mtd')
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
+  const baTargets = useBaTargets()
+  const targetMonths = useMemo(() => {
+    const keys = new Set(baTargets.map((row) => row.month))
+    keys.add(currentMonthKey())
+    return [...keys].sort((a, b) => b.localeCompare(a))
+  }, [baTargets])
+  const [targetMonth, setTargetMonth] = useState(currentMonthKey)
+  const [targetUploadOpen, setTargetUploadOpen] = useState(false)
+  const targetRows = useMemo(
+    () =>
+      baTargets
+        .filter((row) => row.month === targetMonth)
+        .slice()
+        .sort((a, b) => a.baName.localeCompare(b.baName)),
+    [baTargets, targetMonth],
+  )
 
   const range = useMemo(
     () => dateRangeForPreset(datePreset, customFrom, customTo),
@@ -271,18 +302,29 @@ export function BaPerformanceDashboardPage() {
     () => (range ? periodsForRange(range.start, range.end) : null),
     [range],
   )
-  const periods = useMemo<DataPeriod[]>(
-    () => rangePeriods?.periods ?? [{ month, share: null }],
-    [rangePeriods, month],
-  )
+  const periods = useMemo<DataPeriod[]>(() => {
+    const base = rangePeriods?.periods ?? (months.length ? months.map((month) => ({ month, share: null })) : [{ month: null, share: null }])
+    if (!months.length) return base
+    return base.filter((period) => period.month !== null && months.includes(period.month))
+  }, [rangePeriods, months])
   const storeOptions = useMemo(
-    () => getStoresForTown(town, periods.some((p) => p.month === null) ? null : periods.map((p) => p.month as string)),
-    [town, periods],
+    () =>
+      getStoresForTown(
+        towns,
+        periods.some((p) => p.month === null) ? null : periods.map((p) => p.month as string),
+      ),
+    [towns, periods],
   )
 
+  const scopeTown = towns.length === 0 ? null : towns.length === 1 ? towns[0] : towns.join(', ')
+
   const data = useMemo(
-    () => aggregateBaPerformance(collectPeriodRecords({ town, store }, periods), town),
-    [town, store, periods],
+    () =>
+      aggregateBaPerformance(
+        applySkuFilter(collectPeriodRecords({ towns, stores }, periods), skus),
+        scopeTown,
+      ),
+    [towns, stores, periods, skus, scopeTown],
   )
 
   // Town/Store filters narrow attendance the same way they narrow sales — by matching the
@@ -290,36 +332,44 @@ export function BaPerformanceDashboardPage() {
   // or store with no attendance records simply shows no data, same as sales.
   const attendance = useMemo(() => {
     const all = range ? attendanceForRange(range) : []
-    return all.filter((r) => (!town || r.city === town) && (!store || r.store === store))
-  }, [range, town, store])
+    return all.filter(
+      (r) =>
+        (towns.length === 0 || towns.includes(r.city)) &&
+        (stores.length === 0 || stores.includes(r.store)) &&
+        (months.length === 0 || months.includes(MONTH_ORDER[r.date.getMonth()])),
+    )
+  }, [range, towns, stores, months])
   const cityStatus = useMemo(
-    () => (range ? baStatusByCity(range, { city: town, store }) : null),
-    [range, town, store],
+    () => (range ? baStatusByCity(range, { cities: towns, stores, months }) : null),
+    [range, towns, stores, months],
   )
   const isSingleDay = range ? daysInRange(range) === 1 : false
   const attendanceTable = useMemo(
     () => attendanceRows(attendance, isSingleDay),
     [attendance, isSingleDay],
   )
-  const [hoursCity, setHoursCity] = useState<string | null>(null)
+  const [hoursCities, setHoursCities] = useState<string[]>([])
+  const [salesTrend, setSalesTrend] = useState<'wow' | 'mom' | 'yoy'>('wow')
   const workingHours = useMemo(
-    () => (range ? workingHoursSeries(attendance, range, hoursCity) : null),
-    [attendance, range, hoursCity],
+    () => (range ? workingHoursSeries(attendance, range, hoursCities) : null),
+    [attendance, range, hoursCities],
   )
 
   function applyDatePreset(preset: DatePreset, from = customFrom, to = customTo) {
     setDatePreset(preset)
     if (preset === 'custom') return
-    setMonth(monthForPreset(preset, from, to))
-    setStore(null)
+    const month = monthForPreset(preset, from, to)
+    setMonths(month ? [month] : [])
+    setStores([])
   }
 
   function handleCustomFrom(value: string) {
     setCustomFrom(value)
     setDatePreset('custom')
     if (value && customTo) {
-      setMonth(monthForPreset('custom', value, customTo))
-      setStore(null)
+      const month = monthForPreset('custom', value, customTo)
+      setMonths(month ? [month] : [])
+      setStores([])
     }
   }
 
@@ -327,30 +377,37 @@ export function BaPerformanceDashboardPage() {
     setCustomTo(value)
     setDatePreset('custom')
     if (customFrom && value) {
-      setMonth(monthForPreset('custom', customFrom, value))
-      setStore(null)
+      const month = monthForPreset('custom', customFrom, value)
+      setMonths(month ? [month] : [])
+      setStores([])
     }
   }
 
-  function handleTownChange(next: string | null) {
-    setTown(next)
-    setStore(null)
+  function handleTownChange(next: string[]) {
+    setTowns(next)
+    setStores([])
   }
 
-  function handleMonthChange(next: string | null) {
-    setMonth(next)
-    setStore(null)
+  function handleMonthChange(next: string[]) {
+    setMonths(next)
+    setStores([])
     setDatePreset('custom')
-    // A month picked by hand replaces any date range, so the whole month is shown —
-    // and attendance/working-hours pick it up too, since they follow the same range.
-    if (next) {
-      const { from, to } = dateRangeForMonth(next)
+    // Months picked by hand replace any date range. The span runs from the earliest
+    // selected month to the latest; unselected months inside that span stay excluded.
+    if (next.length) {
+      const { from, to } = dateRangeForMonths(next)
       setCustomFrom(from)
       setCustomTo(to)
     } else {
       setCustomFrom('')
       setCustomTo('')
     }
+  }
+
+  function toggleHoursCity(city: string) {
+    setHoursCities((current) =>
+      current.includes(city) ? current.filter((item) => item !== city) : [...current, city],
+    )
   }
 
   const dateRangeLabel = useMemo(() => {
@@ -426,31 +483,108 @@ export function BaPerformanceDashboardPage() {
     [],
   )
 
+  const trendRecords = useMemo(() => {
+    const periodList: DataPeriod[] =
+      salesTrend === 'wow'
+        ? periods
+        : baPerformanceMonths.map((month) => ({ month, share: null }))
+    return applySkuFilter(collectPeriodRecords({ towns, stores }, periodList), skus)
+  }, [salesTrend, periods, towns, stores, skus])
+
+  const trendSeries = useMemo(() => {
+    if (salesTrend === 'wow') {
+      const buckets = new Map<string, { sales: number; target: number; order: number }>()
+      for (const record of trendRecords) {
+        const weeks = [...record.weekSales].sort((a, b) => a.week - b.week)
+        if (!weeks.length) continue
+        const weekTarget = record.targetKg / weeks.length
+        const monthIndex = MONTH_ORDER.indexOf(record.month)
+        for (const week of weeks) {
+          const key = `${record.month.slice(0, 3)} W${week.week}`
+          const current = buckets.get(key) ?? { sales: 0, target: 0, order: monthIndex * 10 + week.week }
+          current.sales += week.sales
+          current.target += weekTarget
+          buckets.set(key, current)
+        }
+      }
+      const points = [...buckets.entries()].sort((a, b) => a[1].order - b[1].order)
+      return {
+        labels: points.map(([label]) => label),
+        sales: points.map(([, point]) => Math.round(point.sales * 10) / 10),
+        target: points.map(([, point]) => Math.round(point.target * 10) / 10),
+      }
+    }
+
+    const buckets = new Map<string, { sales: number; target: number }>()
+    for (const record of trendRecords) {
+      const current = buckets.get(record.month) ?? { sales: 0, target: 0 }
+      current.sales += record.salesKg
+      current.target += record.targetKg
+      buckets.set(record.month, current)
+    }
+    const points = baPerformanceMonths
+      .filter((month) => buckets.has(month))
+      .map((month) => ({ month, ...buckets.get(month)! }))
+    if (salesTrend === 'yoy') {
+      let sales = 0
+      let target = 0
+      return {
+        labels: points.map((point) => point.month.slice(0, 3)),
+        sales: points.map((point) => {
+          sales += point.sales
+          return Math.round(sales * 10) / 10
+        }),
+        target: points.map((point) => {
+          target += point.target
+          return Math.round(target * 10) / 10
+        }),
+      }
+    }
+    return {
+      labels: points.map((point) => point.month.slice(0, 3)),
+      sales: points.map((point) => Math.round(point.sales * 10) / 10),
+      target: points.map((point) => Math.round(point.target * 10) / 10),
+    }
+  }, [trendRecords, salesTrend])
+
   const weekChart = useMemo<ChartData<'line'>>(
     () => ({
-      labels: data.weekSales.map((w) => `W${w.week}`),
+      labels: trendSeries.labels,
       datasets: [
         {
           label: 'Sales',
-          data: data.weekSales.map((w) => w.sales),
+          data: trendSeries.sales,
           borderColor: chartGreen,
           backgroundColor: chartGreen,
           pointBackgroundColor: chartGreen,
           pointRadius: 3,
           pointHoverRadius: 5,
-          pointHoverBackgroundColor: chartGold,
           tension: 0.35,
           borderWidth: 2,
         },
+        {
+          label: 'Target',
+          data: trendSeries.target,
+          borderColor: chartGold,
+          backgroundColor: chartGold,
+          pointBackgroundColor: chartGold,
+          pointRadius: 2,
+          borderDash: [5, 4],
+          borderWidth: 2,
+          tension: 0.25,
+        },
       ],
     }),
-    [data.weekSales],
+    [trendSeries],
   )
 
   const weekOptions = useMemo<ChartOptions<'line'>>(
     () => ({
       ...defaultChartOptions,
-      plugins: { ...defaultChartOptions.plugins, legend: { display: false } },
+      plugins: {
+        ...defaultChartOptions.plugins,
+        legend: { ...defaultChartOptions.plugins.legend, position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } },
+      },
       scales: {
         x: scaleDefaults,
         y: { ...scaleDefaults, beginAtZero: true },
@@ -611,42 +745,23 @@ export function BaPerformanceDashboardPage() {
         <KpiCard label="On Break BAs" value={cityStatus?.break ?? '—'} hint={baStatusHint} />
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-4 gap-3">
         <KpiCard label="Customers Intercepted" value={data.customersIntercepted.toLocaleString()} />
         <KpiCard label="Productive Calls" value={data.productiveCalls.toLocaleString()} />
         <KpiCard label="Productive %" value={`${data.productivePct}%`} />
+        <KpiCard label="Achievement" value={`${data.achievementPct}%`} />
         <KpiCard label="Target (Kg)" value={data.targetKg.toLocaleString()} />
         <KpiCard label="Sales (Kg)" value={data.salesKg.toLocaleString()} />
-        <KpiCard label="Achievement" value={`${data.achievementPct}%`} />
+        <KpiCard label="Target (Units)" value={data.targetUnits.toLocaleString()} />
+        <KpiCard label="Units sold" value={data.unitsSold.toLocaleString()} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)] lg:grid-rows-[auto_auto]">
-        <aside className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:flex lg:min-h-0 lg:flex-col">
-          <FilterPanel
-            title="Town"
-            options={baPerformanceTowns}
-            value={town}
-            onChange={handleTownChange}
-            allowAll
-            allLabel="All towns"
-          />
-          <FilterPanel
-            title="Month"
-            options={baPerformanceMonths}
-            value={month}
-            onChange={handleMonthChange}
-            allowAll
-            allLabel="All months"
-          />
-          <FilterPanel
-            title="Store"
-            options={storeOptions}
-            value={store}
-            onChange={setStore}
-            allowAll
-            allLabel="All stores"
-            fill
-          />
+        <aside className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:flex lg:min-h-0 lg:flex-col">
+          <FilterPanel title="Town" options={baPerformanceTowns} value={towns} onChange={handleTownChange} />
+          <FilterPanel title="Month" options={baPerformanceMonths} value={months} onChange={handleMonthChange} />
+          <FilterPanel title="Store" options={storeOptions} value={stores} onChange={setStores} />
+          <FilterPanel title="SKU List" options={baPerformanceSkus} value={skus} onChange={setSkus} fill />
         </aside>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:col-start-2 lg:row-start-1 lg:items-stretch">
@@ -660,19 +775,114 @@ export function BaPerformanceDashboardPage() {
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:col-start-2 lg:row-start-2 lg:grid-cols-3 lg:items-stretch">
-          <ChartCard title="Week-wise sales (Kg)">
+          <ChartCard
+            title={
+              salesTrend === 'wow'
+                ? 'Week-wise sales (Kg)'
+                : salesTrend === 'mom'
+                  ? 'Month-wise sales (Kg)'
+                  : 'Year-to-date sales (Kg)'
+            }
+            action={
+              <div className="flex gap-1 rounded-lg bg-slate-100 p-0.5">
+                {(
+                  [
+                    ['wow', 'WoW'],
+                    ['mom', 'MoM'],
+                    ['yoy', 'YoY'],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setSalesTrend(id)}
+                    className={cn(
+                      'rounded-md px-2 py-1 text-[11px] font-semibold transition',
+                      salesTrend === id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            }
+          >
             <Line data={weekChart} options={weekOptions} />
           </ChartCard>
 
-          <ChartCard title="Top 5 stores">
+          <ChartCard title="Top 10 stores" plotClassName="h-[320px]">
             <Bar data={topStoresChart} options={horizontalBarOptions} />
           </ChartCard>
 
-          <ChartCard title="Top 5 SKUs">
+          <ChartCard title="Top 10 SKUs" plotClassName="h-[320px]">
             <Bar data={topSkusChart} options={horizontalBarOptions} />
           </ChartCard>
         </div>
       </div>
+
+      <Card padding={false}>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-50 px-4 py-3 sm:px-5">
+          <CardHeader
+            title="Target vs achievement"
+            subtitle="Ambassador target and sales set by Head Office"
+          />
+          <Button size="sm" variant="secondary" onClick={() => setTargetUploadOpen(true)}>
+            <FileSpreadsheet size={14} /> Upload targets
+          </Button>
+          <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+            Month
+            <select
+              value={targetMonth}
+              onChange={(e) => setTargetMonth(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-800 outline-none focus:border-brand-500"
+            >
+              {targetMonths.map((month) => (
+                <option key={month} value={month}>
+                  {formatTargetMonth(month)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <TableScroll minWidth={640}>
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
+              <tr>
+                <th className="px-4 py-3">Ambassador</th>
+                <th className="px-4 py-3">Target (Kg)</th>
+                <th className="px-4 py-3">Sales (Kg)</th>
+                <th className="px-4 py-3">Achievement</th>
+              </tr>
+            </thead>
+            <tbody>
+              {targetRows.map((row) => {
+                const pct = achievementPct(row.targetKg, row.salesKg)
+                return (
+                  <tr key={`${row.baId}-${row.month}`} className="border-t border-slate-100">
+                    <td className="px-4 py-3 font-medium text-slate-900">{row.baName}</td>
+                    <td className="px-4 py-3 tabular-nums">{row.targetKg.toLocaleString()}</td>
+                    <td className="px-4 py-3 tabular-nums">{row.salesKg.toLocaleString()}</td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={
+                          pct >= 100
+                            ? 'font-semibold text-emerald-600'
+                            : pct >= 80
+                              ? 'font-semibold text-amber-600'
+                              : 'font-semibold text-rose-600'
+                        }
+                      >
+                        {pct}%
+                      </span>
+                    </td>
+                  </tr>
+                )
+              })}
+              {targetRows.length === 0 && <EmptyRow cols={4} />}
+            </tbody>
+          </table>
+        </TableScroll>
+      </Card>
 
       <Card padding={false}>
         <div className="border-b border-slate-50 px-4 py-3 sm:px-5">
@@ -775,21 +985,30 @@ export function BaPerformanceDashboardPage() {
                   }`
           }`}
           action={
-            <label className="flex items-center gap-2 text-xs">
-              <span className="font-medium text-slate-500">City</span>
-              <select
-                value={hoursCity ?? ''}
-                onChange={(e) => setHoursCity(e.target.value || null)}
-                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 outline-none focus:border-brand-500"
-              >
-                <option value="">All cities</option>
-                {baCities.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="font-medium text-slate-500">
+                City{hoursCities.length === 0 ? ' · All' : ''}
+              </span>
+              {baCities.map((city) => {
+                const selected = hoursCities.includes(city)
+                return (
+                  <button
+                    key={city}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => toggleHoursCity(city)}
+                    className={cn(
+                      'rounded-lg px-2.5 py-1.5 text-xs font-semibold transition',
+                      selected
+                        ? 'bg-brand-500 text-white shadow-sm'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200',
+                    )}
+                  >
+                    {city}
+                  </button>
+                )
+              })}
+            </div>
           }
         />
         <div className="relative h-56 sm:h-72">
@@ -802,6 +1021,7 @@ export function BaPerformanceDashboardPage() {
           )}
         </div>
       </Card>
+      <BulkTargetModal open={targetUploadOpen} onClose={() => setTargetUploadOpen(false)} />
     </div>
   )
 }

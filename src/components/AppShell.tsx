@@ -12,7 +12,9 @@ import {
   ShoppingBag,
   Trophy,
   Map,
+  ClipboardList,
   ClipboardCheck,
+  CalendarDays,
   Sparkles,
   LogOut,
   Banknote,
@@ -28,6 +30,12 @@ import { useEffect, useState } from 'react'
 import { cn } from './ui'
 import { RoleSync } from './RoleLayouts'
 import { signOut, useSupervisorSession } from '../lib/supervisors'
+import {
+  clearSupervisorNotifications,
+  mergeRemoteNotifications,
+  useSupervisorNotifications,
+} from '../lib/supervisorNotifications'
+import { enableSupervisorPush } from '../lib/supervisorPush'
 import { useBrand } from '../context/BrandContext'
 
 type NavItem = {
@@ -41,6 +49,7 @@ type NavItem = {
 const headOfficeNav: NavItem[] = [
   { to: '/ho/dashboard', label: 'Campaign Metrics', icon: LayoutDashboard, end: true, section: 'Command' },
   { to: '/ho/ba-performance', label: 'Dashboard', icon: BarChart3, section: 'Command' },
+  { to: '/ho/daily-reports', label: 'Daily Reports', icon: ClipboardList, section: 'Command' },
   { to: '/ho/ambassadors', label: 'Ambassadors', icon: Users, section: 'Operations' },
   { to: '/ho/stores', label: 'Stores', icon: Store, section: 'Operations' },
   { to: '/ho/supervisors', label: 'Supervisors', icon: UserCog, section: 'Operations' },
@@ -74,7 +83,10 @@ const managerNav: NavItem[] = [
 const supervisorNav: NavItem[] = [
   { to: '/supervisor', label: 'Overview', icon: LayoutDashboard, end: true, section: 'My stores' },
   { to: '/supervisor/stores', label: 'Store Characteristics', icon: Store, section: 'My stores' },
+  { to: '/supervisor/journey', label: 'Journey plan', icon: CalendarDays, section: 'My stores' },
   { to: '/supervisor/bas', label: 'BA Performance', icon: Users, section: 'My stores' },
+  { to: '/supervisor/submissions', label: 'BA submissions', icon: ClipboardCheck, section: 'My stores' },
+  { to: '/supervisor/complaints', label: 'Complaints', icon: MessageSquareWarning, section: 'My stores' },
 ]
 
 type ShellKind = 'headOffice' | 'admin' | 'storeManager' | 'supervisor'
@@ -112,6 +124,7 @@ const shellConfig: Record<
 const titles: Record<string, string> = {
   '/ho/dashboard': 'Campaign Metrics',
   '/ho/ba-performance': 'Dashboard',
+  '/ho/daily-reports': 'BA Daily Reports',
   '/ho/ambassadors': 'Ambassadors',
   '/ho/ambassadors/training': 'Training Content',
   '/ho/stores': 'Store Management',
@@ -120,7 +133,10 @@ const titles: Record<string, string> = {
   '/admin/supervisors': 'Supervisors',
   '/supervisor': 'Supervisor Overview',
   '/supervisor/stores': 'Store Characteristics',
+  '/supervisor/journey': 'Journey plan',
   '/supervisor/bas': 'BA Performance',
+  '/supervisor/submissions': 'BA submissions',
+  '/supervisor/complaints': 'Complaints',
   '/ho/deployment': 'Intelligent Deployment',
   '/ho/complaints': 'Complaint Center',
   '/ho/consumers': 'Consumer Intelligence',
@@ -170,6 +186,8 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
   const { role, setRole } = useRole()
   const demo = useDemo()
   const sv = useSupervisorSession()
+  const checkInNotes = useSupervisorNotifications(kind === 'supervisor' ? sv.supervisor?.id : undefined)
+  const notifications = kind === 'supervisor' ? checkInNotes.map((n) => n.message) : demo.notifications
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const [bellOpen, setBellOpen] = useState(false)
@@ -186,6 +204,33 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
     setBellOpen(false)
   }, [pathname])
 
+  useEffect(() => {
+    if (kind !== 'supervisor' || !sv.supervisor || sv.preview) return
+    const supervisorId = sv.supervisor.id
+    void enableSupervisorPush(supervisorId).catch((error) => {
+      console.error('[push] token registration failed', error)
+    })
+    let stop = false
+    async function pull() {
+      try {
+        const response = await fetch(`/api/push/inbox?supervisorId=${encodeURIComponent(supervisorId)}`)
+        if (!response.ok) return
+        const data = (await response.json()) as {
+          events: { id: string; supervisorId: string; body: string; createdAt: string }[]
+        }
+        if (!stop) mergeRemoteNotifications(data.events ?? [])
+      } catch {
+        // the dev push server is optional
+      }
+    }
+    void pull()
+    const id = window.setInterval(() => void pull(), 8000)
+    return () => {
+      stop = true
+      window.clearInterval(id)
+    }
+  }, [kind, sv.supervisor, sv.preview])
+
   const title =
     titles[pathname] ??
     (pathname === '/ho/ambassadors/training' || pathname.endsWith('/ambassadors/training')
@@ -201,7 +246,7 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
   function handleSignOut() {
     if (kind === 'supervisor') {
       signOut()
-      navigate(sv.preview ? '/ho/supervisors' : '/login')
+      navigate(sv.preview ? '/ho/supervisors' : '/supervisor/login')
       return
     }
     navigate('/login')
@@ -354,7 +399,7 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
                 className="relative rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50"
               >
                 <FilledIcon icon={Bell} size={16} />
-                {demo.notifications.length > 0 && (
+                {notifications.length > 0 && (
                   <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-danger" />
                 )}
               </button>
@@ -365,18 +410,19 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
                     <button
                       className="text-xs text-brand-600"
                       onClick={() => {
-                        demo.clearNotifications()
+                        if (kind === 'supervisor' && sv.supervisor) clearSupervisorNotifications(sv.supervisor.id)
+                        else demo.clearNotifications()
                         setBellOpen(false)
                       }}
                     >
                       Clear
                     </button>
                   </div>
-                  {demo.notifications.length === 0 ? (
+                  {notifications.length === 0 ? (
                     <p className="py-4 text-center text-xs text-slate-400">No notifications</p>
                   ) : (
                     <ul className="max-h-60 space-y-2 overflow-auto">
-                      {demo.notifications.map((n) => (
+                      {notifications.map((n) => (
                         <li key={n} className="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600">
                           {n}
                         </li>

@@ -19,6 +19,7 @@ import {
   TableScroll,
 } from '../../components/ui'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
+import { ReportPerformance } from './ReportPerformance'
 import { Plus, Trash2 } from 'lucide-react'
 
 export function ConsumersPage() {
@@ -320,10 +321,10 @@ function Mini({ label, value }: { label: string; value: string }) {
 export function ReportPage() {
   const demo = useDemo()
   return (
-    <div className="mx-auto max-w-4xl space-y-5">
+    <div className="mx-auto max-w-6xl space-y-5">
       <PageHeader
         title="Executive Intelligence Report"
-        description="Client-ready preview · Tapal Tea campaign"
+        description="Store performance, BA attendance and incentives, target vs achievement"
         actions={<Button>Export Report</Button>}
       />
       <Card>
@@ -341,21 +342,23 @@ export function ReportPage() {
         </div>
       </Section>
 
-      <Section n="02" title="Consumer Profile">
+      <ReportPerformance />
+
+      <Section n="05" title="Consumer Profile">
         <p className="text-sm text-slate-600">
           Primary buyers are family households (3–4 members) shopping bi-weekly, with medium price
           sensitivity and strong interest in rich taste and everyday chai moments.
         </p>
       </Section>
 
-      <Section n="03" title="Brand Switching">
+      <Section n="06" title="Brand Switching">
         <p className="text-sm text-slate-600">
           Top switch drivers: taste comparison vs other tea brands, doodh patti aroma, and sample-pack
           trial offers. Main rejection reason remains habit loyalty to Lipton.
         </p>
       </Section>
 
-      <Section n="04" title="Product Performance">
+      <Section n="07" title="Product Performance">
         <ChartCard
           title="SKU Interest"
           rows={[
@@ -366,7 +369,7 @@ export function ReportPage() {
         />
       </Section>
 
-      <Section n="05" title="Regional Performance">
+      <Section n="08" title="Regional Performance">
         <ChartCard
           title="City contribution"
           rows={[
@@ -378,7 +381,7 @@ export function ReportPage() {
         />
       </Section>
 
-      <Section n="06" title="AI Recommendations">
+      <Section n="09" title="AI Recommendations">
         <ol className="list-decimal space-y-2 pl-5 text-sm text-slate-700">
           <li>Increase Lahore weekend coverage</li>
           <li>Promote Danedar 475g in family-size segments</li>

@@ -5,20 +5,40 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
+  ClipboardList,
   CloudSun,
   Download,
   FileSpreadsheet,
   MapPin,
   Trophy,
   Upload,
+  UserRound,
 } from 'lucide-react'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
+import {
+  achievementPct,
+  currentMonthKey,
+  formatTargetMonth,
+  targetForBa,
+  useBaTargets,
+} from '../../lib/baTargets'
 import { useBrand } from '../../context/BrandContext'
 import { formatDate, formatTime, useBaShift } from '../../context/BaShiftContext'
 import { useTrainingContent } from '../../context/TrainingContentContext'
-import { downloadBaReportTemplate, parseBaReportFile, saveBaReport } from '../../lib/baReport'
+import {
+  downloadBaReportTemplate,
+  hasAnytimeStockSubmitted,
+  parseBaReportFile,
+  recordDailyReport,
+  saveBaReport,
+  useDailyReports,
+} from '../../lib/baReport'
+import { FaceCheckInModal } from '../../components/FaceCheckInModal'
 import { Modal } from '../../components/ui'
 import { useBaSession } from '../../lib/baAccounts'
+import { ambassadors, stores } from '../../data/mock'
+import { notifyBaCheckIn, notifyBaCheckOut } from '../../lib/supervisorNotifications'
+import { useUserInterceptions } from '../../lib/userInterceptions'
 import { BaOnboarding } from './BaOnboarding'
 
 function greetingFor(hour: number) {
@@ -69,6 +89,7 @@ export function BaHomePage() {
   const [now, setNow] = useState(() => new Date())
   const [tempC, setTempC] = useState<string | null>(null)
   const [weatherText, setWeatherText] = useState('Loading…')
+  const [faceCheckOpen, setFaceCheckOpen] = useState(false)
   const [checkoutWarningOpen, setCheckoutWarningOpen] = useState(false)
   const [earlyReasonOpen, setEarlyReasonOpen] = useState(false)
   const [earlyReason, setEarlyReason] = useState('')
@@ -76,6 +97,13 @@ export function BaHomePage() {
   const [excelErrors, setExcelErrors] = useState<string[]>([])
   const [excelBusy, setExcelBusy] = useState(false)
   const excelInputRef = useRef<HTMLInputElement>(null)
+  const reports = useDailyReports()
+  const interceptions = useUserInterceptions()
+  const baId = account?.id ?? 'ba'
+  const stockAlreadySubmitted = hasAnytimeStockSubmitted(baId, reports)
+  const interceptionsToday = interceptions.filter(
+    (row) => row.baId === baId && new Date(row.createdAt).toDateString() === now.toDateString(),
+  ).length
 
   async function saveExcelUpload(file: File | undefined) {
     if (!file) return
@@ -89,9 +117,25 @@ export function BaHomePage() {
     setExcelErrors([])
     setExcelFileName(file.name)
     saveBaReport(result.data, file.name)
+    recordDailyReport(result.data, {
+      baId,
+      baName,
+      city,
+      source: 'excel',
+    })
     if (!reportSubmitted) {
       checkOut()
       markReportSubmitted()
+      const ambassador = ambassadors.find((a) => a.id === baId)
+      const store = ambassador?.storeId != null ? stores.find((s) => s.id === ambassador.storeId) : undefined
+      if (ambassador?.storeId != null && store) {
+        notifyBaCheckOut({
+          baName,
+          storeId: store.id,
+          storeName: store.name,
+          at: new Date(),
+        })
+      }
     }
   }
 
@@ -209,6 +253,8 @@ export function BaHomePage() {
         </div>
       </div>
 
+
+
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
         <h3 className="text-sm font-bold text-slate-900">Today&apos;s Shift</h3>
         <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -222,7 +268,7 @@ export function BaHomePage() {
           {!checkedIn ? (
             <button
               type="button"
-              onClick={checkIn}
+              onClick={() => setFaceCheckOpen(true)}
               className="shrink-0 rounded-full bg-navy-900 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-600"
             >
               Check In
@@ -272,6 +318,52 @@ export function BaHomePage() {
             <CheckCircle2 size={16} />
             Today&apos;s report submitted
           </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+        <div className="flex items-center gap-2">
+          <UserRound size={18} className="text-brand-600" />
+          <h3 className="text-sm font-bold text-slate-900">User interception</h3>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          Record a shopper’s name, contact, previous brand and SKU, the SKU they bought, and their feedback.
+        </p>
+        <Link
+          to="/ba/interception"
+          className="mt-3 inline-flex w-full items-center justify-center rounded-2xl bg-navy-900 py-3 text-sm font-semibold text-white shadow-md shadow-navy-900/20 transition hover:bg-brand-600"
+        >
+          User interception form
+        </Link>
+        {interceptionsToday > 0 && (
+          <p className="mt-2 text-center text-xs font-semibold text-brand-700">
+            {interceptionsToday} recorded today
+          </p>
+        )}
+      </div>
+
+      <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+        <div className="flex items-center gap-2">
+          <ClipboardList size={18} className="text-brand-600" />
+          <h3 className="text-sm font-bold text-slate-900">Stock report</h3>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          {stockAlreadySubmitted
+            ? 'Today’s stock report is already submitted. Checkout will start with daily sales.'
+            : 'Submit stock at any time. Daily sales and competitor data are collected at checkout.'}
+        </p>
+        {stockAlreadySubmitted ? (
+          <div className="mt-3 flex items-center gap-2 rounded-xl bg-brand-50 px-3 py-2.5 text-sm font-semibold text-brand-700">
+            <CheckCircle2 size={16} />
+            Stock report submitted
+          </div>
+        ) : (
+          <Link
+            to="/ba/stock-report?mode=anytime"
+            className="mt-3 inline-flex w-full items-center justify-center rounded-2xl bg-navy-900 py-3 text-sm font-semibold text-white shadow-md shadow-navy-900/20 transition hover:bg-brand-600"
+          >
+            Submit stock report
+          </Link>
         )}
       </div>
 
@@ -350,6 +442,25 @@ export function BaHomePage() {
         </div>
       )}
 
+      <FaceCheckInModal
+        open={faceCheckOpen}
+        onClose={() => setFaceCheckOpen(false)}
+        onConfirmed={() => {
+          checkIn()
+          const ambassador = ambassadors.find((a) => a.id === (account?.id ?? 'ayesha'))
+          const store = ambassador?.storeId != null ? stores.find((s) => s.id === ambassador.storeId) : undefined
+          if (ambassador?.storeId != null && store) {
+            notifyBaCheckIn({
+              baName: account?.name ?? ambassador.name,
+              storeId: store.id,
+              storeName: store.name,
+              at: new Date(),
+            })
+          }
+          setFaceCheckOpen(false)
+        }}
+      />
+
       <Modal
         open={earlyReasonOpen}
         onClose={() => setEarlyReasonOpen(false)}
@@ -402,10 +513,19 @@ export function BaHomePage() {
           <div className="flex gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3">
             <AlertTriangle className="mt-0.5 shrink-0 text-amber-600" size={22} />
             <p className="text-sm leading-relaxed text-slate-800">
-              You must submit the <span className="font-semibold">Stock Report</span>,{' '}
-              <span className="font-semibold">Daily Sales Report</span>, and{' '}
-              <span className="font-semibold">Other Brands prices</span> before finishing
-              checkout.
+              {stockAlreadySubmitted ? (
+                <>
+                  Stock is already submitted. Checkout continues with{' '}
+                  <span className="font-semibold">Daily Sales</span> and{' '}
+                  <span className="font-semibold">Competitor data</span>. Competitor prices are optional.
+                </>
+              ) : (
+                <>
+                  Checkout includes the <span className="font-semibold">Stock Report</span>,{' '}
+                  <span className="font-semibold">Daily Sales</span>, and{' '}
+                  <span className="font-semibold">Competitor data</span>. Competitor prices are optional.
+                </>
+              )}
             </p>
           </div>
           <p className="text-sm leading-relaxed text-slate-600">
@@ -417,6 +537,11 @@ export function BaHomePage() {
               type="button"
               onClick={() => {
                 setCheckoutWarningOpen(false)
+                if (stockAlreadySubmitted) {
+                  checkOut()
+                  navigate('/ba/daily-sales')
+                  return
+                }
                 navigate('/ba/stock-report')
               }}
               className="w-full rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition hover:bg-brand-600 sm:w-auto sm:px-5"
@@ -760,7 +885,10 @@ function BaTrainingLibrary() {
 }
 
 export function BaPerformancePage() {
-  const me = buildIncentiveRoster().find((r) => r.baId === 'ayesha')
+  const { account } = useBaSession()
+  const baId = account?.id ?? 'ayesha'
+  const monthTarget = targetForBa(baId, currentMonthKey(), useBaTargets())
+  const me = buildIncentiveRoster().find((r) => r.baId === baId) ?? buildIncentiveRoster().find((r) => r.baId === 'ayesha')
   const rank = me?.rank ?? 2
   const basePay = me?.base ?? 0
   const incentive = me?.incentive ?? 0
@@ -793,9 +921,64 @@ export function BaPerformancePage() {
         </div>
       </div>
 
+      {monthTarget && (
+        <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-bold text-slate-900">Target vs achievement</h3>
+            <span className="text-[11px] font-semibold text-slate-500">{formatTargetMonth(monthTarget.month)}</span>
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div className="text-lg font-bold text-slate-900">{monthTarget.targetKg}</div>
+              <div className="text-[10px] font-medium text-slate-500">Target Kg</div>
+            </div>
+            <div>
+              <div className="text-lg font-bold text-slate-900">{monthTarget.salesKg}</div>
+              <div className="text-[10px] font-medium text-slate-500">Sales Kg</div>
+            </div>
+            <div>
+              <div className="text-lg font-bold text-brand-600">
+                {achievementPct(monthTarget.targetKg, monthTarget.salesKg)}%
+              </div>
+              <div className="text-[10px] font-medium text-slate-500">Achievement</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+
       <div className="grid grid-cols-2 gap-2">
         <BaStatPill label="Rating" value="4.8" />
         <BaStatPill label="Days worked" value={String(daysWorked)} />
+      </div>
+
+      <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-sm font-bold text-slate-900">Target vs achievement</div>
+          <span className="text-[11px] font-semibold text-slate-500">
+            {formatTargetMonth(monthTarget?.month ?? currentMonthKey())}
+          </span>
+        </div>
+        {monthTarget ? (
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div className="text-lg font-bold text-slate-900">{monthTarget.targetKg}</div>
+              <div className="text-[10px] font-medium text-slate-500">Target Kg</div>
+            </div>
+            <div>
+              <div className="text-lg font-bold text-slate-900">{monthTarget.salesKg}</div>
+              <div className="text-[10px] font-medium text-slate-500">Sales Kg</div>
+            </div>
+            <div>
+              <div className="text-lg font-bold text-brand-600">
+                {achievementPct(monthTarget.targetKg, monthTarget.salesKg)}%
+              </div>
+              <div className="text-[10px] font-medium text-slate-500">Achievement</div>
+            </div>
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-slate-500">No target has been set for this month yet.</p>
+        )}
       </div>
 
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">

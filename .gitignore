@@ -8,6 +8,9 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+data/supervisor-push.json
+.env
+firebase-service-account.json
 dist
 dist-ssr
 *.local

@@ -1,7 +1,8 @@
 /**
- * BA end-of-shift report: field definitions shared by the manual checkout forms
- * and the Excel template (download → fill → upload).
+ * BA daily report: field definitions shared by the manual forms, the Excel
+ * template, and the dashboard inbox.
  */
+import { useSyncExternalStore } from 'react'
 
 export type FieldDef = { key: string; label: string }
 
@@ -130,7 +131,7 @@ export async function downloadBaReportTemplate() {
     for (const f of s.fields) rows.push([`Daily Sales – ${s.title}`, f.label, '', NOTE_NUMBER, f.key])
   }
   for (const b of DEFAULT_OTHER_BRANDS) {
-    rows.push(['Other Brands', b.name, '', `${NOTE_PRICE} — at least one required`, brandKey(b)])
+    rows.push(['Other Brands', b.name, '', `${NOTE_PRICE} — optional`, brandKey(b)])
   }
 
   const sheet = XLSX.utils.aoa_to_sheet(rows)
@@ -142,7 +143,7 @@ export async function downloadBaReportTemplate() {
     [`1. Fill only the "Value" column (column C) on the "${TEMPLATE_SHEET}" sheet.`],
     [`2. Stock Report: every item is required. Type: ${STOCK_OPTIONS.join(' / ')}.`],
     ['3. Daily Sales: numbers only (0 or more). Leave an item blank if it does not apply.'],
-    ['4. Other Brands: enter the selling price in Rs. for at least one pack.'],
+    ['4. Other Brands: optional. Enter a selling price in Rs. only for packs you checked.'],
     ['5. Do not rename, move or delete rows, and do not edit the "Key" column.'],
     ['6. Save the file, then upload it from the BA app home screen after check-in.'],
   ])
@@ -248,10 +249,6 @@ export async function parseBaReportFile(file: File): Promise<ParseResult> {
     const c = at(brandKey(b), `Other Brands – ${b.name}`)
     return { ...b, price: c ? parseNumber(c, `Other Brands – ${b.name}`) : '' }
   })
-  if (otherBrands.every((b) => !b.price)) {
-    errors.push('Other Brands: enter the price for at least one pack.')
-  }
-
   return errors.length > 0 ? { ok: false, errors } : { ok: true, data: { stock, sales, otherBrands } }
 }
 
@@ -261,4 +258,188 @@ export function saveBaReport(data: ParsedBaReport, fileName: string) {
   sessionStorage.setItem(SESSION_KEYS.sales, JSON.stringify(data.sales))
   sessionStorage.setItem(SESSION_KEYS.otherBrands, JSON.stringify(data.otherBrands))
   sessionStorage.setItem(SESSION_KEYS.excelName, fileName)
+}
+
+export type ReportSource = 'checkout' | 'anytime' | 'excel'
+
+export type StoredDailyReport = {
+  id: string
+  baId: string
+  baName: string
+  city: string
+  submittedAt: string
+  source: ReportSource
+  stock: Record<string, string>
+  sales: Record<string, string>
+  otherBrands: OtherBrandRow[]
+}
+
+const REPORTS_KEY = 'ba-daily-reports-v1'
+
+function loadReports(): StoredDailyReport[] {
+  try {
+    const raw = localStorage.getItem(REPORTS_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+let reports = loadReports()
+const reportListeners = new Set<() => void>()
+
+function subscribeReports(listener: () => void) {
+  reportListeners.add(listener)
+  const onStorage = (event: StorageEvent) => {
+    if (event.key !== REPORTS_KEY) return
+    reports = loadReports()
+    listener()
+  }
+  window.addEventListener('storage', onStorage)
+  return () => {
+    reportListeners.delete(listener)
+    window.removeEventListener('storage', onStorage)
+  }
+}
+
+/** Sends a completed daily report to the head-office dashboard inbox. */
+export function recordDailyReport(
+  data: ParsedBaReport,
+  meta: { baId: string; baName: string; city: string; source: ReportSource },
+) {
+  const entry: StoredDailyReport = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    baId: meta.baId,
+    baName: meta.baName,
+    city: meta.city,
+    submittedAt: new Date().toISOString(),
+    source: meta.source,
+    stock: data.stock,
+    sales: data.sales,
+    otherBrands: data.otherBrands,
+  }
+  reports = [entry, ...reports].slice(0, 200)
+  try {
+    localStorage.setItem(REPORTS_KEY, JSON.stringify(reports))
+  } catch {
+    // keep the in-memory list
+  }
+  reportListeners.forEach((listener) => listener())
+  return entry
+}
+
+export function useDailyReports() {
+  return useSyncExternalStore(subscribeReports, () => reports, () => [])
+}
+
+function isSameLocalDay(iso: string, now: Date) {
+  const d = new Date(iso)
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  )
+}
+
+/** True when this BA already sent today's stock report through the anytime form. */
+export function hasAnytimeStockSubmitted(baId: string, list: StoredDailyReport[], now = new Date()) {
+  return list.some(
+    (report) =>
+      report.baId === baId &&
+      report.source === 'anytime' &&
+      isSameLocalDay(report.submittedAt, now) &&
+      Object.values(report.stock).some((value) => value.trim() !== ''),
+  )
+}
+
+const salesLabel = new Map(
+  [
+    ...interceptionFields,
+    ...competitiveFields,
+    ...whyNotFields,
+    ...danedarSalesFields,
+    ...teaBagSalesFields,
+    ...specialtySalesFields,
+  ].map((field) => [field.key, field.label]),
+)
+
+export type ExtractKind = 'stock' | 'sales' | 'competitors'
+
+function linesFor(kind: ExtractKind, report: StoredDailyReport) {
+  if (kind === 'stock') {
+    return [...stockDanedarFields, ...stockTeaBagFields].map((field) => ({
+      section: stockDanedarFields.some((item) => item.key === field.key)
+        ? 'Tapal Danedar'
+        : 'Tea Bags & Specialty',
+      item: field.label,
+      value: report.stock[field.key] ?? '',
+    }))
+  }
+  if (kind === 'sales') {
+    return [...salesSections].flatMap((section) =>
+      section.fields.map((field) => ({
+        section: section.title,
+        item: salesLabel.get(field.key) ?? field.label,
+        value: report.sales[field.key] ?? '',
+      })),
+    )
+  }
+  return report.otherBrands.map((brand) => ({
+    section: 'Other Brands',
+    item: brand.name,
+    value: brand.price,
+  }))
+}
+
+const EXTRACT_FILE: Record<ExtractKind, string> = {
+  stock: 'Stock_Report',
+  sales: 'Daily_Sales',
+  competitors: 'Competitor_Data',
+}
+
+/** Downloads one slice of every received BA daily report. */
+export async function downloadReportExtract(kind: ExtractKind, list: StoredDailyReport[]) {
+  const XLSX = await import('xlsx')
+  const rows: (string | number)[][] = [['Submitted', 'BA', 'City', 'Source', 'Section', 'Item', 'Value']]
+  for (const report of list) {
+    const when = new Date(report.submittedAt).toLocaleString('en-PK')
+    for (const line of linesFor(kind, report)) {
+      rows.push([when, report.baName, report.city, report.source, line.section, line.item, line.value])
+    }
+  }
+  const sheet = XLSX.utils.aoa_to_sheet(rows)
+  sheet['!cols'] = [{ wch: 22 }, { wch: 22 }, { wch: 16 }, { wch: 12 }, { wch: 24 }, { wch: 26 }, { wch: 18 }]
+  const book = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(book, sheet, EXTRACT_FILE[kind].replaceAll('_', ' '))
+  const date = new Date().toISOString().slice(0, 10)
+  XLSX.writeFile(book, `Tapal_BA_${EXTRACT_FILE[kind]}_${date}.xlsx`)
+}
+
+export function labeledStock(stock: Record<string, string>) {
+  return linesFor('stock', {
+    id: '',
+    baId: '',
+    baName: '',
+    city: '',
+    submittedAt: '',
+    source: 'anytime',
+    stock,
+    sales: {},
+    otherBrands: [],
+  })
+}
+
+export function labeledSales(sales: Record<string, string>) {
+  return linesFor('sales', {
+    id: '',
+    baId: '',
+    baName: '',
+    city: '',
+    submittedAt: '',
+    source: 'anytime',
+    stock: {},
+    sales,
+    otherBrands: [],
+  })
 }

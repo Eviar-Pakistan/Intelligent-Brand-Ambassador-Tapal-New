@@ -1,9 +1,9 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { roleMeta, useRole } from '../context/AppContext'
 import { useBrand } from '../context/BrandContext'
 import { Button } from '../components/ui'
-import { authenticate, emailInUse, signIn, signOut } from '../lib/supervisors'
+import { emailInUse, signOut } from '../lib/supervisors'
 import { baEmailInUse, baSignOut } from '../lib/baAccounts'
 
 export function LoginPage() {
@@ -17,16 +17,8 @@ export function LoginPage() {
   function onSubmit(e: FormEvent) {
     e.preventDefault()
 
-    // An email that belongs to a supervisor must sign in with that supervisor's password
     if (emailInUse(email)) {
-      const supervisor = authenticate(email, password)
-      if (!supervisor) {
-        setError('Incorrect email or password.')
-        return
-      }
-      setRole('supervisor')
-      signIn(supervisor.id)
-      navigate(roleMeta.supervisor.home)
+      setError('Supervisors use their own sign-in page.')
       return
     }
 
@@ -108,6 +100,9 @@ export function LoginPage() {
               Sign In
             </Button>
           </form>
+          <Link to="/supervisor/login" className="mt-4 inline-block text-sm font-semibold text-brand-700">
+            Supervisor sign in
+          </Link>
 
           
      

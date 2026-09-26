@@ -7,7 +7,8 @@ import { DesktopShell } from './components/AppShell'
 import { BaShell, ShopperShell } from './components/RoleLayouts'
 import { ScreenHub } from './pages/ScreenHub'
 import { LoginPage } from './pages/LoginPage'
-import { CommandCenterPage, OptimizationPage } from './pages/headOffice/CommandCenterPage'
+import { SupervisorLoginPage } from './pages/supervisor/SupervisorLoginPage'
+import { BaDailyReportsPage, CommandCenterPage, OptimizationPage } from './pages/headOffice/CommandCenterPage'
 import { BaPerformanceDashboardPage } from './pages/headOffice/BaPerformanceDashboardPage'
 import { CampaignOverviewPage, CampaignsPage } from './pages/headOffice/CampaignPages'
 import { AmbassadorProfilePage, AmbassadorsPage } from './pages/headOffice/AmbassadorPages'
@@ -17,10 +18,13 @@ import { CreateStorePage } from './pages/headOffice/StoreCreation'
 import { SupervisorDetailPage, SupervisorsPage } from './pages/headOffice/SupervisorPages'
 import {
   SupervisorBasPage,
+  SupervisorComplaintsPage,
   SupervisorGate,
   SupervisorHomePage,
   SupervisorStoresPage,
+  SupervisorSubmissionsPage,
 } from './pages/supervisor/SupervisorPortal'
+import { SupervisorJourneyPage } from './pages/supervisor/SupervisorJourney'
 import { ShopperStoreEntry } from './pages/shopper/ShopperStoreEntry'
 import {
   ConsumersPage,
@@ -42,6 +46,7 @@ import {
 } from './pages/ba/BaPages'
 import { BaDailySalesPage, BaOtherBrandsPage, BaStockReportPage } from './pages/ba/BaCheckoutPages'
 import { BaComplaintPage } from './pages/ba/BaComplaintPage'
+import { BaInterceptionPage } from './pages/ba/BaInterceptionPage'
 import { BaAccessPage } from './pages/ba/BaAccessPage'
 import { ComplaintsProvider } from './context/ComplaintsContext'
 import {
@@ -61,6 +66,7 @@ const hoPages = (
     <Route index element={<Navigate to="dashboard" replace />} />
     <Route path="dashboard" element={<CommandCenterPage />} />
     <Route path="ba-performance" element={<BaPerformanceDashboardPage />} />
+    <Route path="daily-reports" element={<BaDailyReportsPage />} />
     <Route path="ambassadors" element={<AmbassadorsPage />} />
     <Route path="ambassadors/training" element={<TrainingManagerPage />} />
     <Route path="ambassadors/:id" element={<AmbassadorProfilePage />} />
@@ -91,6 +97,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<LoginPage />} />
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/supervisor/login" element={<SupervisorLoginPage />} />
             <Route path="/portal" element={<ScreenHub />} />
 
             {/* Head Office — desktop command center */}
@@ -129,7 +136,10 @@ export default function App() {
             <Route path="/supervisor" element={<SupervisorGate />}>
               <Route index element={<SupervisorHomePage />} />
               <Route path="stores" element={<SupervisorStoresPage />} />
+              <Route path="journey" element={<SupervisorJourneyPage />} />
               <Route path="bas" element={<SupervisorBasPage />} />
+              <Route path="submissions" element={<SupervisorSubmissionsPage />} />
+              <Route path="complaints" element={<SupervisorComplaintsPage />} />
             </Route>
 
             {/* Personal BA link — signs that ambassador in, then opens their app */}
@@ -142,6 +152,7 @@ export default function App() {
               <Route path="training" element={<BaTrainingPage />} />
               <Route path="performance" element={<BaPerformancePage />} />
               <Route path="complaint" element={<BaComplaintPage />} />
+              <Route path="interception" element={<BaInterceptionPage />} />
               <Route path="daily-sales" element={<BaDailySalesPage />} />
               <Route path="stock-report" element={<BaStockReportPage />} />
               <Route path="other-brands" element={<BaOtherBrandsPage />} />

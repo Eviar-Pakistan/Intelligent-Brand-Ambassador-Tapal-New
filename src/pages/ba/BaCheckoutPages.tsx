@@ -1,13 +1,19 @@
-import { useMemo, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2 } from 'lucide-react'
 import { useBaShift } from '../../context/BaShiftContext'
+import { ambassadors, stores } from '../../data/mock'
+import { notifyBaCheckOut } from '../../lib/supervisorNotifications'
+import { useBaSession } from '../../lib/baAccounts'
 import {
   competitiveFields,
   danedarSalesFields,
   DEFAULT_OTHER_BRANDS,
   interceptionFields,
+  hasAnytimeStockSubmitted,
+  recordDailyReport,
   SESSION_KEYS,
+  useDailyReports,
   specialtySalesFields,
   STOCK_OPTIONS,
   stockDanedarFields,
@@ -92,6 +98,19 @@ function StockCheckboxes({
   )
 }
 
+function reportPath(path: string, anytime: boolean) {
+  return anytime ? `${path}?mode=anytime` : path
+}
+
+function readSession<T>(key: string, fallback: T): T {
+  try {
+    const raw = sessionStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
+
 function PageChrome({
   title,
   subtitle,
@@ -123,7 +142,12 @@ function PageChrome({
 
 export function BaDailySalesPage() {
   const navigate = useNavigate()
+  const [params] = useSearchParams()
+  const anytime = params.get('mode') === 'anytime'
   const { city } = useBaShift()
+  const { account } = useBaSession()
+  const reports = useDailyReports()
+  const stockAlreadySubmitted = hasAnytimeStockSubmitted(account?.id ?? 'ba', reports)
 
   const allFields = useMemo(
     () => [
@@ -146,15 +170,23 @@ export function BaDailySalesPage() {
   function handleContinue(e: FormEvent) {
     e.preventDefault()
     sessionStorage.setItem(SESSION_KEYS.sales, JSON.stringify(values))
-    navigate('/ba/other-brands')
+    navigate(reportPath('/ba/other-brands', anytime))
   }
 
   return (
     <form onSubmit={handleContinue} className="space-y-4 bg-[#f7f4ec] p-4 pb-8">
       <PageChrome
         title="Daily Sales"
-        subtitle={`${city} · enter today's interceptions & SKU sales`}
-        onBack={() => navigate('/ba/stock-report')}
+        subtitle={
+          anytime
+            ? `${city} · submit today's sales anytime`
+            : `${city} · enter today's interceptions & SKU sales`
+        }
+        onBack={() =>
+          navigate(
+            !anytime && stockAlreadySubmitted ? '/ba/home' : reportPath('/ba/stock-report', anytime),
+          )
+        }
       />
 
       <Section title="Interceptions">
@@ -227,7 +259,7 @@ export function BaDailySalesPage() {
         type="submit"
         className="w-full rounded-2xl bg-navy-900 py-3.5 text-base font-semibold text-white shadow-md shadow-navy-900/20 transition hover:bg-brand-600"
       >
-        Next · Other Brands
+        Next · Competitor data
       </button>
     </form>
   )
@@ -235,7 +267,34 @@ export function BaDailySalesPage() {
 
 export function BaStockReportPage() {
   const navigate = useNavigate()
-  const { checkOut } = useBaShift()
+  const [params] = useSearchParams()
+  const anytime = params.get('mode') === 'anytime'
+  const { checkOut, city } = useBaShift()
+  const { account } = useBaSession()
+  const reports = useDailyReports()
+  const stockAlreadySubmitted = hasAnytimeStockSubmitted(account?.id ?? 'ba', reports)
+  const [submitted, setSubmitted] = useState(false)
+
+  function finishCheckOut() {
+    checkOut()
+    const ambassador = ambassadors.find((item) => item.id === (account?.id ?? 'ayesha'))
+    const store = ambassador?.storeId != null ? stores.find((item) => item.id === ambassador.storeId) : undefined
+    if (ambassador?.storeId != null && store) {
+      notifyBaCheckOut({
+        baName: account?.name ?? ambassador.name,
+        storeId: store.id,
+        storeName: store.name,
+        at: new Date(),
+      })
+    }
+  }
+
+  useEffect(() => {
+    if (anytime || !stockAlreadySubmitted) return
+    finishCheckOut()
+    navigate('/ba/daily-sales', { replace: true })
+  }, [anytime, stockAlreadySubmitted, checkOut, navigate])
+
   const [stock, setStock] = useState(() =>
     emptyStock([...stockDanedarFields, ...stockTeaBagFields]),
   )
@@ -249,16 +308,56 @@ export function BaStockReportPage() {
   function handleContinue(e: FormEvent) {
     e.preventDefault()
     if (!allFilled) return
-    checkOut()
     sessionStorage.setItem(SESSION_KEYS.stock, JSON.stringify(stock))
+    if (anytime) {
+      recordDailyReport(
+        { stock, sales: {}, otherBrands: [] },
+        {
+          baId: account?.id ?? 'ba',
+          baName: account?.name ?? 'Brand Ambassador',
+          city: account?.city || city,
+          source: 'anytime',
+        },
+      )
+      setSubmitted(true)
+      return
+    }
+    finishCheckOut()
     navigate('/ba/daily-sales')
+  }
+
+  if (!anytime && stockAlreadySubmitted) return null
+
+  if (submitted) {
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center bg-[#f7f4ec] p-6 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-brand-50 text-brand-600">
+          <CheckCircle2 size={36} />
+        </div>
+        <h2 className="mt-4 text-xl font-bold text-slate-900">Stock report submitted</h2>
+        <p className="mt-2 max-w-xs text-sm text-slate-500">
+          Only the stock report was sent. Daily sales and competitor data are collected at checkout.
+        </p>
+        <button
+          type="button"
+          onClick={() => navigate('/ba/home')}
+          className="mt-6 w-full max-w-xs rounded-2xl bg-navy-900 py-3.5 text-base font-semibold text-white shadow-md shadow-navy-900/20 transition hover:bg-brand-600"
+        >
+          Back to Home
+        </button>
+      </div>
+    )
   }
 
   return (
     <form onSubmit={handleContinue} className="space-y-4 bg-[#f7f4ec] p-4 pb-8">
       <PageChrome
         title="Stock Report"
-        subtitle="Mark In Stock, Out of Stock, or Near Out of Stock for each SKU"
+        subtitle={
+          anytime
+            ? 'Anytime submission is stock only'
+            : 'Then daily sales and competitor data'
+        }
         onBack={() => navigate('/ba/home')}
       />
 
@@ -289,7 +388,7 @@ export function BaStockReportPage() {
         disabled={!allFilled}
         className="w-full rounded-2xl bg-navy-900 py-3.5 text-base font-semibold text-white shadow-md shadow-navy-900/20 transition enabled:hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-45"
       >
-        Next · Daily Sales
+        {anytime ? 'Submit stock report' : 'Next · Daily Sales'}
       </button>
     </form>
   )
@@ -297,7 +396,10 @@ export function BaStockReportPage() {
 
 export function BaOtherBrandsPage() {
   const navigate = useNavigate()
-  const { markReportSubmitted } = useBaShift()
+  const [params] = useSearchParams()
+  const anytime = params.get('mode') === 'anytime'
+  const { markReportSubmitted, city } = useBaShift()
+  const { account } = useBaSession()
   const [rows, setRows] = useState<OtherBrandRow[]>(DEFAULT_OTHER_BRANDS)
   const [submitted, setSubmitted] = useState(false)
 
@@ -305,14 +407,22 @@ export function BaOtherBrandsPage() {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
   }
 
-  const canSubmit = rows.some((r) => r.name.trim() && r.price.trim())
-
   function handleSubmit(e: FormEvent) {
     e.preventDefault()
-    if (!canSubmit) return
-    const payload = rows.filter((r) => r.name.trim() || r.price.trim())
+    const payload = rows.filter((r) => r.name.trim())
     sessionStorage.setItem(SESSION_KEYS.otherBrands, JSON.stringify(payload))
-    markReportSubmitted()
+    const stock = readSession<Record<string, string>>(SESSION_KEYS.stock, {})
+    const sales = readSession<Record<string, string>>(SESSION_KEYS.sales, {})
+    recordDailyReport(
+      { stock, sales, otherBrands: payload },
+      {
+        baId: account?.id ?? 'ba',
+        baName: account?.name ?? 'Brand Ambassador',
+        city: account?.city || city,
+        source: anytime ? 'anytime' : 'checkout',
+      },
+    )
+    if (!anytime) markReportSubmitted()
     setSubmitted(true)
   }
 
@@ -324,7 +434,7 @@ export function BaOtherBrandsPage() {
         </div>
         <h2 className="mt-4 text-xl font-bold text-slate-900">Your Data has been Submitted</h2>
         <p className="mt-2 max-w-xs text-sm text-slate-500">
-          Stock report, daily sales, and other brand prices were saved for today&apos;s shift.
+          Stock and daily sales were sent to the dashboard. Competitor prices are included only if you entered them.
         </p>
         <button
           type="button"
@@ -340,9 +450,9 @@ export function BaOtherBrandsPage() {
   return (
     <form onSubmit={handleSubmit} className="space-y-4 bg-[#f7f4ec] p-4 pb-8">
       <PageChrome
-        title="Other Brands"
-        subtitle="Enter selling price for each competitor brand / pack"
-        onBack={() => navigate('/ba/daily-sales')}
+        title="Competitor data"
+        subtitle="Optional. Leave prices blank if you do not have competitor prices."
+        onBack={() => navigate(reportPath('/ba/daily-sales', anytime))}
       />
 
       <Section title="Competitor prices">
@@ -384,10 +494,9 @@ export function BaOtherBrandsPage() {
 
       <button
         type="submit"
-        disabled={!canSubmit}
-        className="w-full rounded-2xl bg-navy-900 py-3.5 text-base font-semibold text-white shadow-md shadow-navy-900/20 transition enabled:hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-45"
+        className="w-full rounded-2xl bg-navy-900 py-3.5 text-base font-semibold text-white shadow-md shadow-navy-900/20 transition hover:bg-brand-600"
       >
-        Submit
+        Submit report
       </button>
     </form>
   )

@@ -1,5 +1,5 @@
 import { Link, useParams } from 'react-router-dom'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ambassadors, baShiftHistory, scheduleDays, stores, type LifecycleStage } from '../../data/mock'
 import {
   Avatar,
@@ -32,6 +32,17 @@ import {
 import { AssessmentReport } from '../ba/AssessmentReport'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
 import { shiftLabelFromTimes, useSchedule } from '../../context/ScheduleContext'
+import {
+  currentMonthKey,
+  downloadTargetTemplate,
+  parseTargetFile,
+  setBaMonthTarget,
+  setBaMonthTargets,
+  targetForBa,
+  useBaTargets,
+  type TargetParseResult,
+  type TargetPerson,
+} from '../../lib/baTargets'
 
 const validEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 
@@ -328,6 +339,8 @@ export function AmbassadorsPage() {
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkCreated, setBulkCreated] = useState<BaAccount[] | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
+  const [targetOpen, setTargetOpen] = useState(false)
+  const [targetBulkOpen, setTargetBulkOpen] = useState(false)
 
   const filtered = ambassadors.filter((a) => {
     const matchTab = tab === 'All' || a.status === tab
@@ -349,6 +362,12 @@ export function AmbassadorsPage() {
           <>
             <Button onClick={() => setCreateOpen(true)}>
               <UserPlus size={15} /> Add ambassador
+            </Button>
+            <Button variant="secondary" onClick={() => setTargetOpen(true)}>
+              Set target & sales
+            </Button>
+            <Button variant="secondary" onClick={() => setTargetBulkOpen(true)}>
+              <FileSpreadsheet size={15} /> Upload targets
             </Button>
             <Button variant="secondary" onClick={() => setBulkOpen(true)}>
               <FileSpreadsheet size={15} /> Bulk upload (Excel)
@@ -526,7 +545,228 @@ export function AmbassadorsPage() {
         account={accounts.find((a) => a.id === detailId) ?? null}
         onClose={() => setDetailId(null)}
       />
+
+      <SetTargetModal open={targetOpen} onClose={() => setTargetOpen(false)} />
+      <BulkTargetModal open={targetBulkOpen} onClose={() => setTargetBulkOpen(false)} />
     </div>
+  )
+}
+
+function targetPeople(accounts: { id: string; name: string }[]): TargetPerson[] {
+  const map = new Map<string, string>()
+  for (const ambassador of ambassadors) map.set(ambassador.id, ambassador.name)
+  for (const account of accounts) {
+    if (!map.has(account.id)) map.set(account.id, account.name)
+  }
+  return [...map.entries()].map(([id, name]) => ({ id, name }))
+}
+
+/** Download the target template, fill Target Kg, then upload it to save many months at once. */
+export function BulkTargetModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const accounts = useBaAccounts()
+  const people = useMemo(() => targetPeople(accounts), [accounts])
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+  const [fileName, setFileName] = useState('')
+  const [result, setResult] = useState<TargetParseResult | null>(null)
+  const [saved, setSaved] = useState(0)
+
+  function close() {
+    setResult(null)
+    setFileName('')
+    setSaved(0)
+    onClose()
+  }
+
+  async function onFile(file: File | undefined) {
+    if (!file) return
+    setBusy(true)
+    setSaved(0)
+    setFileName(file.name)
+    setResult(await parseTargetFile(file, people))
+    setBusy(false)
+  }
+
+  return (
+    <Modal open={open} onClose={close} title="Upload targets from Excel">
+      <div className="space-y-4 text-sm">
+        <div className="space-y-2">
+          <div className="font-semibold text-slate-900">1. Download the template</div>
+          <p className="text-xs text-slate-500">
+            The file lists every ambassador for this month. Enter Target Kg, then save the file. The Instructions sheet
+            explains Month and Sales Kg.
+          </p>
+          <Button variant="secondary" onClick={() => void downloadTargetTemplate(people)}>
+            <Download size={14} /> Download target template
+          </Button>
+        </div>
+
+        <div className="space-y-2 border-t border-slate-100 pt-4">
+          <div className="font-semibold text-slate-900">2. Upload the filled template</div>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
+            className="hidden"
+            onChange={(event) => {
+              void onFile(event.target.files?.[0])
+              event.target.value = ''
+            }}
+          />
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" disabled={busy} onClick={() => inputRef.current?.click()}>
+              <Upload size={14} /> {busy ? 'Checking…' : result ? 'Choose another file' : 'Upload Excel file'}
+            </Button>
+            {fileName && <span className="truncate text-xs text-slate-500">{fileName}</span>}
+          </div>
+        </div>
+
+        {saved > 0 && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-800">
+            Saved {saved} {saved === 1 ? 'target' : 'targets'}.
+          </div>
+        )}
+
+        {result && saved === 0 && (
+          <div className="space-y-3 border-t border-slate-100 pt-4">
+            {result.rows.length > 0 && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-800">
+                {result.rows.length} {result.rows.length === 1 ? 'target is' : 'targets are'} ready to save.
+              </div>
+            )}
+            {result.errors.length > 0 && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-800">
+                <div className="font-semibold">
+                  {result.rows.length > 0
+                    ? `${result.errors.length} ${result.errors.length === 1 ? 'row' : 'rows'} will be skipped:`
+                    : 'Nothing can be saved yet:'}
+                </div>
+                <ul className="mt-1.5 list-disc space-y-0.5 pl-4">
+                  {result.errors.slice(0, 8).map((err) => (
+                    <li key={err}>{err}</li>
+                  ))}
+                </ul>
+                {result.errors.length > 8 && <div className="mt-1 font-medium">…and {result.errors.length - 8} more</div>}
+              </div>
+            )}
+            {result.rows.length > 0 && (
+              <Button
+                className="w-full"
+                onClick={() => {
+                  setBaMonthTargets(result.rows)
+                  setSaved(result.rows.length)
+                  setResult(null)
+                }}
+              >
+                Save {result.rows.length} {result.rows.length === 1 ? 'target' : 'targets'}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const accounts = useBaAccounts()
+  const targets = useBaTargets()
+  const people = useMemo(() => targetPeople(accounts), [accounts])
+  const [baId, setBaId] = useState(people[0]?.id ?? '')
+  const [month, setMonth] = useState(currentMonthKey)
+  const [targetKg, setTargetKg] = useState('')
+  const [salesKg, setSalesKg] = useState('')
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    const row = targetForBa(baId, month, targets)
+    setTargetKg(row ? String(row.targetKg) : '')
+    setSalesKg(row ? String(row.salesKg) : '')
+  }, [open, baId, month, targets])
+
+  function save() {
+    const person = people.find((item) => item.id === baId)
+    const target = Number(targetKg)
+    const sales = Number(salesKg)
+    if (!person || !Number.isFinite(target) || target < 0 || !Number.isFinite(sales) || sales < 0) return
+    setBaMonthTarget({
+      baId: person.id,
+      baName: person.name,
+      month,
+      targetKg: target,
+      salesKg: sales,
+    })
+    setSaved(true)
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Set target and sales">
+      <div className="space-y-3">
+        <label className="block text-sm">
+          <span className="mb-1.5 block font-medium text-slate-700">Ambassador</span>
+          <select
+            value={baId}
+            onChange={(e) => {
+              setSaved(false)
+              setBaId(e.target.value)
+            }}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
+          >
+            {people.map((person) => (
+              <option key={person.id} value={person.id}>
+                {person.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="mb-1.5 block font-medium text-slate-700">Month</span>
+          <input
+            type="month"
+            value={month}
+            onChange={(e) => {
+              setSaved(false)
+              setMonth(e.target.value)
+            }}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="mb-1.5 block font-medium text-slate-700">Target (Kg)</span>
+          <input
+            type="number"
+            min={0}
+            value={targetKg}
+            onChange={(e) => setTargetKg(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="mb-1.5 block font-medium text-slate-700">Sales (Kg)</span>
+          <input
+            type="number"
+            min={0}
+            value={salesKg}
+            onChange={(e) => setSalesKg(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
+          />
+        </label>
+        {saved && (
+          <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+            Saved for this ambassador and month.
+          </p>
+        )}
+        <div className="flex flex-col gap-2 pt-1 sm:flex-row-reverse">
+          <Button onClick={save} disabled={targetKg === '' || salesKg === ''}>
+            Save
+          </Button>
+          <Button variant="secondary" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </Modal>
   )
 }
 

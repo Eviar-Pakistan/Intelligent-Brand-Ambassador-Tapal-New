@@ -117,6 +117,7 @@ export function StatusBadge({ status }: { status: string }) {
     'Checked Out': 'bg-slate-100 text-slate-600 ring-slate-200',
     Submitted: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
     Incomplete: 'bg-amber-50 text-amber-700 ring-amber-200',
+    Assigned: 'bg-sky-50 text-sky-700 ring-sky-200',
     Scheduled: 'bg-sky-50 text-sky-700 ring-sky-200',
     Completed: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
     Missed: 'bg-rose-50 text-rose-700 ring-rose-200',

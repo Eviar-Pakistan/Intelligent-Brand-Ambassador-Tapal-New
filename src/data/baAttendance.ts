@@ -46,7 +46,33 @@ function statusForStoreDay(row: (typeof activeBasByStore)[number], day: Date, to
   return { active: row.total - onBreak - offline, break: onBreak, offline }
 }
 
-export type AttendanceFilters = { city?: string | null; store?: string | null }
+export type AttendanceFilters = {
+  /** Empty or omitted means every city. */
+  cities?: string[]
+  /** Empty or omitted means every store. */
+  stores?: string[]
+  /** Empty or omitted means every month. */
+  months?: string[]
+}
+
+const MONTHS_LONG = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+]
+
+function matchesSelection(selected: string[] | undefined, value: string) {
+  return !selected?.length || selected.includes(value)
+}
 
 /**
  * City-wise BA status over a range. One day is an exact headcount; longer ranges are
@@ -55,12 +81,14 @@ export type AttendanceFilters = { city?: string | null; store?: string | null }
 export function baStatusByCity(range: DateRange, filters: AttendanceFilters = {}, today = new Date()) {
   const days = eachDay(range)
   const sums = new Map<string, StatusCounts & { stores: number }>()
+  const countedDays = days.filter((d) => matchesSelection(filters.months, MONTHS_LONG[d.getMonth()]))
+  const dayCount = countedDays.length || 1
   for (const row of activeBasByStore) {
-    if (filters.city && row.city !== filters.city) continue
-    if (filters.store && row.store !== filters.store) continue
+    if (!matchesSelection(filters.cities, row.city)) continue
+    if (!matchesSelection(filters.stores, row.store)) continue
     const c = sums.get(row.city) ?? { active: 0, break: 0, offline: 0, stores: 0 }
     c.stores += 1
-    for (const d of days) {
+    for (const d of countedDays) {
       const s = statusForStoreDay(row, d, today)
       c.active += s.active
       c.break += s.break
@@ -70,14 +98,14 @@ export function baStatusByCity(range: DateRange, filters: AttendanceFilters = {}
   }
 
   const cities = [...sums.entries()].map<CityStatus>(([city, c]) => {
-    const active = Math.round(c.active / days.length)
-    const onBreak = Math.round(c.break / days.length)
-    const offline = Math.round(c.offline / days.length)
+    const active = Math.round(c.active / dayCount)
+    const onBreak = Math.round(c.break / dayCount)
+    const offline = Math.round(c.offline / dayCount)
     return { city, stores: c.stores, active, break: onBreak, offline, total: active + onBreak + offline }
   })
 
   return {
-    days: days.length,
+    days: countedDays.length,
     cities,
     active: cities.reduce((s, c) => s + c.active, 0),
     break: cities.reduce((s, c) => s + c.break, 0),
@@ -205,8 +233,8 @@ export type WorkingHoursPoint = { label: string; hours: number; count: number }
  * Average working hours per BA visit, optionally for one city.
  * One day → per store; up to 31 days → per day; longer → per month.
  */
-export function workingHoursSeries(records: AttendanceRecord[], range: DateRange, city: string | null) {
-  const rows = city ? records.filter((r) => r.city === city) : records
+export function workingHoursSeries(records: AttendanceRecord[], range: DateRange, cities: string[]) {
+  const rows = cities.length ? records.filter((r) => cities.includes(r.city)) : records
   const days = daysInRange(range)
 
   const bucket = (r: AttendanceRecord) =>

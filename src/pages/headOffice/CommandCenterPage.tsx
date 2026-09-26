@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Area,
@@ -20,8 +21,15 @@ import {
   storeRanking,
 } from '../../data/mock'
 import { useDemo } from '../../context/AppContext'
-import { Card, CardHeader, KpiCard, ProgressBar, StatusBadge } from '../../components/ui'
-import { MapPin, Sparkles, Zap } from 'lucide-react'
+import { Button, Card, CardHeader, KpiCard, ProgressBar, StatusBadge } from '../../components/ui'
+import {
+  downloadReportExtract,
+  labeledSales,
+  labeledStock,
+  useDailyReports,
+  type ExtractKind,
+} from '../../lib/baReport'
+import { Download, MapPin, Sparkles, Zap } from 'lucide-react'
 
 export function CommandCenterPage() {
   const demo = useDemo()
@@ -219,6 +227,130 @@ function MiniBars({ rows }: { rows: { label: string; value: number }[] }) {
           <ProgressBar value={r.value} />
         </div>
       ))}
+    </div>
+  )
+}
+
+export function BaDailyReportsPage() {
+  const reports = useDailyReports()
+  const [openId, setOpenId] = useState<string | null>(null)
+  const openReport = reports.find((report) => report.id === openId) ?? null
+
+  function extract(kind: ExtractKind) {
+    if (reports.length === 0) return
+    void downloadReportExtract(kind, reports)
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900 sm:text-xl">BA daily reports</h2>
+          <p className="text-sm text-slate-500">
+            {reports.length
+              ? `${reports.length} received in this browser`
+              : 'Stock, daily sales, and competitor prices appear here when a BA submits'}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="secondary" disabled={!reports.length} onClick={() => extract('stock')}>
+            <Download size={14} /> Stock Report
+          </Button>
+          <Button size="sm" variant="secondary" disabled={!reports.length} onClick={() => extract('sales')}>
+            <Download size={14} /> Daily Sales
+          </Button>
+          <Button size="sm" variant="secondary" disabled={!reports.length} onClick={() => extract('competitors')}>
+            <Download size={14} /> Competitor data
+          </Button>
+        </div>
+      </div>
+
+      <Card>
+        {reports.length === 0 ? (
+          <p className="text-sm text-slate-500">No daily reports yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[36rem] text-left text-sm">
+              <thead className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                <tr>
+                  <th className="py-2 pr-3">BA</th>
+                  <th className="py-2 pr-3">City</th>
+                  <th className="py-2 pr-3">When</th>
+                  <th className="py-2 pr-3">Source</th>
+                  <th className="py-2"> </th>
+                </tr>
+              </thead>
+              <tbody>
+                {reports.map((report) => (
+                  <tr key={report.id} className="border-t border-slate-100">
+                    <td className="py-2.5 pr-3 font-semibold text-slate-900">{report.baName}</td>
+                    <td className="py-2.5 pr-3 text-slate-600">{report.city || '—'}</td>
+                    <td className="py-2.5 pr-3 text-slate-600">
+                      {new Date(report.submittedAt).toLocaleString('en-PK', {
+                        day: 'numeric',
+                        month: 'short',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </td>
+                    <td className="py-2.5 pr-3 capitalize text-slate-600">{report.source}</td>
+                    <td className="py-2.5 text-right">
+                      <button
+                        type="button"
+                        onClick={() => setOpenId(openId === report.id ? null : report.id)}
+                        className="text-xs font-semibold text-brand-600"
+                      >
+                        {openId === report.id ? 'Hide' : 'View'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {openReport && (
+          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+            <ReportSlice title="Stock Report" rows={labeledStock(openReport.stock)} />
+            <ReportSlice title="Daily Sales" rows={labeledSales(openReport.sales).filter((row) => row.value)} />
+            <ReportSlice
+              title="Competitor data"
+              rows={openReport.otherBrands.map((brand) => ({
+                section: 'Other Brands',
+                item: brand.name,
+                value: brand.price || '—',
+              }))}
+            />
+          </div>
+        )}
+      </Card>
+    </div>
+  )
+}
+
+function ReportSlice({
+  title,
+  rows,
+}: {
+  title: string
+  rows: { section: string; item: string; value: string }[]
+}) {
+  const filled = rows.filter((row) => row.value)
+  return (
+    <div className="rounded-xl bg-slate-50 p-3">
+      <div className="text-xs font-bold tracking-wide text-slate-500 uppercase">{title}</div>
+      {filled.length === 0 ? (
+        <p className="mt-2 text-xs text-slate-500">Nothing submitted.</p>
+      ) : (
+        <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-xs">
+          {filled.map((row) => (
+            <li key={`${row.section}-${row.item}`} className="flex justify-between gap-3">
+              <span className="text-slate-600">{row.item}</span>
+              <span className="font-semibold text-slate-900">{row.value}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

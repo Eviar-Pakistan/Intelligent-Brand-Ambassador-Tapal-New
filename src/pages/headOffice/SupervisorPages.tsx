@@ -1,8 +1,23 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { Eye, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
-import { Avatar, Button, Card, Modal, PageHeader, PasswordField, TableScroll } from '../../components/ui'
+import { CalendarDays, Eye, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
+import { Avatar, Button, Card, Modal, PageHeader, PasswordField, StatusBadge, TableScroll } from '../../components/ui'
 import { stores } from '../../data/mock'
+import {
+  WEEKDAYS,
+  currentWeekStart,
+  formatWeekLabel,
+  planFor,
+  saveJourneyPlan,
+  useJourneyPlans,
+  useJourneyVisits,
+  visitFor,
+  weekStartFromDateInput,
+  weekdayOf,
+  type JourneyStop,
+  type JourneyVisit,
+} from '../../lib/journeyPlans'
+import { JourneyWeekPanel, VisitDetailModal } from '../supervisor/SupervisorJourney'
 import { CITIES, useCreatedStores } from '../../lib/storeRegistry'
 import {
   assignStores,
@@ -322,6 +337,146 @@ function EditStoresModal({ supervisor, onClose }: { supervisor: Supervisor | nul
   )
 }
 
+/** Head Office builds the week’s store visits from the stores already assigned to this supervisor. */
+function AssignJourneyModal({
+  supervisor,
+  initialWeek,
+  onClose,
+}: {
+  supervisor: Supervisor
+  initialWeek: string
+  onClose: () => void
+}) {
+  useCreatedStores()
+  useJourneyPlans()
+  const [weekStart, setWeekStart] = useState(initialWeek)
+  const [draft, setDraft] = useState<{ key: string; stops: JourneyStop[] } | null>(null)
+  const key = `${supervisor.id}:${weekStart}`
+  const existing = planFor(supervisor.id, weekStart)
+  const stops = draft?.key === key ? draft.stops : (existing?.stops ?? [])
+  const mine = stores.filter((store) => supervisor.storeIds.includes(store.id))
+  const today = weekdayOf()
+  const thisWeek = weekStart === currentWeekStart()
+
+  function toggle(day: JourneyStop['day'], storeId: number) {
+    const has = stops.some((stop) => stop.day === day && stop.storeId === storeId)
+    const next = has
+      ? stops.filter((stop) => !(stop.day === day && stop.storeId === storeId))
+      : [...stops, { day, storeId }]
+    setDraft({ key, stops: next })
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`Journey plan · ${supervisor.name}`}>
+      <div className="space-y-4 text-sm">
+        <label className="block">
+          <span className="mb-1 block font-medium text-slate-700">Week</span>
+          <input
+            type="date"
+            className={fieldClass}
+            value={weekStart}
+            onChange={(event) => {
+              if (!event.target.value) return
+              setWeekStart(weekStartFromDateInput(event.target.value))
+            }}
+          />
+          <p className="mt-1 text-xs text-slate-400">
+            {formatWeekLabel(weekStart)}. Picking any day snaps to the Monday of that week.
+          </p>
+        </label>
+
+        {mine.length === 0 ? (
+          <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            Assign stores to {supervisor.name} before building a journey plan.
+          </p>
+        ) : (
+          <div className="max-h-80 space-y-2 overflow-y-auto">
+            {WEEKDAYS.map((day) => {
+              const count = stops.filter((stop) => stop.day === day).length
+              return (
+                <div key={day} className="rounded-xl border border-slate-200 p-2.5">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="font-semibold text-slate-800">
+                      {day}
+                      {thisWeek && day === today && <span className="ml-2 text-xs font-medium text-brand-600">Today</span>}
+                    </span>
+                    <span className="text-xs text-slate-400">{count} selected</span>
+                  </div>
+                  <div className="space-y-1">
+                    {mine.map((store) => {
+                      const checked = stops.some((stop) => stop.day === day && stop.storeId === store.id)
+                      return (
+                        <label
+                          key={store.id}
+                          className="flex cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-slate-50"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggle(day, store.id)}
+                            className="h-4 w-4 accent-brand-600"
+                          />
+                          <span className="min-w-0 flex-1 truncate">
+                            {store.name} <span className="text-xs text-slate-400">· {store.city}</span>
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        <p className="text-xs text-slate-400">
+          {stops.length} store {stops.length === 1 ? 'visit' : 'visits'} this week. Clear every day and save to remove the
+          plan.
+        </p>
+        <div className="flex flex-col gap-2 sm:flex-row-reverse">
+          <Button
+            disabled={mine.length === 0 && stops.length === 0}
+            onClick={() => {
+              saveJourneyPlan(supervisor.id, weekStart, stops)
+              onClose()
+            }}
+          >
+            <CalendarDays size={14} /> {stops.length === 0 ? 'Clear this week' : 'Save journey plan'}
+          </Button>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+function JourneyPlanCell({ supervisorId }: { supervisorId: string }) {
+  useJourneyPlans()
+  useJourneyVisits()
+  const week = currentWeekStart()
+  const plan = planFor(supervisorId, week)
+  if (!plan || plan.stops.length === 0) return <span className="text-xs text-slate-400">Not assigned</span>
+  const done = plan.stops.filter((stop) => visitFor(supervisorId, week, stop)).length
+  const days = WEEKDAYS.filter((day) => plan.stops.some((stop) => stop.day === day))
+  return (
+    <div>
+      <StatusBadge status="Assigned" />
+      <div className="mt-1 text-xs text-slate-500">
+        {done}/{plan.stops.length} visited
+      </div>
+      <div className="mt-1 space-y-0.5">
+        {days.map((day) => (
+          <div key={day} className="max-w-56 truncate text-xs text-slate-400">
+            {day}: {plan.stops.filter((stop) => stop.day === day).map((stop) => stores.find((store) => store.id === stop.storeId)?.name ?? `#${stop.storeId}`).join(', ')}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /** Head Office opens the supervisor's portal as a preview — no password needed, and it is labelled. */
 function usePreview() {
   const navigate = useNavigate()
@@ -337,14 +492,16 @@ export function SupervisorsPage() {
   useCreatedStores()
   const [addOpen, setAddOpen] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
+  const [planning, setPlanning] = useState<string | null>(null)
   const [credentials, setCredentials] = useState<Credentials | null>(null)
   const preview = usePreview()
+  const planningSupervisor = supervisors.find((s) => s.id === planning) ?? null
 
   return (
     <div>
       <PageHeader
         title="Supervisors"
-        description="Create supervisors, give them a login and assign the stores they oversee"
+        description="Create supervisors, assign their stores, and set each week’s journey plan"
         actions={
           <Button onClick={() => setAddOpen(true)}>
             <Plus size={15} /> Add supervisor
@@ -352,13 +509,14 @@ export function SupervisorsPage() {
         }
       />
       <Card padding={false}>
-        <TableScroll minWidth={860}>
+        <TableScroll minWidth={1080}>
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
               <tr>
                 <th className="px-4 py-3">Supervisor</th>
                 <th className="px-4 py-3">City</th>
                 <th className="px-4 py-3">Stores</th>
+                <th className="px-4 py-3">This week’s journey</th>
                 <th className="px-4 py-3">BAs</th>
                 <th className="px-4 py-3">Team conversion</th>
                 <th className="px-4 py-3">Coverage</th>
@@ -386,6 +544,9 @@ export function SupervisorsPage() {
                         {o.stores.map((x) => x.name).join(', ') || 'None assigned'}
                       </div>
                     </td>
+                    <td className="px-4 py-3">
+                      <JourneyPlanCell supervisorId={s.id} />
+                    </td>
                     <td className="px-4 py-3">{new Set(o.bas.map((b) => b.id)).size}</td>
                     <td className="px-4 py-3 font-semibold">{o.teamConversion}%</td>
                     <td className="px-4 py-3 font-semibold">{o.coverage}%</td>
@@ -393,6 +554,9 @@ export function SupervisorsPage() {
                       <div className="flex flex-wrap gap-1.5">
                         <Button size="sm" variant="secondary" onClick={() => setEditing(s.id)}>
                           <Pencil size={12} /> Stores
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={() => setPlanning(s.id)}>
+                          <CalendarDays size={12} /> Plan
                         </Button>
                         <Button size="sm" variant="secondary" onClick={() => preview(s.id)}>
                           <Eye size={12} /> Preview
@@ -404,7 +568,7 @@ export function SupervisorsPage() {
               })}
               {supervisors.length === 0 && (
                 <tr className="border-t border-slate-100">
-                  <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
+                  <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-400">
                     No supervisors yet. Use “Add supervisor” to create one.
                   </td>
                 </tr>
@@ -416,6 +580,13 @@ export function SupervisorsPage() {
 
       <AddSupervisorModal open={addOpen} onClose={() => setAddOpen(false)} onCreated={setCredentials} />
       <EditStoresModal supervisor={supervisors.find((s) => s.id === editing) ?? null} onClose={() => setEditing(null)} />
+      {planningSupervisor && (
+        <AssignJourneyModal
+          supervisor={planningSupervisor}
+          initialWeek={currentWeekStart()}
+          onClose={() => setPlanning(null)}
+        />
+      )}
       <CredentialsModal credentials={credentials} onClose={() => setCredentials(null)} />
     </div>
   )
@@ -429,6 +600,9 @@ export function SupervisorDetailPage() {
   const supervisor = supervisors.find((s) => s.id === id)
   const [editing, setEditing] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
+  const [planOpen, setPlanOpen] = useState(false)
+  const [weekStart, setWeekStart] = useState(currentWeekStart)
+  const [viewVisit, setViewVisit] = useState<JourneyVisit | null>(null)
   const [credentials, setCredentials] = useState<Credentials | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const preview = usePreview()
@@ -472,12 +646,27 @@ export function SupervisorDetailPage() {
         }
       />
 
+      <JourneyWeekPanel
+        supervisor={supervisor}
+        weekStart={weekStart}
+        onWeekStart={setWeekStart}
+        onViewVisit={setViewVisit}
+        action={
+          <Button size="sm" onClick={() => setPlanOpen(true)}>
+            <CalendarDays size={14} /> Assign journey plan
+          </Button>
+        }
+      />
       <SupervisorSummary supervisor={supervisor} />
       <SupervisorIncentiveCard supervisor={supervisor} />
       <SupervisorStoreCards supervisor={supervisor} />
       <SupervisorBaTable supervisor={supervisor} />
 
       <EditStoresModal supervisor={editing ? supervisor : null} onClose={() => setEditing(false)} />
+      {planOpen && (
+        <AssignJourneyModal supervisor={supervisor} initialWeek={weekStart} onClose={() => setPlanOpen(false)} />
+      )}
+      <VisitDetailModal visit={viewVisit} onClose={() => setViewVisit(null)} />
       <LoginDetailsModal
         supervisor={loginOpen ? supervisor : null}
         onClose={() => setLoginOpen(false)}

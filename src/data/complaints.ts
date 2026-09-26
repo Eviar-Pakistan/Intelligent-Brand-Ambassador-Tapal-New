@@ -1,5 +1,7 @@
 export type ComplaintStatus = 'Open' | 'In Review' | 'Resolved' | 'Rejected'
 
+export type ComplaintKind = 'customer' | 'ba'
+
 export type ComplaintCategory =
   | 'Store facilities'
   | 'Product stock'
@@ -8,21 +10,63 @@ export type ComplaintCategory =
   | 'Schedule / deployment'
   | 'Other'
 
-export type Complaint = {
+export type ComplaintBrand = {
+  name: string
+  skus: string[]
+}
+
+/** Product lines and pack sizes a customer complaint can be filed against. */
+export const complaintBrands: ComplaintBrand[] = [
+  {
+    name: 'Tapal Danedar',
+    skus: ['Danedar 90g', 'Danedar 190g', 'Danedar 475g', 'Danedar 900g'],
+  },
+  {
+    name: 'Family Pack',
+    skus: ['Family Pack 900g', 'Family Carton 5x475g', 'Bulk Tea 2.5kg'],
+  },
+  {
+    name: 'Tea Bags',
+    skus: ['Tea Bags 25s', 'Tea Bags 50s', 'Tea Bags 100s', 'Tea Bags 200s'],
+  },
+  {
+    name: 'Specialty',
+    skus: ['Green Tea 100g', 'Green Tea 200g', 'Tezdum 250g', 'Flavored Tea 150g'],
+  },
+]
+
+type ComplaintBase = {
   id: string
   baId: string
   baName: string
   storeId: number
   storeName: string
   city: string
-  category: ComplaintCategory
-  subject: string
-  details: string
   status: ComplaintStatus
   createdAt: string
   updatedAt: string
   hoNote?: string
 }
+
+export type CustomerComplaint = ComplaintBase & {
+  kind: 'customer'
+  brand: string
+  sku: string
+  customerName: string
+  customerNumber: string
+  complaint: string
+  /** Compressed image attached by the BA, when the customer provided one. */
+  image?: string
+}
+
+export type BaComplaint = ComplaintBase & {
+  kind: 'ba'
+  category: ComplaintCategory
+  subject: string
+  details: string
+}
+
+export type Complaint = CustomerComplaint | BaComplaint
 
 export const complaintCategories: ComplaintCategory[] = [
   'Store facilities',
@@ -36,6 +80,7 @@ export const complaintCategories: ComplaintCategory[] = [
 export const initialComplaints: Complaint[] = [
   {
     id: 'cmp-1001',
+    kind: 'ba',
     baId: 'hamza',
     baName: 'Hamza Ali',
     storeId: 7,
@@ -51,6 +96,7 @@ export const initialComplaints: Complaint[] = [
   },
   {
     id: 'cmp-1002',
+    kind: 'ba',
     baId: 'sara',
     baName: 'Sara Ahmed',
     storeId: 19,
@@ -67,6 +113,7 @@ export const initialComplaints: Complaint[] = [
   },
   {
     id: 'cmp-1003',
+    kind: 'ba',
     baId: 'fatima',
     baName: 'Fatima Noor',
     storeId: 4,
@@ -83,6 +130,7 @@ export const initialComplaints: Complaint[] = [
   },
   {
     id: 'cmp-1004',
+    kind: 'ba',
     baId: 'bilal',
     baName: 'Bilal Ahmed',
     storeId: 7,
@@ -95,6 +143,42 @@ export const initialComplaints: Complaint[] = [
     status: 'Open',
     createdAt: '2026-09-14T16:15:00',
     updatedAt: '2026-09-14T16:15:00',
+  },
+  {
+    id: 'cmp-1005',
+    kind: 'customer',
+    baId: 'ayesha',
+    baName: 'Ayesha Khan',
+    storeId: 12,
+    storeName: 'Carrefour DHA',
+    city: 'Lahore',
+    brand: 'Tapal Danedar',
+    sku: 'Danedar 475g',
+    customerName: 'Nadia Rahman',
+    customerNumber: '03001234567',
+    complaint:
+      'Seal was already open and the tea smelled stale. Customer asked for a replacement pack.',
+    status: 'Open',
+    createdAt: '2026-09-15T11:05:00',
+    updatedAt: '2026-09-15T11:05:00',
+  },
+  {
+    id: 'cmp-1006',
+    kind: 'customer',
+    baId: 'sara',
+    baName: 'Sara Ahmed',
+    storeId: 19,
+    storeName: 'Al-Fatah Blue Area',
+    city: 'Islamabad',
+    brand: 'Tea Bags',
+    sku: 'Tea Bags 100s',
+    customerName: 'Imran Qureshi',
+    customerNumber: '03219876543',
+    complaint: 'Two tea bags in the box were empty. Customer wants the batch checked.',
+    status: 'In Review',
+    createdAt: '2026-09-14T17:40:00',
+    updatedAt: '2026-09-15T09:15:00',
+    hoNote: 'Batch photo requested from the store.',
   },
 ]
 

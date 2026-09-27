@@ -192,6 +192,7 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
   const navigate = useNavigate()
   const [bellOpen, setBellOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [pushError, setPushError] = useState<string | null>(null)
   const meta = roleMeta[role]
   const navGroups = groupNav(cfg.nav)
 
@@ -205,11 +206,15 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
   }, [pathname])
 
   useEffect(() => {
-    if (kind !== 'supervisor' || !sv.supervisor || sv.preview) return
+    if (kind !== 'supervisor' || !sv.supervisor) return
     const supervisorId = sv.supervisor.id
-    void enableSupervisorPush(supervisorId).catch((error) => {
-      console.error('[push] token registration failed', error)
-    })
+    void enableSupervisorPush(supervisorId)
+      .then(() => setPushError(null))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : 'Notifications could not be enabled.'
+        setPushError(message)
+        console.error('[push] token registration failed', error)
+      })
     let stop = false
     async function pull() {
       try {
@@ -229,7 +234,7 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
       stop = true
       window.clearInterval(id)
     }
-  }, [kind, sv.supervisor, sv.preview])
+  }, [kind, sv.supervisor])
 
   const title =
     titles[pathname] ??
@@ -458,6 +463,11 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
           </div>
         </header>
         <main className="flex-1 overflow-x-hidden overflow-y-auto p-3 sm:p-4 lg:p-6">
+          {pushError && kind === 'supervisor' && (
+            <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              Notifications are off for this browser. {pushError} Allow notifications, then refresh this page.
+            </div>
+          )}
           <Outlet />
         </main>
       </div>

@@ -277,16 +277,6 @@ export function BaStockReportPage() {
 
   function finishCheckOut() {
     checkOut()
-    const ambassador = ambassadors.find((item) => item.id === (account?.id ?? 'ayesha'))
-    const store = ambassador?.storeId != null ? stores.find((item) => item.id === ambassador.storeId) : undefined
-    if (ambassador?.storeId != null && store) {
-      notifyBaCheckOut({
-        baName: account?.name ?? ambassador.name,
-        storeId: store.id,
-        storeName: store.name,
-        at: new Date(),
-      })
-    }
   }
 
   useEffect(() => {
@@ -422,7 +412,19 @@ export function BaOtherBrandsPage() {
         source: anytime ? 'anytime' : 'checkout',
       },
     )
-    if (!anytime) markReportSubmitted()
+    if (!anytime) {
+      markReportSubmitted()
+      const ambassador = ambassadors.find((item) => item.id === (account?.id ?? 'ayesha'))
+      const store = ambassador?.storeId != null ? stores.find((item) => item.id === ambassador.storeId) : undefined
+      if (ambassador?.storeId != null && store) {
+        notifyBaCheckOut({
+          baName: account?.name ?? ambassador.name,
+          storeId: store.id,
+          storeName: store.name,
+          at: new Date(),
+        })
+      }
+    }
     setSubmitted(true)
   }
 

@@ -96,11 +96,6 @@ export function mergeRemoteNotifications(
   const known = new Set(current.map((item) => item.id))
   const fresh = events.filter((event) => event.id && !known.has(event.id))
   if (!fresh.length) return
-  for (const event of fresh) {
-    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      new Notification('BA attendance', { body: event.body })
-    }
-  }
   commit(
     [
       ...fresh.map((event) => ({

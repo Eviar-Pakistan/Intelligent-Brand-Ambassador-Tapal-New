@@ -4,7 +4,7 @@ import { DesktopShell } from '../../components/AppShell'
 import { Card, Modal, PageHeader, StatusBadge, TableScroll, Tabs } from '../../components/ui'
 import { useComplaints } from '../../context/ComplaintsContext'
 import { formatComplaintDate, type Complaint } from '../../data/complaints'
-import { useDailyReports } from '../../lib/baReport'
+import { labeledSales, labeledStock, useDailyReports, type StoredDailyReport } from '../../lib/baReport'
 import { signOut, supervisorOverview, useSupervisorSession, type Supervisor } from '../../lib/supervisors'
 import {
   SupervisorBaTable,
@@ -237,28 +237,42 @@ function SupervisorComplaintList({ supervisor }: { supervisor: Supervisor }) {
   )
 }
 
+const SOURCE_LABEL: Record<StoredDailyReport['source'], string> = {
+  checkout: 'Checkout',
+  anytime: 'Anytime stock',
+  excel: 'Excel upload',
+}
+
 export function SupervisorSubmissionsPage() {
   const { supervisor, header } = usePortal('BA submissions', 'stock, sales and competitor data filed by your BAs')
   const reports = useDailyReports()
+  const [openId, setOpenId] = useState<string | null>(null)
+  const storeByBa = useMemo(() => {
+    const map = new Map<string, string>()
+    if (!supervisor) return map
+    for (const ba of supervisorOverview(supervisor).bas) map.set(ba.id, ba.store)
+    return map
+  }, [supervisor])
   const rows = useMemo(() => {
     if (!supervisor) return []
     const ids = new Set(supervisorOverview(supervisor).bas.map((ba) => ba.id))
     return reports.filter((report) => ids.has(report.baId))
   }, [reports, supervisor])
+  const openReport = rows.find((report) => report.id === openId) ?? null
 
   return (
     <div className="space-y-5">
       {header}
       <Card padding={false}>
-        <TableScroll minWidth={720}>
+        <TableScroll minWidth={860}>
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
               <tr>
                 <th className="px-4 py-3">Submitted</th>
                 <th className="px-4 py-3">BA</th>
+                <th className="px-4 py-3">Store</th>
                 <th className="px-4 py-3">Source</th>
-                <th className="px-4 py-3">Stock lines</th>
-                <th className="px-4 py-3">Sales lines</th>
+                <th className="px-4 py-3"> </th>
               </tr>
             </thead>
             <tbody>
@@ -266,12 +280,16 @@ export function SupervisorSubmissionsPage() {
                 <tr key={report.id} className="border-t border-slate-100">
                   <td className="px-4 py-3 text-xs text-slate-500">{formatComplaintDate(report.submittedAt)}</td>
                   <td className="px-4 py-3 font-medium text-slate-900">{report.baName}</td>
-                  <td className="px-4 py-3 text-slate-600">{report.source}</td>
-                  <td className="px-4 py-3 tabular-nums">
-                    {Object.values(report.stock).filter((value) => String(value).trim()).length}
-                  </td>
-                  <td className="px-4 py-3 tabular-nums">
-                    {Object.values(report.sales).filter((value) => String(value).trim()).length}
+                  <td className="px-4 py-3 text-slate-600">{storeByBa.get(report.baId) ?? (report.city || '—')}</td>
+                  <td className="px-4 py-3 text-slate-600">{SOURCE_LABEL[report.source]}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => setOpenId(report.id)}
+                      className="text-xs font-semibold text-brand-600"
+                    >
+                      View
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -286,6 +304,62 @@ export function SupervisorSubmissionsPage() {
           </table>
         </TableScroll>
       </Card>
+      <Modal
+        open={openReport != null}
+        onClose={() => setOpenId(null)}
+        title={openReport ? `${openReport.baName} submission` : 'Submission'}
+      >
+        {openReport && (
+          <div className="space-y-4">
+            <p className="text-xs text-slate-500">
+              {storeByBa.get(openReport.baId) ?? (openReport.city || 'Store not set')} ·{' '}
+              {SOURCE_LABEL[openReport.source]} · {formatComplaintDate(openReport.submittedAt)}
+            </p>
+            <SubmissionSlice title="Stock report" rows={labeledStock(openReport.stock)} />
+            <SubmissionSlice
+              title="Daily sales"
+              rows={labeledSales(openReport.sales).filter((row) => row.value.trim())}
+            />
+            <SubmissionSlice
+              title="Competitor data"
+              rows={openReport.otherBrands
+                .filter((brand) => brand.name.trim())
+                .map((brand) => ({
+                  section: 'Other Brands',
+                  item: brand.name,
+                  value: brand.price.trim() || '—',
+                }))}
+            />
+          </div>
+        )}
+      </Modal>
+    </div>
+  )
+}
+
+function SubmissionSlice({
+  title,
+  rows,
+}: {
+  title: string
+  rows: { section: string; item: string; value: string }[]
+}) {
+  const filled = rows.filter((row) => row.value.trim())
+  return (
+    <div className="rounded-xl bg-slate-50 p-3">
+      <div className="text-xs font-bold tracking-wide text-slate-500 uppercase">{title}</div>
+      {filled.length === 0 ? (
+        <p className="mt-2 text-xs text-slate-500">Nothing submitted.</p>
+      ) : (
+        <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs">
+          {filled.map((row) => (
+            <li key={`${row.section}-${row.item}`} className="flex justify-between gap-3">
+              <span className="text-slate-600">{row.item}</span>
+              <span className="font-semibold text-slate-900">{row.value}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

@@ -409,32 +409,40 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
                 )}
               </button>
               {bellOpen && (
-                <div className="absolute right-0 z-20 mt-2 w-[min(20rem,calc(100vw-1.5rem))] rounded-2xl border border-slate-100 bg-white p-3 shadow-xl">
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="text-sm font-semibold">Notifications</div>
-                    <button
-                      className="text-xs text-brand-600"
-                      onClick={() => {
-                        if (kind === 'supervisor' && sv.supervisor) clearSupervisorNotifications(sv.supervisor.id)
-                        else demo.clearNotifications()
-                        setBellOpen(false)
-                      }}
-                    >
-                      Clear
-                    </button>
+                <>
+                  <button
+                    type="button"
+                    aria-label="Close notifications"
+                    className="fixed inset-0 z-30 bg-navy-950/20 sm:bg-transparent"
+                    onClick={() => setBellOpen(false)}
+                  />
+                  <div className="fixed inset-x-3 top-[4.25rem] z-40 flex max-h-[min(70dvh,24rem)] w-auto flex-col rounded-2xl border border-slate-100 bg-white p-3 shadow-xl sm:absolute sm:inset-x-auto sm:top-auto sm:right-0 sm:mt-2 sm:w-80">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold">Notifications</div>
+                      <button
+                        className="shrink-0 text-xs font-semibold text-brand-600"
+                        onClick={() => {
+                          if (kind === 'supervisor' && sv.supervisor) clearSupervisorNotifications(sv.supervisor.id)
+                          else demo.clearNotifications()
+                          setBellOpen(false)
+                        }}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    {notifications.length === 0 ? (
+                      <p className="py-4 text-center text-xs text-slate-400">No notifications</p>
+                    ) : (
+                      <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain">
+                        {notifications.map((n) => (
+                          <li key={n} className="break-words rounded-xl bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">
+                            {n}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
-                  {notifications.length === 0 ? (
-                    <p className="py-4 text-center text-xs text-slate-400">No notifications</p>
-                  ) : (
-                    <ul className="max-h-60 space-y-2 overflow-auto">
-                      {notifications.map((n) => (
-                        <li key={n} className="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                          {n}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+                </>
               )}
             </div>
 

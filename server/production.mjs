@@ -23,6 +23,31 @@ const types = {
   '.map': 'application/json',
 }
 
+function proxyDjango(req, res) {
+  const headers = { ...req.headers, host: '127.0.0.1:8000' }
+  const upstream = http.request(
+    {
+      hostname: '127.0.0.1',
+      port: 8000,
+      path: req.url,
+      method: req.method,
+      headers,
+    },
+    (up) => {
+      res.writeHead(up.statusCode ?? 502, up.headers)
+      up.pipe(res)
+    },
+  )
+  upstream.on('error', () => {
+    if (!res.headersSent) {
+      res.statusCode = 502
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ ok: false, error: 'Django is not running on port 8000' }))
+    }
+  })
+  req.pipe(upstream)
+}
+
 function sendFile(res, filePath) {
   const body = fs.readFileSync(filePath)
   res.statusCode = 200
@@ -40,6 +65,16 @@ const server = http.createServer(async (req, res) => {
       res.setHeader('Content-Type', 'application/json')
       res.end(JSON.stringify({ ok: false }))
     }
+    return
+  }
+
+  const requestUrl = new URL(req.url ?? '/', 'http://localhost')
+  if (
+    requestUrl.pathname.startsWith('/api/') ||
+    requestUrl.pathname.startsWith('/auth/') ||
+    requestUrl.pathname.startsWith('/media/')
+  ) {
+    proxyDjango(req, res)
     return
   }
 

@@ -1,8 +1,15 @@
 import { Link } from 'react-router-dom'
-import { useMemo, useState } from 'react'
-import { Plus, Trash2, Upload, Video } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Plus, Upload, Video } from 'lucide-react'
 import { Button, Card, PageHeader, StatusBadge } from '../../components/ui'
 import { useTrainingContent } from '../../context/TrainingContentContext'
+import {
+  listTrainingVideos,
+  retranscribeTrainingVideo,
+  uploadTrainingVideo,
+  type SavedTrainingVideo,
+} from '../../lib/trainingApi'
+import { CertificationRulesPanel } from './CertificationRulesPanel'
 
 const fieldClass =
   'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500'
@@ -14,20 +21,52 @@ function formatUploadedAt(iso: string) {
 }
 
 export function TrainingManagerPage() {
-  const { modules, addModule, removeModule } = useTrainingContent()
+  const { addModule } = useTrainingContent()
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [videoFile, setVideoFile] = useState<File | null>(null)
   const [questions, setQuestions] = useState([''])
   const [toast, setToast] = useState<string | null>(null)
+  const [toastOk, setToastOk] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [serverVideos, setServerVideos] = useState<SavedTrainingVideo[]>([])
+  const [videosError, setVideosError] = useState<string | null>(null)
+
+  async function refreshVideos() {
+    try {
+      setServerVideos(await listTrainingVideos())
+      setVideosError(null)
+    } catch (err) {
+      setVideosError(err instanceof Error ? err.message : 'Could not load training videos.')
+    }
+  }
+
+  useEffect(() => {
+    void refreshVideos()
+  }, [])
 
   const canSave = useMemo(() => {
     if (!title.trim() || !videoFile) return false
     return questions.every((q) => q.trim().length > 0)
   }, [title, videoFile, questions])
 
-  function handleSave() {
-    if (!canSave || !videoFile) return
+  async function handleSave() {
+    if (!canSave || !videoFile || busy) return
+    setBusy(true)
+    let saved: { warning?: string } = {}
+    try {
+      saved = await uploadTrainingVideo(
+        videoFile,
+        questions.map((prompt) => ({ question: prompt.trim(), description: description.trim() })),
+      )
+      await refreshVideos()
+    } catch (err) {
+      setBusy(false)
+      setToastOk(false)
+      setToast(err instanceof Error ? err.message : 'The training video could not be saved on the server.')
+      setTimeout(() => setToast(null), 4000)
+      return
+    }
     const videoUrl = URL.createObjectURL(videoFile)
     addModule(
       {
@@ -46,7 +85,12 @@ export function TrainingManagerPage() {
     setDescription('')
     setVideoFile(null)
     setQuestions([''])
-    setToast('Training video and questions saved')
+    setBusy(false)
+    setToastOk(!saved.warning)
+    setToast(
+      saved.warning ||
+        'Training video and questions saved. Ambassadors see these questions after they finish the video.',
+    )
     setTimeout(() => setToast(null), 3000)
   }
 
@@ -64,7 +108,13 @@ export function TrainingManagerPage() {
       />
 
       {toast && (
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+        <div
+          className={`rounded-2xl border px-4 py-3 text-sm ${
+            toastOk
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-rose-200 bg-rose-50 text-rose-700'
+          }`}
+        >
           {toast}
         </div>
       )}
@@ -117,7 +167,10 @@ export function TrainingManagerPage() {
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="font-semibold text-slate-900">Assessment questions</h3>
-            <p className="text-xs text-slate-500">Questions only — no answers required</p>
+            <p className="text-xs text-slate-500">
+              These questions are saved with the video and shown on the BA screen. The BA answers out loud.
+              The NLP analyzer scores each answer against the video transcript.
+            </p>
           </div>
           <Button
             size="sm"
@@ -158,58 +211,72 @@ export function TrainingManagerPage() {
         </div>
 
         <div className="mt-5 flex justify-end">
-          <Button disabled={!canSave} onClick={handleSave}>
-            Save training module
+          <Button disabled={!canSave || busy} onClick={() => void handleSave()}>
+            {busy ? 'Saving…' : 'Save training module'}
           </Button>
         </div>
       </Card>
 
       <Card>
-        <h3 className="mb-3 font-semibold text-slate-900">Upload history</h3>
-        {modules.length === 0 ? (
-          <p className="text-sm text-slate-500">No training modules yet.</p>
+        <h3 className="font-semibold text-slate-900">Certification score</h3>
+        <p className="mt-1 mb-4 text-xs text-slate-500">
+          After the BA answers every question, this score certifies or rejects them.
+        </p>
+        <CertificationRulesPanel />
+      </Card>
+
+      <Card>
+        <h3 className="mb-1 font-semibold text-slate-900">Saved on the server</h3>
+        <p className="mb-3 text-xs text-slate-500">
+          The active video is what ambassadors watch. Its questions appear after the video, and each spoken answer is scored against the transcript.
+        </p>
+        {videosError && <p className="mb-3 text-sm text-rose-600">{videosError}</p>}
+        {serverVideos.length === 0 && !videosError ? (
+          <p className="text-sm text-slate-500">No training video has been saved yet.</p>
         ) : (
           <div className="space-y-3">
-            {modules.map((m) => (
-              <div
-                key={m.id}
-                className="flex flex-wrap items-start justify-between gap-3 rounded-xl bg-slate-50 px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Video size={15} className="text-brand-600" />
-                    <span className="font-semibold text-slate-900">{m.title}</span>
-                    <StatusBadge status="Training" />
-                    {m.builtin && <StatusBadge status="Built-in" />}
-                  </div>
-                  {m.description && (
-                    <p className="mt-1 text-sm text-slate-500">{m.description}</p>
-                  )}
-                  <p className="mt-1 text-xs text-slate-400">
-                    {m.videoName || 'No file name'} · {m.questions.length} question
-                    {m.questions.length === 1 ? '' : 's'} · Uploaded {formatUploadedAt(m.createdAt)}
-                  </p>
+            {serverVideos.map((video) => (
+              <div key={video.id} className="rounded-xl bg-slate-50 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Video size={15} className="text-brand-600" />
+                  <span className="font-semibold text-slate-900">{video.original_name || 'Training video'}</span>
+                  {video.is_active && <StatusBadge status="Active" />}
+                </div>
+                <p className="mt-1 text-xs text-slate-400">
+                  {video.question_count} question{video.question_count === 1 ? '' : 's'} · Uploaded{' '}
+                  {formatUploadedAt(video.created_at)} ·{' '}
+                  {video.transcript_preview
+                    ? 'Transcript ready. Spoken answers are scored against it.'
+                    : 'Transcript not ready. NLP cannot compare answers to the video yet.'}
+                </p>
+                {!video.transcript_preview && (
+                  <button
+                    type="button"
+                    className="mt-2 text-xs font-semibold text-brand-700 hover:underline"
+                    onClick={() => {
+                      void retranscribeTrainingVideo(video.id)
+                        .then(() => refreshVideos())
+                        .then(() => {
+                          setToastOk(true)
+                          setToast('Video transcript saved. Answers will be scored against it.')
+                        })
+                        .catch((err: unknown) => {
+                          setToastOk(false)
+                          setToast(err instanceof Error ? err.message : 'Could not transcribe this video.')
+                        })
+                    }}
+                  >
+                    Build transcript
+                  </button>
+                )}
+                {video.questions.length > 0 && (
                   <ul className="mt-2 space-y-1 text-sm text-slate-600">
-                    {m.questions.map((q, i) => (
+                    {video.questions.map((q, i) => (
                       <li key={q.id}>
-                        {i + 1}. {q.prompt}
+                        {i + 1}. {q.question}
                       </li>
                     ))}
                   </ul>
-                  {m.videoUrl && (
-                    <video
-                      src={m.videoUrl}
-                      controls
-                      className="mt-3 max-h-48 w-full max-w-md rounded-xl bg-black"
-                    />
-                  )}
-                </div>
-                {m.builtin ? (
-                  <span className="shrink-0 text-xs text-slate-400">Built in · always available</span>
-                ) : (
-                  <Button size="sm" variant="ghost" onClick={() => removeModule(m.id)}>
-                    <Trash2 size={14} /> Remove
-                  </Button>
                 )}
               </div>
             ))}

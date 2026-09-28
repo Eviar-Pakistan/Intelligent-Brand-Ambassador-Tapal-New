@@ -1,0 +1,375 @@
+"""Shift scheduling helpers (week board dates, peak detection)."""
+
+from __future__ import annotations
+
+import re
+from datetime import date, time, timedelta
+
+from django.utils import timezone
+
+
+DAY_KEYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+
+
+def monday_of(d: date | None = None) -> date:
+    d = d or timezone.localdate()
+    return d - timedelta(days=d.weekday())  # Monday=0
+
+
+def build_week_days(week_start: date | None = None) -> list[dict]:
+    start = monday_of(week_start) if week_start else monday_of()
+    days = []
+    for i, key in enumerate(DAY_KEYS):
+        d = start + timedelta(days=i)
+        days.append(
+            {
+                'key': key,
+                'label': key,
+                'date': d.strftime('%d %b'),
+                'iso': d.isoformat(),
+            }
+        )
+    return days
+
+
+def day_key_for(d: date) -> str:
+    return DAY_KEYS[d.weekday()]
+
+
+def month_bounds(year: int, month: int) -> tuple[date, date]:
+    start = date(year, month, 1)
+    if month == 12:
+        end = date(year, 12, 31)
+    else:
+        end = date(year, month + 1, 1) - timedelta(days=1)
+    return start, end
+
+
+def each_day(start: date, end: date):
+    current = start
+    while current <= end:
+        yield current
+        current += timedelta(days=1)
+
+
+def label_from_times(start: str, end: str) -> str:
+    def fmt(hhmm: str) -> str:
+        hour, minute = (int(part) for part in hhmm.split(':'))
+        suffix = 'AM' if hour < 12 else 'PM'
+        hour12 = hour % 12 or 12
+        return f'{hour12}:{minute:02d} {suffix}'
+
+    return f'{fmt(start)} – {fmt(end)}'
+
+
+def peak_matches(shift_label: str, peak_hours: str) -> bool:
+    """Heuristic: shift overlaps store peak_hours text."""
+    peaks = (peak_hours or '').lower()
+    shift = (shift_label or '').lower()
+    if not peaks.strip():
+        return False
+    # Check hour tokens like "12", "6", "5" appearing in both
+    for token in ('10', '11', '12', '1', '2', '3', '4', '5', '6', '7', '8', '9'):
+        if token in shift and token in peaks:
+            return True
+    return 'peak' in peaks
+
+
+def parse_hhmm(raw) -> time | None:
+    """'09:30', '9:30', '09:30:00' → time. Anything else → None."""
+    text = str(raw or '').strip()
+    match = re.fullmatch(r'(\d{1,2}):(\d{2})(?::\d{2})?', text)
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return time(hour, minute)
+
+
+def parse_month(raw) -> tuple[int, int] | None:
+    """'2026-09' → (2026, 9)."""
+    match = re.fullmatch(r'(\d{4})-(\d{1,2})', str(raw or '').strip())
+    if not match:
+        return None
+    year, month = int(match.group(1)), int(match.group(2))
+    if not 1 <= month <= 12:
+        return None
+    return year, month
+
+
+def _overlaps(a_start: time, a_end: time, b_start: time | None, b_end: time | None) -> bool:
+    if b_start is None or b_end is None:
+        return False
+    return a_start < b_end and b_start < a_end
+
+
+def create_month_shifts(rows: list[dict], user=None) -> dict:
+    """
+    Create one monthly shift per row {ba_code, store_code, start_time, end_time, month}.
+
+    Rows with problems are reported and skipped; valid rows are saved.
+    A row matching an existing monthly shift (same BA, store, hours and month) is skipped,
+    so uploading the same file twice does not duplicate shifts.
+    """
+    from django.db import transaction
+
+    from .models import Ambassador, Store
+
+    errors: list[str] = []
+    plans: list[dict] = []
+    seen: set[tuple] = set()
+
+    codes = {str(r.get('ba_code') or '').strip().upper() for r in rows}
+    store_codes = {str(r.get('store_code') or '').strip().upper() for r in rows}
+    ambassadors = {a.ba_code.upper(): a for a in Ambassador.objects.filter(ba_code__in=codes - {''})}
+    stores = {s.store_code.upper(): s for s in Store.objects.filter(store_code__in=store_codes - {''})}
+
+    for index, row in enumerate(rows):
+        label = row.get('row') or index + 1
+        ba_code = str(row.get('ba_code') or '').strip().upper()
+        store_code = str(row.get('store_code') or '').strip().upper()
+        start = parse_hhmm(row.get('start_time'))
+        end = parse_hhmm(row.get('end_time'))
+        month = parse_month(row.get('month'))
+
+        problems = []
+        if not ba_code:
+            problems.append('BA code is required')
+        if not store_code:
+            problems.append('Store code is required')
+        if start is None:
+            problems.append('Start time must be HH:MM')
+        if end is None:
+            problems.append('End time must be HH:MM')
+        if start and end and end <= start:
+            problems.append('End time must be after start time')
+        if month is None:
+            problems.append('Month must be YYYY-MM')
+
+        ambassador = ambassadors.get(ba_code)
+        store = stores.get(store_code)
+        if ba_code and ambassador is None:
+            problems.append(f'No ambassador with BA code {ba_code}')
+        if store_code and store is None:
+            problems.append(f'No store with store code {store_code}')
+
+        key = (ba_code, store_code, start, end, month)
+        if not problems and key in seen:
+            problems.append('Duplicate of an earlier row')
+        seen.add(key)
+
+        if problems:
+            errors.append(f'Row {label} ({ba_code or "no BA code"}): {"; ".join(problems)}.')
+            continue
+        plans.append({'ambassador': ambassador, 'store': store, 'start': start, 'end': end, 'month': month})
+
+    created = 0
+    skipped = 0
+    conflicts = 0
+
+    with transaction.atomic():
+        for plan in plans:
+            month_key = '%04d-%02d' % plan['month']
+            if monthly_shift_exists(plan, month_key):
+                skipped += 1
+                continue
+            shift = build_monthly_shift(
+                store=plan['store'],
+                ambassador=plan['ambassador'],
+                month=month_key,
+                start=plan['start'],
+                end=plan['end'],
+                user=user,
+            )
+            shift.save()
+            created += 1
+            if shift.status == shift.Status.CONFLICT:
+                conflicts += 1
+
+    return {
+        'created': created,
+        'skipped_existing': skipped,
+        'conflicts': conflicts,
+        'rows_saved': len(plans),
+        'errors': errors,
+    }
+
+
+def monthly_shift_exists(plan: dict, month_key: str) -> bool:
+    from .models import MonthlyShift
+
+    return MonthlyShift.objects.filter(
+        ambassador=plan['ambassador'],
+        store=plan['store'],
+        month=month_key,
+        start_time=plan['start'],
+        end_time=plan['end'],
+    ).exists()
+
+
+def monthly_status(shift) -> str:
+    """Open without a BA; Conflict when the BA has overlapping hours elsewhere that month."""
+    from .models import MonthlyShift
+
+    if not shift.ambassador_id:
+        return MonthlyShift.Status.OPEN
+    others = MonthlyShift.objects.filter(ambassador_id=shift.ambassador_id, month=shift.month).exclude(pk=shift.pk)
+    clash = any(_overlaps(shift.start_time, shift.end_time, o.start_time, o.end_time) for o in others)
+    return MonthlyShift.Status.CONFLICT if clash else MonthlyShift.Status.SCHEDULED
+
+
+def build_monthly_shift(*, store, ambassador, month: str, start: time, end: time, user=None):
+    from .models import MonthlyShift
+
+    label = label_from_times(start.strftime('%H:%M'), end.strftime('%H:%M'))
+    shift = MonthlyShift(
+        store=store,
+        ambassador=ambassador,
+        month=month,
+        start_time=start,
+        end_time=end,
+        shift_label=label,
+        peak_recommended=peak_matches(label, store.peak_hours or ''),
+        created_by=user if user and user.is_authenticated else None,
+    )
+    shift.status = monthly_status(shift)
+    return shift
+
+
+def ensure_daily_rows(day: date, ambassador=None) -> None:
+    """Create the attendance row for `day` from every assigned monthly shift of that month."""
+    from .models import MonthlyShift, ShiftAssignment
+
+    monthly = MonthlyShift.objects.filter(month=day.strftime('%Y-%m'), ambassador__isnull=False)
+    if ambassador is not None:
+        monthly = monthly.filter(ambassador=ambassador)
+    for shift in monthly:
+        ShiftAssignment.objects.get_or_create(
+            monthly_shift=shift,
+            date=day,
+            defaults=_daily_fields(shift, day),
+        )
+
+
+def _daily_fields(shift, day: date) -> dict:
+    return {
+        'store_id': shift.store_id,
+        'ambassador_id': shift.ambassador_id,
+        'day_key': day_key_for(day),
+        'shift_label': shift.shift_label,
+        'start_time': shift.start_time,
+        'end_time': shift.end_time,
+        'peak_recommended': shift.peak_recommended,
+        'status': shift.status,
+    }
+
+
+def sync_daily_rows(shift) -> None:
+    """After an edit, today's row (if not started yet) follows the monthly shift. Past days keep their record."""
+    today = timezone.localdate()
+    pending = shift.days.filter(date__gte=today, checked_in_at__isnull=True)
+    if not shift.ambassador_id or shift.month != today.strftime('%Y-%m'):
+        pending.delete()
+        return
+    for row in pending:
+        for field, value in _daily_fields(shift, row.date).items():
+            setattr(row, field, value)
+        row.save()
+
+
+def drop_pending_daily_rows(shift) -> None:
+    """Before a monthly shift is deleted: remove today's row unless the BA already checked in."""
+    shift.days.filter(date__gte=timezone.localdate(), checked_in_at__isnull=True).delete()
+
+
+class Attendance:
+    PRESENT = 'Present'
+    ON_SHIFT = 'On shift'
+    NOT_CHECKED_IN = 'Not checked in'
+    ABSENT = 'Absent'
+
+
+def attendance_status(row, today: date | None = None) -> str:
+    """
+    Present only after check-in, report submission and check-out.
+    A past day without that is Absent, including a check-in with no report.
+    """
+    today = today or timezone.localdate()
+    if row.checked_out_at and row.report_submitted_at:
+        return Attendance.PRESENT
+    if row.date == today:
+        return Attendance.ON_SHIFT if row.checked_in_at else Attendance.NOT_CHECKED_IN
+    return Attendance.ABSENT
+
+
+MAX_ATTENDANCE_DAYS = 62
+
+
+def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_id=None) -> dict:
+    """Daily attendance rows (made from monthly shifts) with a status for each, plus totals."""
+    from .models import ShiftAssignment
+
+    today = timezone.localdate()
+    date_to = min(date_to, today)
+    if date_from > date_to:
+        date_from = date_to
+    date_from = max(date_from, date_to - timedelta(days=MAX_ATTENDANCE_DAYS - 1))
+
+    for day in each_day(date_from, date_to):
+        ensure_daily_rows(day)
+
+    qs = (
+        ShiftAssignment.objects.filter(date__gte=date_from, date__lte=date_to)
+        .exclude(ambassador_id=None)
+        .select_related('store', 'ambassador')
+        .order_by('-date', 'ambassador__name', 'start_time', 'id')
+    )
+    if ambassador_id:
+        qs = qs.filter(ambassador_id=ambassador_id)
+    if store_id:
+        qs = qs.filter(store_id=store_id)
+
+    def iso(value):
+        return value.isoformat() if value else None
+
+    rows = []
+    for r in qs:
+        rows.append(
+            {
+                'id': str(r.id),
+                'date': r.date.isoformat(),
+                'day': r.day_key,
+                'baId': r.ambassador_id,
+                'baName': r.ambassador.name,
+                'baCode': r.ambassador.ba_code,
+                'storeId': r.store_id,
+                'storeName': r.store.name,
+                'storeCode': r.store.store_code,
+                'city': r.store.city,
+                'shift': r.shift_label,
+                'checkedInAt': iso(r.checked_in_at),
+                'checkedOutAt': iso(r.checked_out_at),
+                'reportSubmittedAt': iso(r.report_submitted_at),
+                'earlyCheckoutReason': r.early_checkout_reason or None,
+                'status': attendance_status(r, today),
+            }
+        )
+
+    summary = {
+        key: sum(1 for row in rows if row['status'] == value)
+        for key, value in (
+            ('present', Attendance.PRESENT),
+            ('on_shift', Attendance.ON_SHIFT),
+            ('not_checked_in', Attendance.NOT_CHECKED_IN),
+            ('absent', Attendance.ABSENT),
+        )
+    }
+    summary['early_checkouts'] = sum(1 for row in rows if row['earlyCheckoutReason'])
+    summary['total'] = len(rows)
+    return {
+        'date_from': date_from.isoformat(),
+        'date_to': date_to.isoformat(),
+        'summary': summary,
+        'results': rows,
+    }

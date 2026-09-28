@@ -1,0 +1,32 @@
+# Tapal backend — single deployable API (includes BA Linguistic NLP in-process)
+#
+# CPU torch first (recommended on machines without GPU):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Then:
+#   pip install -r requirements.txt
+#   python -m spacy download en_core_web_sm
+#
+# System dependency: ffmpeg must be on PATH (training video + answer audio).
+
+Django>=5.0,<6
+djangorestframework>=3.15
+djangorestframework-simplejwt>=5.3
+djoser>=2.2
+django-cors-headers>=4.3
+Pillow>=10.0
+qrcode>=7.4
+requests>=2.31
+python-dotenv>=1.0
+
+# BA Linguistic NLP (vendored package: ba_engine/)
+numpy
+scipy
+scikit-learn
+librosa
+soundfile
+nltk
+spacy
+openai-whisper
+sentence-transformers
+httpx
+imageio-ffmpeg

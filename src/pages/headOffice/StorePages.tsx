@@ -1,11 +1,7 @@
 import { Link, useParams } from 'react-router-dom'
-import { useMemo, useState } from 'react'
-import {
-  ambassadors,
-  scheduleDays,
-  shiftOptions,
-  stores,
-} from '../../data/mock'
+import { ShiftPlanModal } from './ShiftPlanModal'
+import { useEffect, useMemo, useState } from 'react'
+import { stores } from '../../data/mock'
 import {
   Avatar,
   Button,
@@ -13,24 +9,26 @@ import {
   Modal,
   PageHeader,
   ProgressBar,
+  SearchInput,
   Select,
   StatusBadge,
   TableScroll,
 } from '../../components/ui'
-import { CalendarClock, FileSpreadsheet, Plus, Sparkles } from 'lucide-react'
-import { useSchedule } from '../../context/ScheduleContext'
+import { CalendarClock, CalendarPlus, ChevronLeft, ChevronRight, FileSpreadsheet, Plus } from 'lucide-react'
+import { serverAmbassadorId, useSchedule, type MonthlyShift } from '../../context/ScheduleContext'
+import { Time12Select } from '../../components/Time12Select'
 import { StoreQrCard } from '../../components/StoreQrCard'
+import { useBaAccounts } from '../../lib/baAccounts'
 import { findCreatedStore, shopperPath, useCreatedStores } from '../../lib/storeRegistry'
 import { BulkStoreModal, useRoleBase } from './StoreCreation'
-
-const deployable = ambassadors.filter(
-  (a) => a.status === 'Certified' || a.status === 'Deployed',
-)
 
 export function StoresPage() {
   const base = useRoleBase()
   const [bulkOpen, setBulkOpen] = useState(false)
-  useCreatedStores() // re-render when stores are added
+  useCreatedStores()
+  useEffect(() => {
+    void import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())
+  }, [])
 
   return (
     <div>
@@ -54,10 +52,11 @@ export function StoresPage() {
         }
       />
       <Card padding={false}>
-        <TableScroll minWidth={680}>
+        <TableScroll minWidth={820}>
           <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
             <tr>
+              <th className="px-4 py-3">Store code</th>
               <th className="px-4 py-3">Store</th>
               <th className="px-4 py-3">Footfall</th>
               <th className="px-4 py-3">BAs</th>
@@ -67,8 +66,16 @@ export function StoresPage() {
             </tr>
           </thead>
           <tbody>
+            {stores.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
+                  No stores yet. Create one and it is saved on the server.
+                </td>
+              </tr>
+            )}
             {stores.map((s) => (
               <tr key={s.id} className="border-t border-slate-100 hover:bg-slate-50/70">
+                <td className="px-4 py-3 font-semibold tracking-wide text-slate-800">{s.storeCode || '—'}</td>
                 <td className="px-4 py-3">
                   <Link to={`${base}/stores/${s.id}`} className="font-semibold text-brand-600 hover:underline">
                     #{s.id} {s.name}
@@ -109,7 +116,20 @@ export function StoresPage() {
 export function StoreDetailPage() {
   const { id } = useParams()
   const base = useRoleBase()
-  const store = stores.find((s) => String(s.id) === id) ?? stores[0]
+  useCreatedStores()
+  const store = stores.find((s) => String(s.id) === id)
+  if (!store) {
+    return (
+      <div className="space-y-4">
+        <Link to={`${base}/stores`} className="text-sm text-slate-500 hover:text-brand-600">
+          ← Back to stores
+        </Link>
+        <Card>
+          <p className="text-sm text-slate-600">This store is not on the server.</p>
+        </Card>
+      </div>
+    )
+  }
   const record = findCreatedStore(store.id)
 
   return (
@@ -122,7 +142,7 @@ export function StoreDetailPage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <StatusBadge status={store.status} />
-            <h2 className="mt-2 text-2xl font-bold">STORE #{store.id}</h2>
+            <h2 className="mt-2 text-2xl font-bold">{store.storeCode || `STORE #${store.id}`}</h2>
             <p className="text-slate-600">
               {store.name} · {store.city}
             </p>
@@ -226,129 +246,129 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 export function DeploymentPage() {
+  const [shiftsOpen, setShiftsOpen] = useState(false)
+  const { reload } = useSchedule()
   return (
     <div className="space-y-5">
       <PageHeader
         title="Intelligent Store Deployment"
         description="Schedule certified BAs into peak shifts and activate QR"
+        actions={
+          <Button onClick={() => setShiftsOpen(true)}>
+            <CalendarPlus size={15} /> Create shifts
+          </Button>
+        }
       />
       <SchedulerPanel />
+      <ShiftPlanModal
+        open={shiftsOpen}
+        onClose={() => {
+          setShiftsOpen(false)
+          void reload()
+        }}
+      />
     </div>
   )
 }
 
 function SchedulerPanel() {
-  const { schedule, setSchedule, clearBaFromSlot } = useSchedule()
-  const [day, setDay] = useState('Mon')
+  const accounts = useBaAccounts()
+  const assignable = useMemo(
+    () =>
+      accounts
+        .map((a) => ({ ...a, serverId: serverAmbassadorId(a.id) }))
+        .filter((a): a is typeof a & { serverId: number } => a.serverId !== null)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [accounts],
+  )
+  const { schedule, month, monthLabel, loading, error, shiftMonth, reload, saveShift, clearBaFromSlot, deleteShift } =
+    useSchedule()
+  const [query, setQuery] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   const [form, setForm] = useState({
-    storeId: String(stores[0].id),
-    baId: deployable[0]?.id ?? '',
-    shift: shiftOptions[1],
-    day: 'Mon',
+    storeId: '',
+    baId: '',
+    startTime: '10:00',
+    endTime: '18:00',
   })
 
-  const dayMeta = scheduleDays.find((d) => d.key === day)!
-  const daySlots = useMemo(() => schedule.filter((s) => s.day === day), [schedule, day])
+  useEffect(() => {
+    void reload()
+  }, [reload])
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return schedule
+    return schedule.filter((s) =>
+      [s.storeName, s.storeCode, s.city, s.baName, s.baCode].some((v) => (v ?? '').toLowerCase().includes(q)),
+    )
+  }, [schedule, query])
   const openCount = schedule.filter((s) => s.status === 'Open').length
   const filledCount = schedule.filter((s) => s.status === 'Scheduled').length
+  const conflictCount = schedule.filter((s) => s.status === 'Conflict').length
 
-  function openCreate(prefill?: Partial<typeof form> & { slotId?: string }) {
-    setEditingId(prefill?.slotId ?? null)
+  function flash(message: string) {
+    setToast(message)
+    setTimeout(() => setToast(null), 3000)
+  }
+
+  function openEditor(slot?: MonthlyShift) {
+    setEditingId(slot?.id ?? null)
+    setFormError(null)
     setForm({
-      storeId: prefill?.storeId ?? String(stores[0].id),
-      baId: prefill?.baId ?? deployable[0]?.id ?? '',
-      shift: prefill?.shift ?? shiftOptions[1],
-      day: prefill?.day ?? day,
+      storeId: slot ? String(slot.storeId) : stores[0] ? String(stores[0].id) : '',
+      baId: slot?.baId ?? '',
+      startTime: slot?.startTime ?? '10:00',
+      endTime: slot?.endTime ?? '18:00',
     })
     setModalOpen(true)
   }
 
-  function autoFillOpen() {
-    let next = [...schedule]
-    let assigned = 0
-    const pool = [...deployable]
-    let pi = 0
-    next = next.map((slot) => {
-      if (slot.status !== 'Open' || !pool.length) return slot
-      const ba = pool[pi % pool.length]
-      pi += 1
-      assigned += 1
-      return {
-        ...slot,
-        baId: ba.id,
-        baName: ba.name,
-        status: 'Scheduled' as const,
-      }
-    })
-    setSchedule(next)
-    setToast(`Auto-scheduled ${assigned} open peak shifts with certified BAs`)
-    setTimeout(() => setToast(null), 3500)
-  }
-
-  function saveAssignment() {
-    const store = stores.find((s) => String(s.id) === form.storeId)!
-    const ba = ambassadors.find((a) => a.id === form.baId)
-    if (!ba || (ba.status !== 'Certified' && ba.status !== 'Deployed')) {
-      setToast('Only certified / deployed BAs can be scheduled')
-      setTimeout(() => setToast(null), 3000)
+  async function saveAssignment() {
+    if (!form.storeId) {
+      setFormError('Choose a store.')
       return
     }
-    const dayInfo = scheduleDays.find((d) => d.key === form.day)!
-    const peakHit = store.peak.some((p) =>
-      form.shift.includes(p.split('—')[0]?.trim().split(' ')[0] ?? '___'),
+    if (form.endTime <= form.startTime) {
+      setFormError('End time must be after start time.')
+      return
+    }
+    setSaving(true)
+    const problem = await saveShift(
+      {
+        storeId: Number(form.storeId),
+        month: editingId ? undefined : month,
+        startTime: form.startTime,
+        endTime: form.endTime,
+        ambassadorId: form.baId ? Number(form.baId) : null,
+      },
+      editingId ?? undefined,
     )
-
-    if (editingId) {
-      setSchedule((prev) =>
-        prev.map((s) =>
-          s.id === editingId
-            ? {
-                ...s,
-                day: form.day,
-                date: dayInfo.date,
-                storeId: store.id,
-                storeName: store.name,
-                city: store.city,
-                shift: form.shift,
-                peakRecommended: peakHit || store.peak.length > 0,
-                baId: ba.id,
-                baName: ba.name,
-                status: 'Scheduled',
-              }
-            : s,
-        ),
-      )
-    } else {
-      const id = `s${Date.now()}`
-      setSchedule((prev) => [
-        ...prev,
-        {
-          id,
-          day: form.day,
-          date: dayInfo.date,
-          storeId: store.id,
-          storeName: store.name,
-          city: store.city,
-          shift: form.shift,
-          peakRecommended: true,
-          baId: ba.id,
-          baName: ba.name,
-          status: 'Scheduled',
-        },
-      ])
+    setSaving(false)
+    if (problem) {
+      setFormError(problem)
+      return
     }
     setModalOpen(false)
-    setDay(form.day)
-    setToast(`Scheduled ${ba.name} → ${store.name}`)
-    setTimeout(() => setToast(null), 3000)
+    const store = stores.find((s) => String(s.id) === form.storeId)
+    const ba = assignable.find((a) => String(a.serverId) === form.baId)
+    flash(ba ? `Scheduled ${ba.name} → ${store?.name ?? 'store'}` : `Open shift saved at ${store?.name ?? 'store'}`)
   }
 
-  function clearSlot(id: string) {
-    clearBaFromSlot(id)
+  async function clearSlot(id: string) {
+    const problem = await clearBaFromSlot(id)
+    flash(problem ?? 'Ambassador removed from the shift')
+  }
+
+  async function removeSlot(slot: MonthlyShift) {
+    if (!window.confirm(`Delete the ${slot.monthLabel} shift at ${slot.storeName}?`)) return
+    const problem = await deleteShift(slot.id)
+    flash(problem ?? 'Shift deleted')
   }
 
   const selectedStore = stores.find((s) => String(s.id) === form.storeId)
@@ -361,9 +381,9 @@ function SchedulerPanel() {
         </div>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Card>
-          <div className="text-xs text-slate-500">Week shifts</div>
+          <div className="text-xs text-slate-500">Monthly shifts</div>
           <div className="text-2xl font-bold">{schedule.length}</div>
         </Card>
         <Card>
@@ -374,64 +394,51 @@ function SchedulerPanel() {
           <div className="text-xs text-slate-500">Open (need BA)</div>
           <div className="text-2xl font-bold text-amber-600">{openCount}</div>
         </Card>
+        <Card>
+          <div className="text-xs text-slate-500">Conflicts</div>
+          <div className="text-2xl font-bold text-rose-600">{conflictCount}</div>
+        </Card>
       </div>
 
       <Card>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="font-semibold text-slate-900">Deployment scheduler</h3>
-            <p className="text-xs text-slate-500">
-              Week of 24–30 Aug 2026 · only certified BAs can be assigned
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" size="sm" onClick={autoFillOpen}>
-              <Sparkles size={14} /> Auto-fill open peaks
+          <h3 className="font-semibold text-slate-900">Deployment scheduler</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => shiftMonth(-1)} aria-label="Previous month">
+              <ChevronLeft size={15} />
             </Button>
-            <Button size="sm" onClick={() => openCreate({ day })}>
-              <Plus size={14} /> New shift
+            <span className="min-w-[9rem] text-center text-sm font-medium text-slate-700">{monthLabel || '—'}</span>
+            <Button size="sm" variant="secondary" onClick={() => shiftMonth(1)} aria-label="Next month">
+              <ChevronRight size={15} />
+            </Button>
+            <Button size="sm" onClick={() => openEditor()}>
+              <Plus size={14} /> Add shift
             </Button>
           </div>
         </div>
 
-        <div className="mb-4 overflow-x-auto">
-          <div className="grid min-w-[560px] grid-cols-7 gap-2">
-          {scheduleDays.map((d) => {
-            const count = schedule.filter((s) => s.day === d.key).length
-            const open = schedule.filter((s) => s.day === d.key && s.status === 'Open').length
-            return (
-              <button
-                key={d.key}
-                onClick={() => setDay(d.key)}
-                className={`rounded-xl border px-2 py-3 text-center transition ${
-                  day === d.key
-                    ? 'border-brand-500 bg-brand-500 text-white shadow-md'
-                    : 'border-slate-200 bg-white hover:border-brand-500/40'
-                }`}
-              >
-                <div className="text-xs font-semibold">{d.label}</div>
-                <div className={`text-[10px] ${day === d.key ? 'text-blue-100' : 'text-slate-400'}`}>
-                  {d.date}
-                </div>
-                <div className={`mt-1 text-[10px] font-medium ${day === d.key ? 'text-white' : 'text-slate-500'}`}>
-                  {count} shifts{open ? ` · ${open} open` : ''}
-                </div>
-              </button>
-            )
-          })}
+        {schedule.length > 0 && (
+          <div className="mb-4">
+            <SearchInput
+              placeholder="Search store, BA name or code..."
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
           </div>
-        </div>
+        )}
 
-        <div className="mb-3 text-sm font-semibold text-slate-800">
-          {dayMeta.label} {dayMeta.date}
-        </div>
-
-        {daySlots.length === 0 ? (
+        {error ? (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm text-rose-800">{error}</div>
+        ) : loading && schedule.length === 0 ? (
+          <div className="py-10 text-center text-sm text-slate-500">Loading shifts…</div>
+        ) : rows.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-500">
-            No shifts this day.{' '}
-            <button className="font-semibold text-brand-600" onClick={() => openCreate({ day })}>
-              Add one
-            </button>
+            {schedule.length === 0 ? `No shifts for ${monthLabel || 'this month'}.` : 'No shifts match your search.'}{' '}
+            {schedule.length === 0 && (
+              <button className="font-semibold text-brand-600" onClick={() => openEditor()}>
+                Add one
+              </button>
+            )}
           </div>
         ) : (
           <TableScroll minWidth={720}>
@@ -439,23 +446,36 @@ function SchedulerPanel() {
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
                 <tr>
                   <th className="px-4 py-3">Store</th>
-                  <th className="px-4 py-3">Shift</th>
                   <th className="px-4 py-3">Ambassador</th>
+                  <th className="px-4 py-3">Shift time</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {daySlots.map((slot) => (
+                {rows.map((slot) => (
                   <tr key={slot.id} className="border-t border-slate-100">
                     <td className="px-4 py-3">
-                      <div className="font-medium">
-                        #{slot.storeId} {slot.storeName}
+                      <div className="font-medium">{slot.storeName}</div>
+                      <div className="text-xs text-slate-400">
+                        {[slot.storeCode, slot.city].filter(Boolean).join(' · ')}
                       </div>
-                      <div className="text-xs text-slate-400">{slot.city}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <div>{slot.shift}</div>
+                      {slot.baName ? (
+                        <div className="flex items-center gap-2">
+                          <Avatar name={slot.baName} size="sm" />
+                          <div>
+                            <div>{slot.baName}</div>
+                            {slot.baCode && <div className="font-mono text-xs text-slate-400">{slot.baCode}</div>}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">Unassigned</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="whitespace-nowrap">{slot.shift}</div>
                       {slot.peakRecommended && (
                         <span className="mt-1 inline-flex rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
                           Peak recommended
@@ -463,40 +483,21 @@ function SchedulerPanel() {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {slot.baName ? (
-                        <div className="flex items-center gap-2">
-                          <Avatar name={slot.baName} size="sm" />
-                          <span>{slot.baName}</span>
-                        </div>
-                      ) : (
-                        <span className="text-slate-400">Unassigned</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge status={slot.status === 'Open' ? 'Pending' : 'Active'} />
+                      <StatusBadge status={slot.status} />
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() =>
-                            openCreate({
-                              slotId: slot.id,
-                              storeId: String(slot.storeId),
-                              baId: slot.baId ?? deployable[0]?.id,
-                              shift: slot.shift,
-                              day: slot.day,
-                            })
-                          }
-                        >
-                          {slot.baId ? 'Reassign' : 'Assign'}
+                        <Button size="sm" variant="secondary" onClick={() => openEditor(slot)}>
+                          {slot.baId ? 'Edit' : 'Assign'}
                         </Button>
                         {slot.baId && (
-                          <Button size="sm" variant="ghost" onClick={() => clearSlot(slot.id)}>
+                          <Button size="sm" variant="ghost" onClick={() => void clearSlot(slot.id)}>
                             Clear
                           </Button>
                         )}
+                        <Button size="sm" variant="ghost" onClick={() => void removeSlot(slot)}>
+                          Delete
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -507,70 +508,14 @@ function SchedulerPanel() {
         )}
       </Card>
 
-      <Card>
-        <h3 className="mb-3 font-semibold">Full week board</h3>
-        <div className="overflow-x-auto">
-          <div className="grid min-w-[720px] grid-cols-7 gap-2">
-            {scheduleDays.map((d) => (
-              <div key={d.key} className="rounded-xl bg-slate-50 p-2">
-                <div className="mb-2 text-center text-xs font-bold text-slate-600">
-                  {d.label}
-                  <div className="font-normal text-slate-400">{d.date}</div>
-                </div>
-                <div className="space-y-1.5">
-                  {schedule
-                    .filter((s) => s.day === d.key)
-                    .map((s) => (
-                      <button
-                        key={s.id}
-                        onClick={() => {
-                          setDay(d.key)
-                          openCreate({
-                            slotId: s.id,
-                            storeId: String(s.storeId),
-                            baId: s.baId ?? deployable[0]?.id,
-                            shift: s.shift,
-                            day: s.day,
-                          })
-                        }}
-                        className={`w-full rounded-lg px-2 py-1.5 text-left text-[10px] leading-snug ${
-                          s.status === 'Open'
-                            ? 'border border-dashed border-amber-300 bg-amber-50 text-amber-900'
-                            : 'bg-white text-slate-700 shadow-sm ring-1 ring-slate-100'
-                        }`}
-                      >
-                        <div className="font-semibold">#{s.storeId}</div>
-                        <div className="truncate">{s.baName ?? 'Open slot'}</div>
-                        <div className="truncate opacity-70">{s.shift}</div>
-                      </button>
-                    ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </Card>
-
       <Modal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        title={editingId ? 'Assign / update shift' : 'Schedule new shift'}
+        title={`${editingId ? 'Edit shift' : 'New shift'} · ${
+          (editingId && schedule.find((s) => s.id === editingId)?.monthLabel) || monthLabel
+        }`}
       >
         <div className="space-y-3">
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium text-slate-700">Day</span>
-            <Select
-              className="w-full"
-              value={form.day}
-              onChange={(e) => setForm((f) => ({ ...f, day: e.target.value }))}
-            >
-              {scheduleDays.map((d) => (
-                <option key={d.key} value={d.key}>
-                  {d.label} · {d.date}
-                </option>
-              ))}
-            </Select>
-          </label>
           <label className="block text-sm">
             <span className="mb-1 block font-medium text-slate-700">Store</span>
             <Select
@@ -578,56 +523,62 @@ function SchedulerPanel() {
               value={form.storeId}
               onChange={(e) => setForm((f) => ({ ...f, storeId: e.target.value }))}
             >
+              {stores.length === 0 && <option value="">No stores yet</option>}
               {stores.map((s) => (
                 <option key={s.id} value={s.id}>
-                  #{s.id} {s.name} ({s.city})
+                  {s.storeCode ? `${s.storeCode} · ` : `#${s.id} `}
+                  {s.name} ({s.city})
                 </option>
               ))}
             </Select>
           </label>
-          {selectedStore && (
+          {selectedStore && selectedStore.peak.length > 0 && (
             <div className="rounded-xl bg-violet-50 px-3 py-2 text-xs text-violet-800">
               Peak hours recommended: {selectedStore.peak.join(' · ')}
             </div>
           )}
           <label className="block text-sm">
-            <span className="mb-1 block font-medium text-slate-700">Shift</span>
-            <Select
-              className="w-full"
-              value={form.shift}
-              onChange={(e) => setForm((f) => ({ ...f, shift: e.target.value }))}
-            >
-              {shiftOptions.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </Select>
-          </label>
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium text-slate-700">
-              Brand Ambassador (certified only)
-            </span>
+            <span className="mb-1 block font-medium text-slate-700">Brand Ambassador</span>
             <Select
               className="w-full"
               value={form.baId}
               onChange={(e) => setForm((f) => ({ ...f, baId: e.target.value }))}
             >
-              {deployable.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name} · {a.certification} · readiness {a.readiness}%
+              <option value="">Unassigned (open shift)</option>
+              {form.baId && !assignable.some((a) => String(a.serverId) === form.baId) && (
+                <option value={form.baId}>
+                  {schedule.find((s) => s.id === editingId)?.baName ?? `Ambassador ${form.baId}`}
+                </option>
+              )}
+              {assignable.map((a) => (
+                <option key={a.serverId} value={a.serverId}>
+                  {a.name}
+                  {a.baCode ? ` · ${a.baCode}` : ''}
                 </option>
               ))}
             </Select>
           </label>
-          <p className="text-[11px] text-slate-400">
-            Only certified or deployed ambassadors can be assigned.
-          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium text-slate-700">Start time</span>
+              <Time12Select value={form.startTime} onChange={(startTime) => setForm((f) => ({ ...f, startTime }))} />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium text-slate-700">End time</span>
+              <Time12Select value={form.endTime} onChange={(endTime) => setForm((f) => ({ ...f, endTime }))} />
+            </label>
+          </div>
+          <p className="text-xs text-slate-500">Same hours for the whole month, Karachi time.</p>
+          {formError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{formError}</p>
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="secondary" onClick={() => setModalOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={saveAssignment}>Save schedule</Button>
+            <Button onClick={() => void saveAssignment()} disabled={saving}>
+              {saving ? 'Saving…' : 'Save shift'}
+            </Button>
           </div>
         </div>
       </Modal>

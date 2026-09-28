@@ -1,28 +1,15 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
-import { FileSpreadsheet, RotateCcw, Search } from 'lucide-react'
-import { Button, Card, CardHeader, cn, KpiCard, StatusBadge, TableScroll } from '../../components/ui'
-import { BulkTargetModal } from './AmbassadorPages'
+import { RotateCcw, Search } from 'lucide-react'
+import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
+import { Card, CardHeader, cn, KpiCard, TableScroll } from '../../components/ui'
 import {
   aggregateBaPerformance,
   applySkuFilter,
-  baPerformanceMonths,
-  baPerformanceSkus,
-  baPerformanceTowns,
-  collectPeriodRecords,
-  getStoresForTown,
   MONTH_ORDER,
-  periodsForRange,
-  type DataPeriod,
+  recordsFromTargets,
+  type BaPerformanceRecord,
 } from '../../data/baPerformance'
-import {
-  attendanceForRange,
-  attendanceRows,
-  baCities,
-  baStatusByCity,
-  daysInRange,
-  workingHoursSeries,
-} from '../../data/baAttendance'
 import {
   categoryColors,
   chartGold,
@@ -39,6 +26,7 @@ import {
   formatTargetMonth,
   useBaTargets,
 } from '../../lib/baTargets'
+import { syncBaTargets } from '../../lib/djangoSync'
 
 function EmptyRow({ cols }: { cols: number }) {
   return (
@@ -188,6 +176,27 @@ function monthNameFromDate(d: Date) {
   return MONTH_ORDER[d.getMonth()]
 }
 
+function monthsTouched(start: Date, end: Date) {
+  const names: string[] = []
+  for (let d = new Date(start); d <= end; d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)) {
+    const name = MONTH_ORDER[d.getMonth()]
+    if (!names.includes(name)) names.push(name)
+  }
+  return names
+}
+
+function filterLiveRecords(
+  records: BaPerformanceRecord[],
+  filters: { towns: string[]; stores: string[]; months: string[] },
+) {
+  return records.filter(
+    (record) =>
+      (filters.towns.length === 0 || filters.towns.includes(record.town)) &&
+      (filters.stores.length === 0 || filters.stores.includes(record.store)) &&
+      (filters.months.length === 0 || filters.months.includes(record.month)),
+  )
+}
+
 function monthForPreset(preset: DatePreset, customFrom?: string, customTo?: string): string | null {
   const today = new Date()
   if (preset === 'ytd') return null
@@ -275,13 +284,15 @@ export function BaPerformanceDashboardPage() {
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
   const baTargets = useBaTargets()
+  useEffect(() => {
+    void syncBaTargets()
+  }, [])
   const targetMonths = useMemo(() => {
     const keys = new Set(baTargets.map((row) => row.month))
     keys.add(currentMonthKey())
     return [...keys].sort((a, b) => b.localeCompare(a))
   }, [baTargets])
   const [targetMonth, setTargetMonth] = useState(currentMonthKey)
-  const [targetUploadOpen, setTargetUploadOpen] = useState(false)
   const targetRows = useMemo(
     () =>
       baTargets
@@ -290,70 +301,84 @@ export function BaPerformanceDashboardPage() {
         .sort((a, b) => a.baName.localeCompare(b.baName)),
     [baTargets, targetMonth],
   )
+  const liveRecords = useMemo(() => recordsFromTargets(baTargets), [baTargets])
+  const townOptions = useMemo(
+    () => [...new Set(liveRecords.map((record) => record.town))].sort((a, b) => a.localeCompare(b)),
+    [liveRecords],
+  )
+  const monthOptions = useMemo(() => {
+    const names = new Set(liveRecords.map((record) => record.month))
+    return MONTH_ORDER.filter((month) => names.has(month))
+  }, [liveRecords])
+  const skuOptions = useMemo(
+    () =>
+      [...new Set(liveRecords.flatMap((record) => record.skuSales.map((line) => line.sku)))].sort((a, b) =>
+        a.localeCompare(b),
+      ),
+    [liveRecords],
+  )
 
   const range = useMemo(
     () => dateRangeForPreset(datePreset, customFrom, customTo),
     [datePreset, customFrom, customTo],
   )
 
-  // Performance data is monthly. A valid date range picks the months (and days of each month)
-  // it covers; otherwise the Month panel decides (one month, or all months when empty).
-  const rangePeriods = useMemo(
-    () => (range ? periodsForRange(range.start, range.end) : null),
-    [range],
-  )
-  const periods = useMemo<DataPeriod[]>(() => {
-    const base = rangePeriods?.periods ?? (months.length ? months.map((month) => ({ month, share: null })) : [{ month: null, share: null }])
-    if (!months.length) return base
-    return base.filter((period) => period.month !== null && months.includes(period.month))
-  }, [rangePeriods, months])
-  const storeOptions = useMemo(
-    () =>
-      getStoresForTown(
-        towns,
-        periods.some((p) => p.month === null) ? null : periods.map((p) => p.month as string),
-      ),
-    [towns, periods],
-  )
+  const coveredMonths = useMemo(() => {
+    const fromRange = range ? monthsTouched(range.start, range.end) : months
+    if (!months.length) return fromRange
+    return fromRange.filter((month) => months.includes(month))
+  }, [range, months])
+
+  const storeOptions = useMemo(() => {
+    const names = liveRecords
+      .filter(
+        (record) =>
+          (towns.length === 0 || towns.includes(record.town)) &&
+          (coveredMonths.length === 0 || coveredMonths.includes(record.month)),
+      )
+      .map((record) => record.store)
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b))
+  }, [liveRecords, towns, coveredMonths])
 
   const scopeTown = towns.length === 0 ? null : towns.length === 1 ? towns[0] : towns.join(', ')
 
-  const data = useMemo(
-    () =>
-      aggregateBaPerformance(
-        applySkuFilter(collectPeriodRecords({ towns, stores }, periods), skus),
-        scopeTown,
-      ),
-    [towns, stores, periods, skus, scopeTown],
+  const scopedRecords = useMemo(
+    () => applySkuFilter(filterLiveRecords(liveRecords, { towns, stores, months: coveredMonths }), skus),
+    [liveRecords, towns, stores, coveredMonths, skus],
   )
 
-  // Town/Store filters narrow attendance the same way they narrow sales — by matching the
-  // BA's city/store. Attendance is a separate mock dataset from the sales stores, so a town
-  // or store with no attendance records simply shows no data, same as sales.
-  const attendance = useMemo(() => {
-    const all = range ? attendanceForRange(range) : []
-    return all.filter(
-      (r) =>
-        (towns.length === 0 || towns.includes(r.city)) &&
-        (stores.length === 0 || stores.includes(r.store)) &&
-        (months.length === 0 || months.includes(MONTH_ORDER[r.date.getMonth()])),
-    )
-  }, [range, towns, stores, months])
-  const cityStatus = useMemo(
-    () => (range ? baStatusByCity(range, { cities: towns, stores, months }) : null),
-    [range, towns, stores, months],
+  const data = useMemo(
+    () => aggregateBaPerformance(scopedRecords, scopeTown, { rankBy: 'target' }),
+    [scopedRecords, scopeTown],
   )
-  const isSingleDay = range ? daysInRange(range) === 1 : false
-  const attendanceTable = useMemo(
-    () => attendanceRows(attendance, isSingleDay),
-    [attendance, isSingleDay],
-  )
-  const [hoursCities, setHoursCities] = useState<string[]>([])
+
+  const cityRows = useMemo(() => {
+    const grouped = new Map<string, { stores: Set<string>; ambassadors: number; target: number; sales: number }>()
+    for (const record of scopedRecords) {
+      const current = grouped.get(record.town) ?? {
+        stores: new Set<string>(),
+        ambassadors: 0,
+        target: 0,
+        sales: 0,
+      }
+      current.stores.add(record.store)
+      current.ambassadors += 1
+      current.target += record.targetKg
+      current.sales += record.salesKg
+      grouped.set(record.town, current)
+    }
+    return [...grouped.entries()]
+      .map(([city, row]) => ({
+        city,
+        stores: row.stores.size,
+        ambassadors: row.ambassadors,
+        target: Math.round(row.target),
+        sales: Math.round(row.sales * 10) / 10,
+      }))
+      .sort((a, b) => a.city.localeCompare(b.city))
+  }, [scopedRecords])
+
   const [salesTrend, setSalesTrend] = useState<'wow' | 'mom' | 'yoy'>('wow')
-  const workingHours = useMemo(
-    () => (range ? workingHoursSeries(attendance, range, hoursCities) : null),
-    [attendance, range, hoursCities],
-  )
 
   function applyDatePreset(preset: DatePreset, from = customFrom, to = customTo) {
     setDatePreset(preset)
@@ -404,12 +429,6 @@ export function BaPerformanceDashboardPage() {
     }
   }
 
-  function toggleHoursCity(city: string) {
-    setHoursCities((current) =>
-      current.includes(city) ? current.filter((item) => item !== city) : [...current, city],
-    )
-  }
-
   const dateRangeLabel = useMemo(() => {
     if (datePreset === 'custom' && customFrom && customTo) {
       return `${customFrom} → ${customTo}`
@@ -421,28 +440,37 @@ export function BaPerformanceDashboardPage() {
     return label
   }, [datePreset, customFrom, customTo, range])
 
-  const baStatusHint = !cityStatus
-    ? 'Select a valid date range'
-    : cityStatus.days > 1
-      ? `Avg per day · ${cityStatus.days} days`
-      : undefined
-
   const scopeLabel = data.townTargetVsSales.town
 
-  const categoryChart = useMemo<ChartData<'doughnut'>>(
-    () => ({
-      labels: data.categorySales.map((c) => c.name),
+  const categoryChart = useMemo<ChartData<'doughnut'>>(() => {
+    const totals = { Danedar: 0, 'Family Mixture': 0, 'Tea bags': 0, Other: 0 }
+    for (const record of scopedRecords) {
+      for (const line of record.skuSales) {
+        const sku = line.sku.toLowerCase()
+        const tea = sku.includes('tea bag') || sku.includes('rtb')
+        const name = tea
+          ? 'Tea bags'
+          : sku.includes('family')
+            ? 'Family Mixture'
+            : sku.includes('danedar')
+              ? 'Danedar'
+              : 'Other'
+        totals[name] += line.sales
+      }
+    }
+    const entries = (Object.entries(totals) as [string, number][]).filter(([, value]) => value > 0)
+    return {
+      labels: entries.map(([name]) => name),
       datasets: [
         {
-          data: data.categorySales.map((c) => c.value),
-          backgroundColor: categoryColors,
+          data: entries.map(([, value]) => Math.round(value)),
+          backgroundColor: [...categoryColors, '#94a3b8'],
           borderColor: '#fff',
           borderWidth: 2,
         },
       ],
-    }),
-    [data.categorySales],
-  )
+    }
+  }, [scopedRecords])
 
   const categoryOptions = useMemo<ChartOptions<'doughnut'>>(
     () => ({
@@ -484,12 +512,9 @@ export function BaPerformanceDashboardPage() {
   )
 
   const trendRecords = useMemo(() => {
-    const periodList: DataPeriod[] =
-      salesTrend === 'wow'
-        ? periods
-        : baPerformanceMonths.map((month) => ({ month, share: null }))
-    return applySkuFilter(collectPeriodRecords({ towns, stores }, periodList), skus)
-  }, [salesTrend, periods, towns, stores, skus])
+    const monthsForTrend = salesTrend === 'wow' ? coveredMonths : monthOptions
+    return applySkuFilter(filterLiveRecords(liveRecords, { towns, stores, months: monthsForTrend }), skus)
+  }, [salesTrend, coveredMonths, monthOptions, liveRecords, towns, stores, skus])
 
   const trendSeries = useMemo(() => {
     if (salesTrend === 'wow') {
@@ -522,7 +547,7 @@ export function BaPerformanceDashboardPage() {
       current.target += record.targetKg
       buckets.set(record.month, current)
     }
-    const points = baPerformanceMonths
+    const points = monthOptions
       .filter((month) => buckets.has(month))
       .map((month) => ({ month, ...buckets.get(month)! }))
     if (salesTrend === 'yoy') {
@@ -545,7 +570,7 @@ export function BaPerformanceDashboardPage() {
       sales: points.map((point) => Math.round(point.sales * 10) / 10),
       target: points.map((point) => Math.round(point.target * 10) / 10),
     }
-  }, [trendRecords, salesTrend])
+  }, [trendRecords, salesTrend, monthOptions])
 
   const weekChart = useMemo<ChartData<'line'>>(
     () => ({
@@ -639,53 +664,9 @@ export function BaPerformanceDashboardPage() {
     [],
   )
 
-  const workingHoursChart = useMemo<ChartData<'bar'>>(
-    () => ({
-      labels: workingHours?.points.map((p) => p.label) ?? [],
-      datasets: [
-        {
-          label: 'Avg working hours',
-          data: workingHours?.points.map((p) => p.hours) ?? [],
-          backgroundColor: chartGreen,
-          borderRadius: 4,
-          maxBarThickness: 36,
-        },
-      ],
-    }),
-    [workingHours],
-  )
-
-  const workingHoursOptions = useMemo<ChartOptions<'bar'>>(
-    () => ({
-      ...defaultChartOptions,
-      plugins: {
-        ...defaultChartOptions.plugins,
-        legend: { display: false },
-        tooltip: {
-          ...defaultChartOptions.plugins.tooltip,
-          displayColors: false,
-          callbacks: {
-            label: (ctx) => {
-              const visits = workingHours?.points[ctx.dataIndex]?.count ?? 0
-              return `${ctx.parsed.y} h avg · ${visits} ${visits === 1 ? 'visit' : 'visits'}`
-            },
-          },
-        },
-      },
-      scales: {
-        x: scaleDefaults,
-        y: {
-          ...scaleDefaults,
-          beginAtZero: true,
-          ticks: { ...scaleDefaults.ticks, callback: (v) => `${v}h` },
-        },
-      },
-    }),
-    [workingHours],
-  )
-
   return (
     <div className="space-y-5">
+      <EarlyCheckoutsCard />
       <Card className="!p-3 sm:!p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
@@ -739,33 +720,24 @@ export function BaPerformanceDashboardPage() {
         )}
       </Card>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <KpiCard label="Active BAs" value={cityStatus?.active ?? '—'} hint={baStatusHint} />
-        <KpiCard label="Offline BAs" value={cityStatus?.offline ?? '—'} hint={baStatusHint} />
-        <KpiCard label="On Break BAs" value={cityStatus?.break ?? '—'} hint={baStatusHint} />
-      </div>
-
-      <div className="grid grid-cols-4 gap-3">
-        <KpiCard label="Customers Intercepted" value={data.customersIntercepted.toLocaleString()} />
-        <KpiCard label="Productive Calls" value={data.productiveCalls.toLocaleString()} />
-        <KpiCard label="Productive %" value={`${data.productivePct}%`} />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <KpiCard label="Ambassadors" value={scopedRecords.length.toLocaleString()} hint="September targets" />
+        <KpiCard label="Stores" value={new Set(scopedRecords.map((record) => record.store)).size.toLocaleString()} />
+        <KpiCard label="Target (units)" value={data.targetUnits.toLocaleString()} />
+        <KpiCard label="Sales (units)" value={data.unitsSold.toLocaleString()} />
         <KpiCard label="Achievement" value={`${data.achievementPct}%`} />
-        <KpiCard label="Target (Kg)" value={data.targetKg.toLocaleString()} />
-        <KpiCard label="Sales (Kg)" value={data.salesKg.toLocaleString()} />
-        <KpiCard label="Target (Units)" value={data.targetUnits.toLocaleString()} />
-        <KpiCard label="Units sold" value={data.unitsSold.toLocaleString()} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)] lg:grid-rows-[auto_auto]">
         <aside className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:flex lg:min-h-0 lg:flex-col">
-          <FilterPanel title="Town" options={baPerformanceTowns} value={towns} onChange={handleTownChange} />
-          <FilterPanel title="Month" options={baPerformanceMonths} value={months} onChange={handleMonthChange} />
+          <FilterPanel title="Town" options={townOptions} value={towns} onChange={handleTownChange} />
+          <FilterPanel title="Month" options={monthOptions} value={months} onChange={handleMonthChange} />
           <FilterPanel title="Store" options={storeOptions} value={stores} onChange={setStores} />
-          <FilterPanel title="SKU List" options={baPerformanceSkus} value={skus} onChange={setSkus} fill />
+          <FilterPanel title="SKU List" options={skuOptions} value={skus} onChange={setSkus} fill />
         </aside>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:col-start-2 lg:row-start-1 lg:items-stretch">
-          <ChartCard title="Category-wise sales">
+          <ChartCard title="Category-wise target">
             <Doughnut data={categoryChart} options={categoryOptions} />
           </ChartCard>
 
@@ -778,10 +750,10 @@ export function BaPerformanceDashboardPage() {
           <ChartCard
             title={
               salesTrend === 'wow'
-                ? 'Week-wise sales (Kg)'
+                ? 'Week-wise target (units)'
                 : salesTrend === 'mom'
-                  ? 'Month-wise sales (Kg)'
-                  : 'Year-to-date sales (Kg)'
+                  ? 'Month-wise target (units)'
+                  : 'Year-to-date target (units)'
             }
             action={
               <div className="flex gap-1 rounded-lg bg-slate-100 p-0.5">
@@ -810,11 +782,11 @@ export function BaPerformanceDashboardPage() {
             <Line data={weekChart} options={weekOptions} />
           </ChartCard>
 
-          <ChartCard title="Top 10 stores" plotClassName="h-[320px]">
+          <ChartCard title="Top 10 stores by target" plotClassName="h-[320px]">
             <Bar data={topStoresChart} options={horizontalBarOptions} />
           </ChartCard>
 
-          <ChartCard title="Top 10 SKUs" plotClassName="h-[320px]">
+          <ChartCard title="Top 10 SKU targets" plotClassName="h-[320px]">
             <Bar data={topSkusChart} options={horizontalBarOptions} />
           </ChartCard>
         </div>
@@ -824,11 +796,8 @@ export function BaPerformanceDashboardPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-50 px-4 py-3 sm:px-5">
           <CardHeader
             title="Target vs achievement"
-            subtitle="Ambassador target and sales set by Head Office"
+            subtitle="September 2026 targets saved for each store's ambassador"
           />
-          <Button size="sm" variant="secondary" onClick={() => setTargetUploadOpen(true)}>
-            <FileSpreadsheet size={14} /> Upload targets
-          </Button>
           <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
             Month
             <select
@@ -849,8 +818,9 @@ export function BaPerformanceDashboardPage() {
             <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
               <tr>
                 <th className="px-4 py-3">Ambassador</th>
-                <th className="px-4 py-3">Target (Kg)</th>
-                <th className="px-4 py-3">Sales (Kg)</th>
+                <th className="px-4 py-3">Store</th>
+                <th className="px-4 py-3">Target (units)</th>
+                <th className="px-4 py-3">Sales (units)</th>
                 <th className="px-4 py-3">Achievement</th>
               </tr>
             </thead>
@@ -859,7 +829,11 @@ export function BaPerformanceDashboardPage() {
                 const pct = achievementPct(row.targetKg, row.salesKg)
                 return (
                   <tr key={`${row.baId}-${row.month}`} className="border-t border-slate-100">
-                    <td className="px-4 py-3 font-medium text-slate-900">{row.baName}</td>
+                    <td className="px-4 py-3 font-medium text-slate-900">
+                      <div>{row.baName}</div>
+                      {row.baCode && <div className="text-xs text-slate-400">{row.baCode}</div>}
+                    </td>
+                    <td className="px-4 py-3 text-slate-600">{row.storeName || '—'}</td>
                     <td className="px-4 py-3 tabular-nums">{row.targetKg.toLocaleString()}</td>
                     <td className="px-4 py-3 tabular-nums">{row.salesKg.toLocaleString()}</td>
                     <td className="px-4 py-3">
@@ -878,7 +852,7 @@ export function BaPerformanceDashboardPage() {
                   </tr>
                 )
               })}
-              {targetRows.length === 0 && <EmptyRow cols={4} />}
+              {targetRows.length === 0 && <EmptyRow cols={5} />}
             </tbody>
           </table>
         </TableScroll>
@@ -886,14 +860,7 @@ export function BaPerformanceDashboardPage() {
 
       <Card padding={false}>
         <div className="border-b border-slate-50 px-4 py-3 sm:px-5">
-          <CardHeader
-            title="Active BAs by city"
-            subtitle={
-              cityStatus && cityStatus.days > 1
-                ? `${dateRangeLabel} · average per day`
-                : dateRangeLabel
-            }
-          />
+          <CardHeader title="Targets by city" subtitle={dateRangeLabel} />
         </div>
         <TableScroll minWidth={520}>
           <table className="w-full text-left text-sm">
@@ -901,127 +868,26 @@ export function BaPerformanceDashboardPage() {
               <tr>
                 <th className="px-4 py-3">City</th>
                 <th className="px-4 py-3">Stores</th>
-                <th className="px-4 py-3">Active</th>
-                <th className="px-4 py-3">Break</th>
-                <th className="px-4 py-3">Offline</th>
-                <th className="px-4 py-3">Total</th>
+                <th className="px-4 py-3">Ambassadors</th>
+                <th className="px-4 py-3">Target (units)</th>
+                <th className="px-4 py-3">Sales (units)</th>
               </tr>
             </thead>
             <tbody>
-              {(cityStatus?.cities ?? []).map((row) => (
+              {cityRows.map((row) => (
                 <tr key={row.city} className="border-t border-slate-100">
                   <td className="px-4 py-3 font-medium text-slate-900">{row.city}</td>
                   <td className="px-4 py-3 text-slate-600">{row.stores}</td>
-                  <td className="px-4 py-3 font-semibold text-emerald-600">{row.active}</td>
-                  <td className="px-4 py-3 text-amber-600">{row.break}</td>
-                  <td className="px-4 py-3 text-slate-500">{row.offline}</td>
-                  <td className="px-4 py-3 font-semibold text-slate-900">{row.total}</td>
+                  <td className="px-4 py-3 font-semibold text-slate-900">{row.ambassadors}</td>
+                  <td className="px-4 py-3 tabular-nums">{row.target.toLocaleString()}</td>
+                  <td className="px-4 py-3 tabular-nums">{row.sales.toLocaleString()}</td>
                 </tr>
               ))}
-              {!cityStatus && <EmptyRow cols={6} />}
+              {cityRows.length === 0 && <EmptyRow cols={5} />}
             </tbody>
           </table>
         </TableScroll>
       </Card>
-
-      <Card padding={false}>
-        <div className="border-b border-slate-50 px-4 py-3 sm:px-5">
-          <CardHeader
-            title="BA check-in / check-out"
-            subtitle={isSingleDay ? `Store-wise · ${dateRangeLabel}` : `Per BA average · ${dateRangeLabel}`}
-          />
-        </div>
-        <TableScroll minWidth={720}>
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
-              <tr>
-                <th className="px-4 py-3">BA</th>
-                <th className="px-4 py-3">Store</th>
-                {!isSingleDay && <th className="px-4 py-3">Days worked</th>}
-                <th className="px-4 py-3">{isSingleDay ? 'Check-in' : 'Avg check-in'}</th>
-                <th className="px-4 py-3">{isSingleDay ? 'Check-out' : 'Avg check-out'}</th>
-                <th className="px-4 py-3">{isSingleDay ? 'Working hrs' : 'Avg working hrs'}</th>
-                {isSingleDay && <th className="px-4 py-3">Status</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {attendanceTable.map((row) => (
-                <tr key={`${row.ba}-${row.store}-${row.checkIn}`} className="border-t border-slate-100">
-                  <td className="px-4 py-3 font-medium text-slate-900">{row.ba}</td>
-                  <td className="px-4 py-3 text-slate-600">
-                    <div>{row.store}</div>
-                    <div className="text-xs text-slate-400">{row.city}</div>
-                  </td>
-                  {!isSingleDay && <td className="px-4 py-3 tabular-nums">{row.days}</td>}
-                  <td className="px-4 py-3 tabular-nums">{row.checkIn}</td>
-                  <td className="px-4 py-3 tabular-nums text-slate-600">{row.checkOut}</td>
-                  <td className="px-4 py-3 tabular-nums">{row.hours.toFixed(1)} h</td>
-                  {isSingleDay && (
-                    <td className="px-4 py-3">
-                      <StatusBadge status={row.status ?? ''} />
-                    </td>
-                  )}
-                </tr>
-              ))}
-              {attendanceTable.length === 0 && <EmptyRow cols={6} />}
-            </tbody>
-          </table>
-        </TableScroll>
-      </Card>
-
-
-      <Card>
-        <CardHeader
-          title="Average working hours"
-          subtitle={`${dateRangeLabel} · ${
-            !workingHours
-              ? 'select a valid date range'
-              : workingHours.avgHours === null
-                ? 'no attendance for this selection'
-                : `overall average ${workingHours.avgHours} h per BA visit${
-                    range && range.end.toDateString() === new Date().toDateString()
-                      ? ' (today counted up to now)'
-                      : ''
-                  }`
-          }`}
-          action={
-            <div className="flex flex-wrap items-center gap-1.5 text-xs">
-              <span className="font-medium text-slate-500">
-                City{hoursCities.length === 0 ? ' · All' : ''}
-              </span>
-              {baCities.map((city) => {
-                const selected = hoursCities.includes(city)
-                return (
-                  <button
-                    key={city}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => toggleHoursCity(city)}
-                    className={cn(
-                      'rounded-lg px-2.5 py-1.5 text-xs font-semibold transition',
-                      selected
-                        ? 'bg-brand-500 text-white shadow-sm'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200',
-                    )}
-                  >
-                    {city}
-                  </button>
-                )
-              })}
-            </div>
-          }
-        />
-        <div className="relative h-56 sm:h-72">
-          {workingHours && workingHours.points.length > 0 ? (
-            <Bar data={workingHoursChart} options={workingHoursOptions} />
-          ) : (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">
-              No data to show
-            </div>
-          )}
-        </div>
-      </Card>
-      <BulkTargetModal open={targetUploadOpen} onClose={() => setTargetUploadOpen(false)} />
     </div>
   )
 }

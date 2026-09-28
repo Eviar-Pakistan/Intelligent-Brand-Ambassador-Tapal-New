@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2 } from 'lucide-react'
 import { useBaShift } from '../../context/BaShiftContext'
 import { ambassadors, stores } from '../../data/mock'
+import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
 import { notifyBaCheckOut } from '../../lib/supervisorNotifications'
 import { useBaSession } from '../../lib/baAccounts'
 import {
@@ -269,21 +270,16 @@ export function BaStockReportPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
-  const { checkOut, city } = useBaShift()
+  const { city } = useBaShift()
   const { account } = useBaSession()
   const reports = useDailyReports()
   const stockAlreadySubmitted = hasAnytimeStockSubmitted(account?.id ?? 'ba', reports)
   const [submitted, setSubmitted] = useState(false)
 
-  function finishCheckOut() {
-    checkOut()
-  }
-
   useEffect(() => {
     if (anytime || !stockAlreadySubmitted) return
-    finishCheckOut()
     navigate('/ba/daily-sales', { replace: true })
-  }, [anytime, stockAlreadySubmitted, checkOut, navigate])
+  }, [anytime, stockAlreadySubmitted, navigate])
 
   const [stock, setStock] = useState(() =>
     emptyStock([...stockDanedarFields, ...stockTeaBagFields]),
@@ -312,7 +308,6 @@ export function BaStockReportPage() {
       setSubmitted(true)
       return
     }
-    finishCheckOut()
     navigate('/ba/daily-sales')
   }
 
@@ -388,21 +383,42 @@ export function BaOtherBrandsPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
-  const { markReportSubmitted, city } = useBaShift()
+  const { submitCheckoutReport, earlyCheckoutReason, city } = useBaShift()
   const { account } = useBaSession()
   const [rows, setRows] = useState<OtherBrandRow[]>(DEFAULT_OTHER_BRANDS)
   const [submitted, setSubmitted] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
 
   function updateRow(id: string, patch: Partial<OtherBrandRow>) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
   }
 
-  function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault()
+    if (sending) return
     const payload = rows.filter((r) => r.name.trim())
     sessionStorage.setItem(SESSION_KEYS.otherBrands, JSON.stringify(payload))
     const stock = readSession<Record<string, string>>(SESSION_KEYS.stock, {})
     const sales = readSession<Record<string, string>>(SESSION_KEYS.sales, {})
+    if (!anytime) {
+      // This submission is the check-out: attendance is marked only when the server accepts it.
+      setSending(true)
+      setSendError(null)
+      const problem = await submitCheckoutReport({ stock, sales, otherBrands: payload })
+      setSending(false)
+      if (problem) {
+        setSendError(problem)
+        return
+      }
+      if (earlyCheckoutReason) {
+        recordEarlyCheckout({
+          baId: account?.id ?? 'ba',
+          baName: account?.name ?? 'Brand Ambassador',
+          reason: earlyCheckoutReason,
+        })
+      }
+    }
     recordDailyReport(
       { stock, sales, otherBrands: payload },
       {
@@ -413,7 +429,6 @@ export function BaOtherBrandsPage() {
       },
     )
     if (!anytime) {
-      markReportSubmitted()
       const ambassador = ambassadors.find((item) => item.id === (account?.id ?? 'ayesha'))
       const store = ambassador?.storeId != null ? stores.find((item) => item.id === ambassador.storeId) : undefined
       if (ambassador?.storeId != null && store) {
@@ -494,11 +509,15 @@ export function BaOtherBrandsPage() {
         ))}
       </Section>
 
+      {sendError && (
+        <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm text-rose-800">{sendError}</p>
+      )}
       <button
         type="submit"
-        className="w-full rounded-2xl bg-navy-900 py-3.5 text-base font-semibold text-white shadow-md shadow-navy-900/20 transition hover:bg-brand-600"
+        disabled={sending}
+        className="w-full rounded-2xl bg-navy-900 py-3.5 text-base font-semibold text-white shadow-md shadow-navy-900/20 transition enabled:hover:bg-brand-600 disabled:opacity-60"
       >
-        Submit report
+        {sending ? 'Submitting…' : anytime ? 'Submit report' : 'Submit report & check out'}
       </button>
     </form>
   )

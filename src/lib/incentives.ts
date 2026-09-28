@@ -1,4 +1,3 @@
-import { ambassadors, baRanking } from '../data/mock'
 import { getKpiConfig, type KpiConfig } from './kpiConfig'
 import { getSupervisors, supervisorOverview, type Supervisor } from './supervisors'
 
@@ -39,20 +38,8 @@ export function formatPkr(amount: number) {
 }
 
 export function buildIncentiveRoster(config: KpiConfig = getKpiConfig()): IncentiveBreakdown[] {
-  return baRanking.map((b, i) => {
-    const profile = ambassadors.find((a) => a.id === b.id)
-    return calculateIncentive(
-      {
-        baId: b.id,
-        name: b.name,
-        city: b.city,
-        rank: i + 1,
-        conversion: b.conversion,
-        sessions: profile?.today.interactions ?? Math.round(b.points / 30),
-      },
-      config,
-    )
-  })
+  void config
+  return []
 }
 
 export type SupervisorIncentive = {

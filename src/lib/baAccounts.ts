@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { ambassadors } from '../data/mock'
+import { analysisFromReport, type EngineReport } from './trainingApi'
 import type { AnswerMetrics, AssessmentResult } from './baAssessment'
 
 /**
@@ -16,6 +17,8 @@ export type BaStatus = 'Invited' | 'Training' | 'Certified'
 
 export type BaAccount = {
   id: string
+  /** Unique code assigned by the server, for example BA-4K7M2Q. */
+  baCode: string
   name: string
   city: string
   email: string
@@ -28,6 +31,8 @@ export type BaAccount = {
   result: AssessmentResult | null
   /** Secret used in the personal account link. */
   accessToken: string
+  /** Store this ambassador is assigned to, when one has been set. */
+  storeName?: string
 }
 
 function newAccessToken() {
@@ -52,6 +57,7 @@ function demoAccountStatus(status: string): BaStatus {
 function demoAccounts(): BaAccount[] {
   return ambassadors.map((a) => ({
     id: a.id,
+    baCode: '',
     name: a.name,
     city: a.city,
     email: `${a.id}@tapal.demo`,
@@ -69,19 +75,21 @@ export function isDemoBa(id: string) {
   return ambassadors.some((a) => a.id === id)
 }
 
-function withDemoAccounts(list: BaAccount[]): BaAccount[] {
-  const ids = new Set(list.map((a) => a.id))
-  const missing = demoAccounts().filter((d) => !ids.has(d.id))
-  return missing.length ? [...list, ...missing] : list
+function withoutDemoAccounts(list: BaAccount[]): BaAccount[] {
+  const demoIds = new Set(demoAccounts().map((account) => account.id))
+  return list.filter((account) => !demoIds.has(account.id))
 }
 
 const STORAGE_KEY = 'ba-accounts-v1'
+/** One-time: ambassadors who never answered still start on the training video. */
+const VIDEO_FIRST_KEY = 'ba-video-before-questions-v1'
 const SESSION_KEY = 'ba-session-v1'
 
 function normalizeAccount(raw: Partial<BaAccount> & { passwordHash?: string }): BaAccount | null {
   if (!raw.id || !raw.name) return null
   return {
     id: raw.id,
+    baCode: raw.baCode ?? '',
     name: raw.name,
     city: raw.city ?? '',
     email: raw.email ?? '',
@@ -99,13 +107,30 @@ function load(): BaAccount[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : []
-    if (!Array.isArray(parsed)) return withDemoAccounts([])
-    const list = withDemoAccounts(
+    if (!Array.isArray(parsed)) return []
+    let list = withoutDemoAccounts(
       parsed
         .map((item) => normalizeAccount(item as Partial<BaAccount>))
         .filter((a): a is BaAccount => !!a),
-    )
+    ).filter((account) => account.baCode)
+    let videoFirst = false
+    try {
+      videoFirst = localStorage.getItem(VIDEO_FIRST_KEY) === '1'
+    } catch {
+      videoFirst = true
+    }
+    if (!videoFirst) {
+      list = list.map((account) =>
+        account.answers.length === 0 && !account.result ? { ...account, videoWatched: false } : account,
+      )
+      try {
+        localStorage.setItem(VIDEO_FIRST_KEY, '1')
+      } catch {
+        // the in-memory list still starts on the video
+      }
+    }
     const needsSave =
+      !videoFirst ||
       list.length !== parsed.length ||
       parsed.some(
         (item) =>
@@ -122,7 +147,7 @@ function load(): BaAccount[] {
     }
     return list
   } catch {
-    return withDemoAccounts([])
+    return []
   }
 }
 
@@ -172,6 +197,7 @@ export type BaAccountFields = { name: string; city: string; email: string; phone
 function toAccount(fields: BaAccountFields): BaAccount {
   return {
     id: `ba-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    baCode: '',
     name: fields.name.trim(),
     city: fields.city.trim(),
     email: fields.email.trim(),
@@ -198,16 +224,140 @@ export function findBaByAccessToken(token: string): BaAccount | null {
   return accounts.find((a) => a.accessToken === token) ?? null
 }
 
-export function createBaAccount(fields: BaAccountFields): BaAccount {
+function uiStatus(status: string | undefined): BaStatus {
+  if (status === 'Certified' || status === 'Deployed' || status === 'Assessed') return 'Certified'
+  if (status === 'Training' || status === 'Rejected') return 'Training'
+  return 'Invited'
+}
+
+/** Add a Django ambassador to the account list. An ambassador already stored by email or link is kept. */
+export function adoptApiAmbassador(row: {
+  id: number
+  name: string
+  email?: string
+  city?: string
+  phone?: string
+  status?: string
+  invite_token?: string
+  ba_code?: string
+  created_at?: string
+  store_name?: string | null
+  report_json?: EngineReport | null
+}): BaAccount | null {
+  if (!row?.id || !row.name) return null
+  const email = (row.email ?? '').trim()
+  const token = row.invite_token || ''
+  const existing = accounts.find(
+    (account) =>
+      (email && normEmail(account.email) === normEmail(email)) || (token && account.accessToken === token),
+  )
+  const saved = analysisFromReport(row.report_json)
+  if (saved && (row.status === 'Certified' || row.status === 'Deployed')) saved.result.certified = true
+  if (existing) {
+    const next: BaAccount = {
+      ...existing,
+      id: `api-${row.id}`,
+      baCode: row.ba_code || existing.baCode,
+      storeName: row.store_name || existing.storeName || '',
+      accessToken: token || existing.accessToken,
+      status: saved?.result.certified ? 'Certified' : existing.status,
+      videoWatched: existing.videoWatched || !!saved,
+      answers: saved?.answers.length ? saved.answers : existing.answers,
+      result: saved?.result ?? existing.result,
+    }
+    commit(accounts.map((account) => (account.id === existing.id ? next : account)))
+    return next
+  }
+  const account: BaAccount = {
+    id: `api-${row.id}`,
+    baCode: row.ba_code || '',
+    name: row.name,
+    city: row.city || '',
+    email,
+    phone: row.phone || '',
+    storeName: row.store_name || '',
+    createdAt: row.created_at || new Date().toISOString(),
+    status: uiStatus(row.status),
+    videoWatched: !!saved,
+    answers: saved?.answers ?? [],
+    result: saved?.result ?? null,
+    accessToken: token || `api-${row.id}`,
+  }
+  if (saved?.result.certified) account.status = 'Certified'
+  commit([account, ...accounts])
+  return account
+}
+
+/** The server roster replaces the list, so deleted ambassadors disappear. */
+export function replaceAmbassadorsFromApi(rows: Parameters<typeof adoptApiAmbassador>[0][]) {
+  const next: BaAccount[] = []
+  for (const row of rows) {
+    if (!row?.id || !row.name) continue
+    const id = `api-${row.id}`
+    const token = row.invite_token || ''
+    const existing = accounts.find((account) => account.id === id || (token && account.accessToken === token))
+    const status = uiStatus(row.status)
+    const saved = analysisFromReport(row.report_json)
+    if (saved && (row.status === 'Certified' || row.status === 'Deployed')) saved.result.certified = true
+    next.push({
+      id,
+      baCode: row.ba_code || existing?.baCode || '',
+      name: row.name,
+      city: row.city || '',
+      email: (row.email ?? '').trim(),
+      phone: row.phone || '',
+      storeName: row.store_name || existing?.storeName || '',
+      createdAt: row.created_at || existing?.createdAt || new Date().toISOString(),
+      status: saved?.result.certified ? 'Certified' : status,
+      videoWatched: existing?.videoWatched || !!saved,
+      answers: saved?.answers.length ? saved.answers : existing?.answers ?? [],
+      result: saved?.result ?? existing?.result ?? null,
+      accessToken: token || existing?.accessToken || id,
+    })
+  }
+  commit(next)
+}
+
+/** Opening the account link starts on the video until the ambassador has submitted an answer. */
+function beginAtVideo(account: BaAccount | null): BaAccount | null {
+  if (!account || account.result || account.answers.length > 0 || !account.videoWatched) return account
+  const next = { ...account, videoWatched: false }
+  commit(accounts.map((item) => (item.id === account.id ? next : item)))
+  return next
+}
+
+export async function resolveBaAccessToken(token: string): Promise<BaAccount | null> {
+  const local = findBaByAccessToken(token)
+  try {
+    const response = await fetch(`/api/ba/invite/${encodeURIComponent(token)}/`)
+    if (!response.ok) return beginAtVideo(local)
+    const data = (await response.json()) as { ambassador?: Parameters<typeof adoptApiAmbassador>[0] }
+    return beginAtVideo(data.ambassador ? adoptApiAmbassador(data.ambassador) : local)
+  } catch {
+    return beginAtVideo(local)
+  }
+}
+
+export async function createBaAccount(fields: BaAccountFields): Promise<BaAccount> {
   const account = toAccount(fields)
+  const { pushAmbassador } = await import('./djangoSync')
+  const remote = await pushAmbassador(account)
+  if (!remote?.invite_token || !remote.ba_code || remote.id == null) {
+    throw new Error(
+      'Sign out, then sign in with headoffice@tapaltea.com and HeadOffice@123. The link is saved on the server so it opens in another browser.',
+    )
+  }
+  account.id = `api-${remote.id}`
+  account.baCode = remote.ba_code
+  account.accessToken = remote.invite_token
   commit([account, ...accounts])
   return account
 }
 
 /** Creates many accounts at once, e.g. from a bulk Excel upload. Returns them in input order. */
-export function createBaAccounts(fields: BaAccountFields[]): BaAccount[] {
-  const added = fields.map(toAccount)
-  commit([...added.slice().reverse(), ...accounts])
+export async function createBaAccounts(fields: BaAccountFields[]): Promise<BaAccount[]> {
+  const added: BaAccount[] = []
+  for (const field of fields) added.push(await createBaAccount(field))
   return added
 }
 
@@ -292,7 +442,7 @@ export async function downloadAmbassadorTemplate() {
     ['5. Save the file, then upload it on the Ambassadors page. Account links can be downloaded after creation.'],
     [],
     COLUMNS.map((c) => c.header),
-    ['Ayesha Khan', 'Lahore', 'ayesha.khan@example.com', '0300-1234567'],
+    ['Example Name', 'Lahore', 'name@example.com', '0300-0000000'],
   ])
   help['!cols'] = COLUMNS.map((c) => ({ wch: c.width }))
 
@@ -371,13 +521,13 @@ export async function parseAmbassadorFile(file: File): Promise<AmbassadorParseRe
 }
 
 /** Downloads each ambassador's personal account link. */
-export async function downloadBaLinks(list: { name: string; email: string; url: string }[]) {
+export async function downloadBaLinks(list: { name: string; email: string; code: string; url: string }[]) {
   const XLSX = await import('xlsx')
   const sheet = XLSX.utils.aoa_to_sheet([
-    ['Name', 'Email', 'Account link'],
-    ...list.map((a) => [a.name, a.email, a.url]),
+    ['Name', 'Email', 'BA code', 'Account link'],
+    ...list.map((a) => [a.name, a.email, a.code, a.url]),
   ])
-  sheet['!cols'] = [{ wch: 24 }, { wch: 28 }, { wch: 56 }]
+  sheet['!cols'] = [{ wch: 24 }, { wch: 28 }, { wch: 14 }, { wch: 56 }]
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, sheet, 'Account links')
   XLSX.writeFile(wb, 'Tapal_Ambassador_Account_Links.xlsx')

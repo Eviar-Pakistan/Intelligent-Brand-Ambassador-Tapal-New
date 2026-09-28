@@ -234,11 +234,53 @@ function emptyAggregate(townLabel: string): BaPerformanceAggregate {
   }
 }
 
+export function recordsFromTargets(
+  rows: {
+    city?: string
+    storeName?: string
+    month: string
+    targetKg: number
+    salesKg: number
+    lines?: { sku: string; qty: number }[]
+  }[],
+): BaPerformanceRecord[] {
+  return rows.map((row) => {
+    const lines = row.lines ?? []
+    const bucket = (kind: 'danedar' | 'family' | 'tea') =>
+      lines.reduce((total, line) => {
+        const sku = line.sku.toLowerCase()
+        const tea = sku.includes('tea bag') || sku.includes('rtb')
+        const family = sku.includes('family')
+        const danedar = sku.includes('danedar')
+        const hit =
+          kind === 'tea' ? tea : kind === 'family' ? family && !tea : danedar && !tea && !family
+        return hit ? total + line.qty : total
+      }, 0)
+    const monthIndex = Number(row.month.split('-')[1]) - 1
+    return {
+      town: row.city?.trim() || 'Unknown',
+      month: MONTH_ORDER[monthIndex] ?? row.month,
+      store: row.storeName?.trim() || 'Store',
+      customersIntercepted: 0,
+      productiveCalls: 0,
+      targetKg: row.targetKg,
+      salesKg: row.salesKg,
+      danedarSales: bucket('danedar'),
+      familyPackSales: bucket('family'),
+      teaBagSales: bucket('tea'),
+      weekSales: [1, 2, 3, 4].map((week) => ({ week, sales: 0 })),
+      skuSales: lines.map((line) => ({ sku: line.sku, sales: line.qty })),
+    }
+  })
+}
+
 export function aggregateBaPerformance(
   records: BaPerformanceRecord[],
   town: string | null,
+  options?: { rankBy?: 'sales' | 'target' },
 ): BaPerformanceAggregate {
   const townLabel = town ?? 'All towns'
+  const rankBy = options?.rankBy ?? 'sales'
   if (records.length === 0) return emptyAggregate(townLabel)
 
   const customersIntercepted = records.reduce((s, r) => s + r.customersIntercepted, 0)
@@ -251,8 +293,13 @@ export function aggregateBaPerformance(
   )
   const targetKg = Math.round(targetKgRaw)
   const salesKg = Math.round(salesKgRaw * 10) / 10
-  const unitsSold = Math.round(unitsSoldRaw)
-  const targetUnits = salesKgRaw > 0 ? Math.round(unitsSoldRaw * (targetKgRaw / salesKgRaw)) : 0
+  const unitsSold = rankBy === 'target' ? Math.round(salesKgRaw) : Math.round(unitsSoldRaw)
+  const targetUnits =
+    rankBy === 'target'
+      ? Math.round(unitsSoldRaw)
+      : salesKgRaw > 0
+        ? Math.round(unitsSoldRaw * (targetKgRaw / salesKgRaw))
+        : 0
   const danedar = Math.round(records.reduce((s, r) => s + r.danedarSales, 0) * 10) / 10
   const familyPack = Math.round(records.reduce((s, r) => s + r.familyPackSales, 0) * 10) / 10
   const teaBags = Math.round(records.reduce((s, r) => s + r.teaBagSales, 0) * 10) / 10
@@ -269,7 +316,8 @@ export function aggregateBaPerformance(
 
   const storeMap = new Map<string, number>()
   for (const r of records) {
-    storeMap.set(r.store, (storeMap.get(r.store) ?? 0) + r.salesKg)
+    const amount = rankBy === 'target' ? r.targetKg : r.salesKg
+    storeMap.set(r.store, (storeMap.get(r.store) ?? 0) + amount)
   }
   const topStores = [...storeMap.entries()]
     .map(([store, sales]) => ({ store, sales: Math.round(sales * 10) / 10 }))

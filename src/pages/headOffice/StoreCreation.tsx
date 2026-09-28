@@ -10,6 +10,7 @@ import {
   downloadStoreLinks,
   downloadStoreTemplate,
   parseStoreFile,
+  roundCoord,
   storeExists,
   type CreatedStore,
   type Footfall,
@@ -35,6 +36,7 @@ function Field({ label, children, className }: { label: string; children: React.
 }
 
 const emptyForm = {
+  storeCode: '',
   name: '',
   city: CITIES[0],
   footfall: 'Medium' as Footfall,
@@ -51,14 +53,16 @@ export function CreateStorePage() {
   const base = useRoleBase()
   const [form, setForm] = useState(emptyForm)
   const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
 
   const set = (key: keyof typeof emptyForm) => (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
   ) => setForm({ ...form, [key]: e.target.value })
 
-  function submit(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault()
+    if (busy) return
     const name = form.name.trim()
     if (!name) return setError('Store name is required.')
     if (storeExists(name, form.city)) return setError(`A store named "${name}" already exists in ${form.city}.`)
@@ -70,27 +74,36 @@ export function CreateStorePage() {
         setError(`${label} must be a number between -${limit} and ${limit}.`)
         return undefined
       }
-      return n
+      return roundCoord(n)
     }
     const latitude = coord(form.latitude, 90, 'Latitude')
     if (latitude === undefined) return
     const longitude = coord(form.longitude, 180, 'Longitude')
     if (longitude === undefined) return
 
-    const [store] = createStores([
-      {
-        name,
-        city: form.city,
-        footfall: form.footfall,
-        address: form.address.trim(),
-        latitude,
-        longitude,
-        peakHours: form.peakHours.trim() || DEFAULT_PEAK_HOURS,
-        contactPerson: form.contactPerson.trim(),
-        contactPhone: form.contactPhone.trim(),
-      },
-    ])
-    navigate(`${base}/stores/${store.id}`)
+    setBusy(true)
+    setError(null)
+    try {
+      const [store] = await createStores([
+        {
+          storeCode: form.storeCode.trim(),
+          name,
+          city: form.city,
+          footfall: form.footfall,
+          address: form.address.trim(),
+          latitude,
+          longitude,
+          peakHours: form.peakHours.trim() || DEFAULT_PEAK_HOURS,
+          contactPerson: form.contactPerson.trim(),
+          contactPhone: form.contactPhone.trim(),
+        },
+      ])
+      navigate(`${base}/stores/${store.id}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The store could not be saved on the server.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -105,7 +118,10 @@ export function CreateStorePage() {
         }
       />
       <Card>
-        <form onSubmit={submit} className="space-y-4">
+        <form onSubmit={(e) => void submit(e)} className="space-y-4">
+          <Field label="Store code">
+            <input className={fieldClass} value={form.storeCode} onChange={set('storeCode')} placeholder="Leave blank for a unique code" maxLength={32} />
+          </Field>
           <Field label="Store name">
             <input
               className={fieldClass}
@@ -173,7 +189,9 @@ export function CreateStorePage() {
           )}
 
           <div className="flex gap-2 pt-1">
-            <Button type="submit">Create Store</Button>
+            <Button type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Create Store'}
+            </Button>
             <Button type="button" variant="secondary" onClick={() => navigate(`${base}/stores`)}>
               Cancel
             </Button>
@@ -194,6 +212,8 @@ export function BulkStoreModal({ open, onClose }: { open: boolean; onClose: () =
   const [fileName, setFileName] = useState('')
   const [result, setResult] = useState<StoreParseResult | null>(null)
   const [created, setCreated] = useState<CreatedStore[] | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   function close() {
     setResult(null)
@@ -243,7 +263,8 @@ export function BulkStoreModal({ open, onClose }: { open: boolean; onClose: () =
             <div className="space-y-2">
               <div className="font-semibold text-slate-900">1. Download the template</div>
               <p className="text-xs text-slate-500">
-                Fill in one store per row. Store name and City are required; the Instructions sheet explains the rest.
+                Open the Stores sheet. Paste one store per row under the header, or type over the example row. Store
+                name and City are required. Store code is optional — leave it blank and a unique code is created.
               </p>
               <Button variant="secondary" onClick={() => void downloadStoreTemplate()}>
                 <Download size={14} /> Download store template
@@ -292,12 +313,29 @@ export function BulkStoreModal({ open, onClose }: { open: boolean; onClose: () =
                     {result.errors.length > 8 && <div className="mt-1 font-medium">…and {result.errors.length - 8} more</div>}
                   </div>
                 )}
+                {saveError && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                    {saveError}
+                  </div>
+                )}
                 {result.rows.length > 0 && (
                   <Button
                     className="w-full"
-                    onClick={() => setCreated(createStores(result.rows.map((r) => r.input)))}
+                    disabled={saving}
+                    onClick={() => {
+                      setSaving(true)
+                      setSaveError(null)
+                      void createStores(result.rows.map((r) => r.input))
+                        .then(setCreated)
+                        .catch((err: unknown) => {
+                          setSaveError(err instanceof Error ? err.message : 'The stores could not be saved on the server.')
+                        })
+                        .finally(() => setSaving(false))
+                    }}
                   >
-                    Create {result.rows.length} {result.rows.length === 1 ? 'store' : 'stores'}
+                    {saving
+                      ? 'Saving…'
+                      : `Create ${result.rows.length} ${result.rows.length === 1 ? 'store' : 'stores'}`}
                   </Button>
                 )}
               </div>

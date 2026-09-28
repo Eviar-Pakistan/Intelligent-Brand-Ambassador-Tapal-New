@@ -5,13 +5,17 @@ import { MapPin } from 'lucide-react'
 import { useCreatedStores } from '../../lib/storeRegistry'
 
 export function ManagerDashboard() {
+  useCreatedStores()
   const store = stores[0]
-  useCreatedStores() // re-render when stores are added
   return (
     <div className="space-y-5">
       <PageHeader
         title="Store Operations"
-        description={`${store.name} · ${stores.length} stores · live attendance & coverage`}
+        description={
+          store
+            ? `${store.name} · ${stores.length} stores · live attendance & coverage`
+            : 'No stores yet. Create one and it is saved on the server.'
+        }
         actions={
           <>
             <Link to="/manager/stores">
@@ -34,17 +38,18 @@ export function ManagerDashboard() {
         </Card>
         <Card>
           <div className="text-xs text-slate-500">Coverage</div>
-          <div className="text-2xl font-bold">{store.coverage}%</div>
+          <div className="text-2xl font-bold">{store ? `${store.coverage}%` : '—'}</div>
         </Card>
         <Card>
           <div className="text-xs text-slate-500">Today Footfall</div>
-          <div className="text-2xl font-bold">{store.todayFootfall.toLocaleString()}</div>
+          <div className="text-2xl font-bold">{store ? store.todayFootfall.toLocaleString() : '—'}</div>
         </Card>
       </div>
       <Card>
         <h3 className="mb-3 font-semibold">Live BA Status</h3>
         <div className="space-y-2">
-          {store.assigned.map((a) => (
+          {!store && <p className="text-sm text-slate-500">No stores yet.</p>}
+          {store?.assigned.map((a) => (
             <div key={a.id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2">
               <div className="flex items-center gap-2 text-sm">
                 <MapPin size={14} className="text-brand-600" />
@@ -74,14 +79,10 @@ export function ManagerDashboard() {
 }
 
 export function AttendancePage() {
-  const rows = [
-    { name: 'Ayesha Khan', in: '09:58', gps: 'Verified', status: 'Active' },
-    { name: 'Hamza Ali', in: '10:05', gps: 'Verified', status: 'Active' },
-    { name: 'Sara Ahmed', in: '10:12', gps: 'Nearby', status: 'Break' },
-  ]
+  const rows: { name: string; in: string; gps: string; status: string }[] = []
   return (
     <div>
-      <PageHeader title="Attendance" description="Shift check-ins with mock GPS status" />
+      <PageHeader title="Attendance" description="Shift check-ins" />
       <Card padding={false}>
         <TableScroll minWidth={560}>
           <table className="w-full text-left text-sm">
@@ -104,6 +105,13 @@ export function AttendancePage() {
                 </td>
               </tr>
             ))}
+            {rows.length === 0 && (
+              <tr className="border-t border-slate-100">
+                <td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-500">
+                  No ambassadors have checked in.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
         </TableScroll>

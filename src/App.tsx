@@ -6,11 +6,12 @@ import { TrainingContentProvider } from './context/TrainingContentContext'
 import { DesktopShell } from './components/AppShell'
 import { BaShell, ShopperShell } from './components/RoleLayouts'
 import { ScreenHub } from './pages/ScreenHub'
-import { LoginPage } from './pages/LoginPage'
+import { HeadOfficeGate, LoginPage } from './pages/LoginPage'
 import { SupervisorLoginPage } from './pages/supervisor/SupervisorLoginPage'
 import { BaDailyReportsPage, CommandCenterPage, OptimizationPage } from './pages/headOffice/CommandCenterPage'
 import { BaPerformanceDashboardPage } from './pages/headOffice/BaPerformanceDashboardPage'
 import { CampaignOverviewPage, CampaignsPage } from './pages/headOffice/CampaignPages'
+import { BaAttendancePage } from './pages/headOffice/BaAttendancePage'
 import { AmbassadorProfilePage, AmbassadorsPage } from './pages/headOffice/AmbassadorPages'
 import { TrainingManagerPage } from './pages/headOffice/TrainingManagerPage'
 import { DeploymentPage, StoreDetailPage, StoresPage } from './pages/headOffice/StorePages'
@@ -67,6 +68,7 @@ const hoPages = (
     <Route path="dashboard" element={<CommandCenterPage />} />
     <Route path="ba-performance" element={<BaPerformanceDashboardPage />} />
     <Route path="daily-reports" element={<BaDailyReportsPage />} />
+    <Route path="attendance" element={<BaAttendancePage />} />
     <Route path="ambassadors" element={<AmbassadorsPage />} />
     <Route path="ambassadors/training" element={<TrainingManagerPage />} />
     <Route path="ambassadors/:id" element={<AmbassadorProfilePage />} />
@@ -101,7 +103,7 @@ export default function App() {
             <Route path="/portal" element={<ScreenHub />} />
 
             {/* Head Office — desktop command center */}
-            <Route path="/ho" element={<DesktopShell kind="headOffice" />}>
+            <Route path="/ho" element={<HeadOfficeGate />}>
               {hoPages}
             </Route>
 

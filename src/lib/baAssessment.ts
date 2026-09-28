@@ -6,7 +6,7 @@
  * training content) and falls back to audio activity when it is not.
  */
 
-export type MoodLabel = 'Positive' | 'Neutral' | 'Negative'
+export type MoodLabel = 'Positive' | 'Neutral' | 'Negative' | 'Confident' | 'Excited' | 'Concerned'
 
 export type AnswerMetrics = {
   questionId: string
@@ -39,6 +39,8 @@ export type AssessmentResult = {
   certified: boolean
   usedTranscript: boolean
   completedAt: string
+  /** Pass score from the engine, when the answer was scored on the server. */
+  passMark?: number
 }
 
 /** Quality % needed to be certified. */

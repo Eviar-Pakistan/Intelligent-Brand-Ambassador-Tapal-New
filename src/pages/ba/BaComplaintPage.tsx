@@ -10,6 +10,7 @@ import {
   type ComplaintKind,
 } from '../../data/complaints'
 import { useComplaints } from '../../context/ComplaintsContext'
+import { mirrorComplaint } from '../../lib/djangoApi'
 
 const fieldClass =
   'w-full rounded-xl border border-slate-200 bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-brand-500 focus:bg-white focus:ring-2 focus:ring-brand-500/15'
@@ -90,6 +91,7 @@ export function BaComplaintPage() {
         complaint: complaint.trim(),
         ...(image ? { image } : {}),
       })
+      mirrorComplaint(account?.accessToken, store.id, complaint.trim())
       setSubmittedId(created.id)
       return
     }
@@ -108,6 +110,7 @@ export function BaComplaintPage() {
       subject: subject.trim(),
       details: details.trim(),
     })
+    mirrorComplaint(account?.accessToken, store.id, `${subject.trim()}: ${details.trim()}`)
     setSubmittedId(created.id)
   }
 

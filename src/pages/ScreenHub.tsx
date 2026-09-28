@@ -66,6 +66,10 @@ export function ScreenHub() {
   const navigate = useNavigate()
 
   function open(role: Role) {
+    if (role === 'headOffice') {
+      navigate('/login')
+      return
+    }
     setRole(role)
     navigate(roleMeta[role].home)
   }

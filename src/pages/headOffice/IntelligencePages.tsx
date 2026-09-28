@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { useMemo, useState, type ReactNode } from 'react'
+import { CertificationRulesPanel } from './CertificationRulesPanel'
 import {
-  baRanking,
   consumerInsights,
   initialConsumerStoreQuestions,
   settingsSections,
@@ -18,7 +18,7 @@ import {
   StatusBadge,
   TableScroll,
 } from '../../components/ui'
-import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
+import { useBaAccounts } from '../../lib/baAccounts'
 import { ReportPerformance } from './ReportPerformance'
 import { Plus, Trash2 } from 'lucide-react'
 
@@ -208,99 +208,52 @@ function ChartCard({ title, rows }: { title: string; rows: { name: string; value
 }
 
 export function LeaderboardPage() {
-  const incentives = buildIncentiveRoster()
+  const accounts = useBaAccounts()
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Ambassador Leaderboard"
-        description="This week · gamified incentive program"
+        description="Ambassadors on the roster"
         actions={
           <Link to="/ho/incentives">
             <Button>Manage PKR incentives</Button>
           </Link>
         }
       />
-      <div className="grid gap-4 lg:grid-cols-3">
-        {baRanking.slice(0, 3).map((b, i) => {
-          const pay = incentives.find((x) => x.baId === b.id)
-          return (
-            <Card key={b.id} className={i === 0 ? 'ring-2 ring-amber-300' : ''}>
-              <div className="text-3xl">{i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'}</div>
-              <h3 className="mt-2 text-lg font-bold">{b.name}</h3>
-              <p className="text-sm text-slate-500">{b.city}</p>
-              <div className="mt-3 text-2xl font-black text-brand-600">
-                {b.points.toLocaleString()} pts
-              </div>
-              <div className="mt-1 text-xs text-slate-500">{b.conversion}% conversion</div>
-              {pay && (
-                <div className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
-                  {formatPkr(pay.totalPkr)} incentive
-                </div>
-              )}
-            </Card>
-          )
-        })}
-      </div>
-      <Card>
-        <h3 className="mb-3 font-semibold">Your Rank (demo BA view)</h3>
-        <div className="flex flex-wrap items-end gap-6">
-          <div>
-            <div className="text-4xl font-black">#7</div>
-            <div className="text-sm text-slate-500">820 points · +120 this week</div>
-          </div>
-          <div className="grid grid-cols-3 gap-3 text-sm">
-            <Mini label="Conversation Rate" value="88%" />
-            <Mini label="Conversion Rate" value="31%" />
-            <Mini label="Customer Rating" value="4.8" />
-          </div>
-        </div>
-        <div className="mt-5 flex flex-wrap gap-2">
-          <StatusBadge status="Active" />
-          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 ring-1 ring-amber-200">
-            {formatPkr(incentives[0]?.totalPkr ?? 2000)} top-tier example
-          </span>
-          <span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-700 ring-1 ring-violet-200">
-            Gold Badge
-          </span>
-          <span className="rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700 ring-1 ring-brand-500/20">
-            Top Performer
-          </span>
-        </div>
-      </Card>
       <Card padding={false}>
-        <TableScroll minWidth={720}>
+        <TableScroll minWidth={640}>
           <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
             <tr>
-              <th className="px-4 py-3">Rank</th>
               <th className="px-4 py-3">Ambassador</th>
+              <th className="px-4 py-3">BA code</th>
               <th className="px-4 py-3">City</th>
-              <th className="px-4 py-3">Points</th>
-              <th className="px-4 py-3">Conversion</th>
-              <th className="px-4 py-3">Incentive (PKR)</th>
+              <th className="px-4 py-3">Status</th>
             </tr>
           </thead>
           <tbody>
-            {baRanking.map((b, i) => {
-              const pay = incentives.find((x) => x.baId === b.id)
-              return (
-                <tr key={b.id} className="border-t border-slate-100">
-                  <td className="px-4 py-3 font-bold text-brand-600">#{i + 1}</td>
-                  <td className="px-4 py-3">
-                    <Link to={`/ho/ambassadors/${b.id}`} className="font-medium hover:text-brand-600">
-                      {b.name}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3">{b.city}</td>
-                  <td className="px-4 py-3">{b.points}</td>
-                  <td className="px-4 py-3">{b.conversion}%</td>
-                  <td className="px-4 py-3 font-semibold text-emerald-700">
-                    {pay ? formatPkr(pay.totalPkr) : '—'}
-                  </td>
-                </tr>
-              )
-            })}
+            {accounts.map((account) => (
+              <tr key={account.id} className="border-t border-slate-100">
+                <td className="px-4 py-3">
+                  <Link to={`/ho/ambassadors/${account.id}`} className="font-medium hover:text-brand-600">
+                    {account.name}
+                  </Link>
+                </td>
+                <td className="px-4 py-3 font-mono font-semibold">{account.baCode || '—'}</td>
+                <td className="px-4 py-3">{account.city || '—'}</td>
+                <td className="px-4 py-3">
+                  <StatusBadge status={account.status} />
+                </td>
+              </tr>
+            ))}
+            {accounts.length === 0 && (
+              <tr className="border-t border-slate-100">
+                <td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-500">
+                  No ambassadors yet.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
         </TableScroll>
@@ -426,15 +379,13 @@ export function SettingsPage() {
       <Card>
         <h2 className="text-xl font-bold">{section}</h2>
         <p className="mt-1 text-sm text-slate-500">
-          Administrator configuration surface — mock controls for showcase. Content is
-          campaign-configurable per the feature spec.
+          {section === 'Certification Rules'
+            ? 'This score decides whether the NLP assessment certifies or rejects a brand ambassador.'
+            : 'Administrator configuration surface. Content is campaign-configurable per the feature spec.'}
         </p>
         {section === 'Certification Rules' && (
-          <div className="mt-5 space-y-4">
-            <Field label="Pass threshold" value="75" />
-            <Field label="A+ threshold" value="90" />
-            <Field label="Required criteria" value="5 / 5 scored" />
-            <Button>Save rules</Button>
+          <div className="mt-5">
+            <CertificationRulesPanel />
           </div>
         )}
         {section === 'Training Scenarios' && (
@@ -458,14 +409,3 @@ export function SettingsPage() {
   )
 }
 
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <label className="block text-sm">
-      <span className="mb-1 block font-medium text-slate-700">{label}</span>
-      <input
-        defaultValue={value}
-        className="w-full rounded-xl border border-slate-200 px-3 py-2 outline-none focus:border-brand-500"
-      />
-    </label>
-  )
-}

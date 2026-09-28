@@ -75,6 +75,6 @@ export const brand: BrandConfig = {
     { src: tapalProduct, alt: 'Tapal Tea collection', position: '50% center', scale: '1.15' },
     { src: tapalOurProductImg, alt: 'Tapal product range', position: '35% center', scale: '1.25' },
   ],
-  loginEmail: 'headoffice@tapal.pk',
+  loginEmail: 'headoffice@tapaltea.com',
   sidebarOverlay: 'from-red-950/35 via-red-900/20 to-red-950/88',
 }

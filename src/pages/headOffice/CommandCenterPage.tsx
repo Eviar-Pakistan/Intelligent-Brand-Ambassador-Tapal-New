@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Area,
@@ -9,19 +9,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import {
-  aiRecommendations,
-  baRanking,
-  consumerInsights,
-  engagementSeries,
-  faqs,
-  mapPins,
-  operations,
-  shopperIntel,
-  storeRanking,
-} from '../../data/mock'
-import { useDemo } from '../../context/AppContext'
-import { Button, Card, CardHeader, KpiCard, ProgressBar, StatusBadge } from '../../components/ui'
+import { aiRecommendations } from '../../data/mock'
+import { useBrand } from '../../context/BrandContext'
+import { LiveStoreMap, type StoreMapPin } from '../../components/LiveStoreMap'
+import { djangoFetch, djangoToken } from '../../lib/djangoApi'
+import { Button, Card, CardHeader, KpiCard, ProgressBar } from '../../components/ui'
 import {
   downloadReportExtract,
   labeledSales,
@@ -29,38 +21,147 @@ import {
   useDailyReports,
   type ExtractKind,
 } from '../../lib/baReport'
-import { Download, MapPin, Sparkles, Zap } from 'lucide-react'
+import { Download, Sparkles, Zap } from 'lucide-react'
+
+type MetricsPin = StoreMapPin & { status: string }
+
+type CampaignMetrics = {
+  generated_at: string
+  kpis: {
+    shoppers_engaged: number
+    shoppers_today: number
+    active_stores: number
+    total_stores: number
+    engagement_rate: number
+    conversion_rate: number
+    conversion_this_week: number
+    conversion_last_week: number
+  }
+  engagement_trend: { day: string; date: string; engagement: number; conversion: number }[]
+  map_pins: MetricsPin[]
+  consumer_insight: { title: string; rows: { name: string; value: number }[] } | null
+  shopper_intelligence: { footfall: string; engagement_rate: string; purchase_intent: string; conversion_rate: string }
+  operations: {
+    active_bas: number
+    gps_online: number
+    scheduled_today: number
+    checked_in_today: number
+    attendance_rate: number
+    stores_covered: number
+    live_stores: number
+    store_coverage: number
+  }
+  top_bas: { id: number; name: string; conversion: number; points: number }[]
+  recommendations: { id: number; store: string; pattern: string; action: string }[]
+  top_stores: MetricsPin[]
+}
+
+const REFRESH_MS = 60_000
+
+function useCampaignMetrics() {
+  const [data, setData] = useState<CampaignMetrics | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!djangoToken()) {
+      setError('Sign in to Head Office to see live campaign metrics.')
+      return
+    }
+    let cancelled = false
+    const load = () =>
+      djangoFetch('/api/intelligence/campaign-metrics/')
+        .then(async (response) => {
+          if (!response.ok) throw new Error()
+          const next = (await response.json()) as CampaignMetrics
+          if (!cancelled) {
+            setData(next)
+            setError(null)
+          }
+        })
+        .catch(() => !cancelled && setError('Live metrics could not be loaded. Check that the server is running.'))
+    void load()
+    const id = window.setInterval(load, REFRESH_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
+
+  return { data, error }
+}
+
+function signed(value: number, unit: string) {
+  const rounded = Math.round(value * 10) / 10
+  return `${rounded > 0 ? '+' : ''}${rounded}${unit}`
+}
 
 export function CommandCenterPage() {
-  const demo = useDemo()
+  const { brand } = useBrand()
+  const { data, error } = useCampaignMetrics()
+
+  if (!data) {
+    return (
+      <div className="space-y-5">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900 sm:text-xl">Performance overview</h2>
+          <p className="text-sm text-slate-500">{brand.productName} · live Retail Command Center</p>
+        </div>
+        {error ? (
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</div>
+        ) : (
+          <Card>
+            <p className="py-10 text-center text-sm text-slate-500">Loading live metrics…</p>
+          </Card>
+        )}
+      </div>
+    )
+  }
+
+  const { kpis, operations: ops } = data
+  const updated = new Date(data.generated_at).toLocaleTimeString('en-PK', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'Asia/Karachi',
+  })
 
   return (
     <div className="space-y-5">
-      {demo.sessionComplete && (
-        <div className="animate-fade-up rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-          Connected demo update: shopper session synced — consumers +1, conversion nudged, AI
-          optimization refreshed.
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900 sm:text-xl">Performance overview</h2>
+          <p className="text-sm text-slate-500">{brand.productName} · live Retail Command Center</p>
         </div>
-      )}
-
-      <div>
-        <h2 className="text-lg font-bold text-slate-900 sm:text-xl">Performance overview</h2>
-        <p className="text-sm text-slate-500">Tapal Tea · live Retail Command Center</p>
+        <span className="text-xs text-slate-400">
+          Updated {updated}
+          {error ? ' · last refresh failed' : ''}
+        </span>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Shoppers Engaged" value={demo.shoppers.toLocaleString()} delta="+1 live sync" />
-        <KpiCard label="Active Stores" value={demo.stores} delta="38 BAs GPS online" />
-        <KpiCard label="Engagement Rate" value={`${demo.engagement}%`} delta="+2.1 pts WoW" />
-        <KpiCard label="Conversion Rate" value={`${demo.conversion}%`} delta="+0.8 pts WoW" />
+        <KpiCard
+          label="Shoppers Engaged"
+          value={kpis.shoppers_engaged.toLocaleString()}
+          delta={`+${kpis.shoppers_today} today`}
+        />
+        <KpiCard
+          label="Active Stores"
+          value={kpis.active_stores}
+          delta={`${ops.gps_online} ${ops.gps_online === 1 ? 'BA' : 'BAs'} GPS online`}
+        />
+        <KpiCard label="Engagement Rate" value={`${kpis.engagement_rate}%`} delta={`of ${kpis.total_stores} stores`} />
+        <KpiCard
+          label="Conversion Rate"
+          value={`${kpis.conversion_rate}%`}
+          delta={`${signed(kpis.conversion_this_week - kpis.conversion_last_week, ' pts')} WoW`}
+        />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-3">
         <Card className="xl:col-span-2">
-          <CardHeader title="Engagement Trend" subtitle="Last 7 days" />
+          <CardHeader title="Engagement Trend" subtitle="Shoppers per day · last 7 days" />
           <div className="h-52 sm:h-64">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={engagementSeries}>
+              <AreaChart data={data.engagement_trend}>
                 <defs>
                   <linearGradient id="eng" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#dc2626" stopOpacity={0.35} />
@@ -69,9 +170,17 @@ export function CommandCenterPage() {
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="day" tick={{ fontSize: 12 }} stroke="#94a3b8" />
-                <YAxis tick={{ fontSize: 12 }} stroke="#94a3b8" />
+                <YAxis allowDecimals={false} tick={{ fontSize: 12 }} stroke="#94a3b8" />
                 <Tooltip />
-                <Area type="monotone" dataKey="engagement" stroke="#dc2626" fill="url(#eng)" strokeWidth={2} />
+                <Area
+                  type="monotone"
+                  dataKey="engagement"
+                  name="Shoppers"
+                  stroke="#dc2626"
+                  fill="url(#eng)"
+                  strokeWidth={2}
+                />
+                <Area type="monotone" dataKey="conversion" name="Converted" stroke="#16a34a" fill="none" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -79,29 +188,11 @@ export function CommandCenterPage() {
 
         <Card>
           <CardHeader title="Live Store Map" subtitle="Performance pins" />
-          <div className="relative h-52 overflow-hidden rounded-xl bg-gradient-to-br from-slate-100 via-brand-50 to-slate-200 sm:h-64">
-            <div className="absolute inset-0 opacity-40 [background-image:linear-gradient(#94a3b8_1px,transparent_1px),linear-gradient(90deg,#94a3b8_1px,transparent_1px)] [background-size:36px_36px]" />
-            {mapPins.map((pin) => (
-              <div
-                key={pin.label}
-                className="absolute -translate-x-1/2 -translate-y-1/2"
-                style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
-                title={pin.label}
-              >
-                <div
-                  className={`flex h-8 w-8 items-center justify-center rounded-full text-white shadow-lg ${
-                    pin.level === 'high' ? 'bg-success' : pin.level === 'medium' ? 'bg-warning' : 'bg-danger'
-                  }`}
-                >
-                  <MapPin size={14} />
-                </div>
-              </div>
-            ))}
-          </div>
+          <LiveStoreMap pins={data.map_pins} />
           <div className="mt-3 flex gap-3 text-[11px] text-slate-500">
-            <span>● High</span>
-            <span>● Medium</span>
-            <span>● Low</span>
+            <span className="text-[#16a34a]">● High</span>
+            <span className="text-[#f59e0b]">● Medium</span>
+            <span className="text-[#e11d48]">● Low</span>
           </div>
         </Card>
       </div>
@@ -109,8 +200,14 @@ export function CommandCenterPage() {
       <div className="grid gap-5 xl:grid-cols-4">
         <Card>
           <CardHeader title="Consumer Insights" />
-          <MiniBars rows={consumerInsights.preferredTea.map((x) => ({ label: x.name, value: x.value }))} />
-          <div className="mt-3 text-[11px] text-slate-400">Preferred tea · cups/day · price · taste</div>
+          {data.consumer_insight ? (
+            <>
+              <MiniBars rows={data.consumer_insight.rows.map((x) => ({ label: x.name, value: x.value }))} />
+              <div className="mt-3 text-[11px] text-slate-400">{data.consumer_insight.title}</div>
+            </>
+          ) : (
+            <p className="text-sm text-slate-500">No survey answers yet.</p>
+          )}
           <Link to="/ho/consumers" className="mt-3 inline-block text-xs font-semibold text-brand-600">
             Open full intelligence →
           </Link>
@@ -118,24 +215,31 @@ export function CommandCenterPage() {
 
         <Card>
           <CardHeader title="Shopper Intelligence" />
-          <StatRow label="Footfall" value={shopperIntel.footfall} />
-          <StatRow label="Engagement" value={shopperIntel.engagementRate} />
-          <StatRow label="Purchase intent" value={shopperIntel.purchaseIntent} />
-          <StatRow label="Conversion" value={shopperIntel.conversionRate} />
+          <StatRow label="Footfall" value={data.shopper_intelligence.footfall} />
+          <StatRow label="Engagement" value={data.shopper_intelligence.engagement_rate} />
+          <StatRow label="Purchase intent" value={data.shopper_intelligence.purchase_intent} />
+          <StatRow label="Conversion" value={data.shopper_intelligence.conversion_rate} />
         </Card>
 
         <Card>
-          <CardHeader title="Operations" />
-          <StatRow label="Active BAs" value={String(operations.activeBas)} />
-          <StatRow label="GPS online" value={String(operations.gpsOnline)} />
-          <StatRow label="Attendance" value={operations.attendance} />
-          <StatRow label="Store coverage" value={operations.storeCoverage} />
+          <CardHeader title="Operations" subtitle="Today" />
+          <StatRow label="Active BAs" value={String(ops.active_bas)} />
+          <StatRow label="GPS online" value={String(ops.gps_online)} />
+          <StatRow label="Attendance" value={`${ops.attendance_rate}% (${ops.checked_in_today}/${ops.scheduled_today})`} />
+          <StatRow label="Store coverage" value={`${ops.store_coverage}% (${ops.stores_covered}/${ops.live_stores})`} />
         </Card>
 
         <Card>
-          <CardHeader title="BA Performance" action={<Link to="/ho/leaderboard" className="text-xs font-semibold text-brand-600">Leaderboard</Link>} />
+          <CardHeader
+            title="BA Performance"
+            action={
+              <Link to="/ho/leaderboard" className="text-xs font-semibold text-brand-600">
+                Leaderboard
+              </Link>
+            }
+          />
           <div className="space-y-2">
-            {baRanking.slice(0, 4).map((b, i) => (
+            {data.top_bas.map((b, i) => (
               <div key={b.id} className="flex items-center justify-between text-sm">
                 <span>
                   <span className="mr-2 font-bold text-brand-600">#{i + 1}</span>
@@ -144,24 +248,21 @@ export function CommandCenterPage() {
                 <span className="text-xs text-slate-500">{b.conversion}%</span>
               </div>
             ))}
+            {data.top_bas.length === 0 && <p className="text-sm text-slate-500">No certified ambassadors yet.</p>}
           </div>
         </Card>
       </div>
 
       <div className="grid gap-5 xl:grid-cols-3">
         <Card className="xl:col-span-2">
-          <CardHeader
-            title="AI Recommendations"
-            subtitle="Updated 10 minutes ago"
-            action={
-              <Link to="/ho/optimization" className="text-xs font-semibold text-brand-600">
-                View all
-              </Link>
-            }
-          />
+          <CardHeader title="AI Recommendations" subtitle={`From live store data · ${updated}`} />
           <div className="space-y-3">
-            {aiRecommendations.map((r) => (
-              <div key={r.id} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+            {data.recommendations.map((r) => (
+              <Link
+                key={`${r.id}-${r.pattern}`}
+                to={`/ho/stores/${r.id}`}
+                className="block rounded-xl border border-slate-100 bg-slate-50 p-3 hover:bg-brand-50"
+              >
                 <div className="flex items-start gap-2">
                   <Zap size={15} className="mt-0.5 text-warning" />
                   <div>
@@ -170,37 +271,30 @@ export function CommandCenterPage() {
                     <p className="mt-1 text-xs text-slate-600">{r.action}</p>
                   </div>
                 </div>
-              </div>
+              </Link>
             ))}
+            {data.recommendations.length === 0 && (
+              <p className="text-sm text-slate-500">No store needs attention right now.</p>
+            )}
           </div>
         </Card>
 
-        <div className="space-y-5">
-          <Card>
-            <CardHeader title="Top Stores" />
-            {storeRanking.map((s) => (
-              <Link
-                key={s.id}
-                to={`/ho/stores/${s.id}`}
-                className="mb-2 flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm hover:bg-brand-50"
-              >
-                <span>
-                  #{s.id} {s.name}
-                </span>
-                <StatusBadge status={s.conversion > 32 ? 'High' : 'Medium'} />
-              </Link>
-            ))}
-          </Card>
-          <Card>
-            <CardHeader title="FAQ Log" subtitle="From shopper AI chats" />
-            {faqs.map((f) => (
-              <div key={f.q} className="mb-2 flex justify-between gap-2 text-xs">
-                <span className="text-slate-600">{f.q}</span>
-                <span className="font-semibold text-slate-900">{f.count}</span>
-              </div>
-            ))}
-          </Card>
-        </div>
+        <Card>
+          <CardHeader title="Top Stores" subtitle="By shoppers engaged" />
+          {data.top_stores.length === 0 && <p className="text-sm text-slate-500">No stores yet.</p>}
+          {data.top_stores.map((s) => (
+            <Link
+              key={s.id}
+              to={`/ho/stores/${s.id}`}
+              className="mb-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm hover:bg-brand-50"
+            >
+              <span className="min-w-0 truncate">{s.name}</span>
+              <span className="shrink-0 text-xs text-slate-500">
+                {s.shoppers} shoppers · {s.conversion_rate}%
+              </span>
+            </Link>
+          ))}
+        </Card>
       </div>
     </div>
   )

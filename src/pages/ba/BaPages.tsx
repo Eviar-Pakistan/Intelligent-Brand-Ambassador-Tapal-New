@@ -37,6 +37,8 @@ import { FaceCheckInModal } from '../../components/FaceCheckInModal'
 import { Modal } from '../../components/ui'
 import { useBaSession } from '../../lib/baAccounts'
 import { ambassadors, stores } from '../../data/mock'
+import { mirrorCheckIn } from '../../lib/djangoApi'
+import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
 import { notifyBaCheckIn, notifyBaCheckOut } from '../../lib/supervisorNotifications'
 import { useUserInterceptions } from '../../lib/userInterceptions'
 import { BaOnboarding } from './BaOnboarding'
@@ -73,6 +75,7 @@ export function BaHomePage() {
   const navigate = useNavigate()
   const {
     city,
+    storeLabel,
     shiftLabel,
     shiftEndLabel,
     checkedIn,
@@ -80,10 +83,10 @@ export function BaHomePage() {
     canCheckOut,
     reportSubmitted,
     isEarlyCheckout,
+    earlyCheckoutReason,
     checkIn,
-    checkOut,
     setEarlyCheckoutReason,
-    markReportSubmitted,
+    submitCheckoutReport,
   } = useBaShift()
 
   const [now, setNow] = useState(() => new Date())
@@ -114,6 +117,16 @@ export function BaHomePage() {
       setExcelErrors(result.errors)
       return
     }
+    // Checking out with the file counts only once the server has the report (that marks attendance).
+    if (!reportSubmitted) {
+      setExcelBusy(true)
+      const problem = await submitCheckoutReport(result.data)
+      setExcelBusy(false)
+      if (problem) {
+        setExcelErrors([problem])
+        return
+      }
+    }
     setExcelErrors([])
     setExcelFileName(file.name)
     saveBaReport(result.data, file.name)
@@ -124,8 +137,13 @@ export function BaHomePage() {
       source: 'excel',
     })
     if (!reportSubmitted) {
-      checkOut()
-      markReportSubmitted()
+      if (isEarlyCheckout) {
+        recordEarlyCheckout({
+          baId,
+          baName,
+          reason: earlyCheckoutReason ?? 'Checked out before shift end',
+        })
+      }
       const ambassador = ambassadors.find((a) => a.id === baId)
       const store = ambassador?.storeId != null ? stores.find((s) => s.id === ambassador.storeId) : undefined
       if (ambassador?.storeId != null && store) {
@@ -262,7 +280,7 @@ export function BaHomePage() {
             {initialsOf(baName)}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="font-semibold text-slate-900">Store #12, {city}</div>
+            <div className="font-semibold text-slate-900">{storeLabel || city || 'No store assigned'}</div>
             <div className="text-sm text-slate-500">{shiftLabel}</div>
           </div>
           {!checkedIn ? (
@@ -449,6 +467,7 @@ export function BaHomePage() {
           checkIn()
           const ambassador = ambassadors.find((a) => a.id === (account?.id ?? 'ayesha'))
           const store = ambassador?.storeId != null ? stores.find((s) => s.id === ambassador.storeId) : undefined
+          mirrorCheckIn(account?.accessToken)
           if (ambassador?.storeId != null && store) {
             notifyBaCheckIn({
               baName: account?.name ?? ambassador.name,
@@ -506,7 +525,10 @@ export function BaHomePage() {
 
       <Modal
         open={checkoutWarningOpen}
-        onClose={() => setCheckoutWarningOpen(false)}
+        onClose={() => {
+          setEarlyCheckoutReason(null)
+          setCheckoutWarningOpen(false)
+        }}
         title="Complete your reports"
       >
         <div className="space-y-4">
@@ -536,13 +558,9 @@ export function BaHomePage() {
             <button
               type="button"
               onClick={() => {
+                // Check-out happens when the last report is submitted, not here.
                 setCheckoutWarningOpen(false)
-                if (stockAlreadySubmitted) {
-                  checkOut()
-                  navigate('/ba/daily-sales')
-                  return
-                }
-                navigate('/ba/stock-report')
+                navigate(stockAlreadySubmitted ? '/ba/daily-sales' : '/ba/stock-report')
               }}
               className="w-full rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition hover:bg-brand-600 sm:w-auto sm:px-5"
             >
@@ -550,7 +568,10 @@ export function BaHomePage() {
             </button>
             <button
               type="button"
-              onClick={() => setCheckoutWarningOpen(false)}
+              onClick={() => {
+                setEarlyCheckoutReason(null)
+                setCheckoutWarningOpen(false)
+              }}
               className="w-full rounded-xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 sm:w-auto sm:px-5"
             >
               Cancel
@@ -679,7 +700,7 @@ export function BaTrainingPage() {
   const { account } = useBaSession()
   // A BA still onboarding goes through the video + verbal assessment; once certified,
   // the Training tab opens the fuller scenario library instead.
-  if (account && account.status !== 'Certified') return <BaOnboarding account={account} />
+  if (account?.result || (account && account.status !== 'Certified')) return <BaOnboarding account={account} />
   return <BaTrainingLibrary />
 }
 

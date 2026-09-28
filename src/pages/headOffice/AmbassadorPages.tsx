@@ -1,6 +1,6 @@
 import { Link, useParams } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ambassadors, baShiftHistory, scheduleDays, stores, type LifecycleStage } from '../../data/mock'
+import { ambassadors, type LifecycleStage } from '../../data/mock'
 import {
   Avatar,
   Button,
@@ -10,12 +10,11 @@ import {
   ProgressRing,
   ScoreBars,
   SearchInput,
-  Select,
   StatusBadge,
   TableScroll,
   Tabs,
 } from '../../components/ui'
-import { Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus } from 'lucide-react'
+import { CalendarPlus, Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus } from 'lucide-react'
 import {
   baAccessUrl,
   baEmailInUse,
@@ -30,8 +29,9 @@ import {
   type BaAccount,
 } from '../../lib/baAccounts'
 import { AssessmentReport } from '../ba/AssessmentReport'
+import { BaShiftsCard } from './BaShiftsCard'
+import { ShiftPlanModal } from './ShiftPlanModal'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
-import { shiftLabelFromTimes, useSchedule } from '../../context/ScheduleContext'
 import {
   currentMonthKey,
   downloadTargetTemplate,
@@ -54,9 +54,6 @@ const allLifecycle: LifecycleStage[] = [
   'Deployed',
   'Live'
 ]
-
-const timeFieldClass =
-  'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500'
 
 const modalFieldClass =
   'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500'
@@ -101,15 +98,21 @@ function AccountLinkModal({
   title: string
   onClose: () => void
 }) {
+  const accounts = useBaAccounts()
+  const live = account ? (accounts.find((item) => item.id === account.id) ?? account) : null
   return (
-    <Modal open={!!account} onClose={onClose} title={title}>
-      {account && (
+    <Modal open={!!live} onClose={onClose} title={title}>
+      {live && (
         <div className="space-y-4 text-sm">
           <p className="text-slate-600">
-            Share this link with {account.name}. Opening it takes them straight into their account. There is no
+            Share this link with {live.name}. Opening it takes them straight into their account. There is no
             password.
           </p>
-          <AccountLinkPanel account={account} />
+          <div className="rounded-xl bg-slate-50 px-4 py-3">
+            <div className="text-xs font-semibold tracking-wide text-slate-500 uppercase">BA code</div>
+            <div className="mt-1 font-mono text-lg font-semibold text-slate-900">{live.baCode || '—'}</div>
+          </div>
+          <AccountLinkPanel account={live} />
           <div className="flex justify-end">
             <Button onClick={onClose}>Done</Button>
           </div>
@@ -131,21 +134,30 @@ function CreateAmbassadorModal({
   const fresh = () => ({ name: '', city: '', email: '', phone: '' })
   const [form, setForm] = useState(fresh)
   const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
   function close() {
     setForm(fresh())
     setError(null)
+    setBusy(false)
     onClose()
   }
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
+    if (busy) return
     if (!form.name.trim()) return setError('Name is required.')
     if (!validEmail(form.email)) return setError('Enter a valid email.')
     if (baEmailInUse(form.email)) return setError('Another ambassador already uses this email.')
-    const account = createBaAccount(form)
-    onCreated(account)
-    close()
+    setBusy(true)
+    try {
+      const account = await createBaAccount(form)
+      onCreated(account)
+      close()
+    } catch (err) {
+      setBusy(false)
+      setError(err instanceof Error ? err.message : 'Could not save this ambassador.')
+    }
   }
 
   const set = (key: 'name' | 'city' | 'email' | 'phone') => (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -173,13 +185,15 @@ function CreateAmbassadorModal({
           <input type="tel" value={form.phone} onChange={set('phone')} className={modalFieldClass} />
         </label>
         <p className="text-xs text-slate-500">
-          After you create the ambassador, you get a personal link. They open that link to enter their account.
+          A unique BA code is created automatically. After you save, you get that code and a personal link.
         </p>
         {error && (
           <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>
         )}
         <div className="flex flex-col gap-2 pt-1 sm:flex-row-reverse">
-          <Button type="submit">Create ambassador</Button>
+          <Button type="submit" disabled={busy}>
+            {busy ? 'Saving…' : 'Create ambassador'}
+          </Button>
           <Button type="button" variant="secondary" onClick={close}>
             Cancel
           </Button>
@@ -224,7 +238,7 @@ function BulkAmbassadorModal({
         <div className="space-y-2">
           <div className="font-semibold text-slate-900">1. Download the template</div>
           <p className="text-xs text-slate-500">
-            Fill in one ambassador per row. Name and Email are required; the Instructions sheet explains the rest.
+            Fill in one ambassador per row. Name and Email are required. Each row gets its own BA code when you create them.
           </p>
           <Button variant="secondary" onClick={() => void downloadAmbassadorTemplate()}>
             <Download size={14} /> Download ambassador template
@@ -276,10 +290,25 @@ function BulkAmbassadorModal({
             {result.rows.length > 0 && (
               <Button
                 className="w-full"
+                disabled={busy}
                 onClick={() => {
-                  const created = createBaAccounts(result.rows.map((r) => r.input))
-                  close()
-                  onCreated(created)
+                  void (async () => {
+                    setBusy(true)
+                    try {
+                      const created = await createBaAccounts(result.rows.map((r) => r.input))
+                      close()
+                      onCreated(created)
+                    } catch (err) {
+                      setBusy(false)
+                      setResult({
+                        ...result,
+                        errors: [
+                          err instanceof Error ? err.message : 'Could not save these ambassadors.',
+                          ...result.errors,
+                        ],
+                      })
+                    }
+                  })()
                 }}
               >
                 Create {result.rows.length} {result.rows.length === 1 ? 'ambassador' : 'ambassadors'}
@@ -306,12 +335,12 @@ function AmbassadorDetailModal({
           <div className="flex items-center gap-2">
             <StatusBadge status={account.status} />
             <span className="text-xs text-slate-500">
-              {[account.city, account.email, account.phone].filter(Boolean).join(' · ') || 'No contact details'}
+              {[account.storeName, account.city, account.email, account.phone].filter(Boolean).join(' · ') || 'No contact details'}
             </span>
           </div>
 
           {account.result ? (
-            <AssessmentReport name={account.name} result={account.result} answers={account.answers} />
+            <AssessmentReport name={account.name} result={account.result} />
           ) : (
             <p className="text-slate-600">
               {account.videoWatched
@@ -321,6 +350,8 @@ function AmbassadorDetailModal({
           )}
 
           <div>
+            <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">BA code</div>
+            <div className="mb-4 font-mono text-lg font-semibold text-slate-900">{account.baCode || '—'}</div>
             <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">Account link</div>
             <AccountLinkPanel account={account} />
           </div>
@@ -334,6 +365,8 @@ export function AmbassadorsPage() {
   const [tab, setTab] = useState('All')
   const [q, setQ] = useState('')
   const accounts = useBaAccounts()
+  const monthTargets = useBaTargets()
+  const targetMonth = currentMonthKey()
   const [createOpen, setCreateOpen] = useState(false)
   const [linkPrompt, setLinkPrompt] = useState<{ account: BaAccount; title: string } | null>(null)
   const [bulkOpen, setBulkOpen] = useState(false)
@@ -341,16 +374,17 @@ export function AmbassadorsPage() {
   const [detailId, setDetailId] = useState<string | null>(null)
   const [targetOpen, setTargetOpen] = useState(false)
   const [targetBulkOpen, setTargetBulkOpen] = useState(false)
+  const [shiftsOpen, setShiftsOpen] = useState(false)
 
-  const filtered = ambassadors.filter((a) => {
-    const matchTab = tab === 'All' || a.status === tab
-    const matchQ = a.name.toLowerCase().includes(q.toLowerCase())
-    return matchTab && matchQ
-  })
+  useEffect(() => {
+    void import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())
+  }, [])
+
   const filteredAccounts = accounts.filter((a) => {
     if (isDemoBa(a.id)) return false
     const matchTab = tab === 'All' || (a.status === 'Invited' ? tab === 'Pending' : a.status === tab)
-    return matchTab && a.name.toLowerCase().includes(q.toLowerCase())
+    const query = q.toLowerCase()
+    return matchTab && (a.name.toLowerCase().includes(query) || (a.storeName ?? '').toLowerCase().includes(query))
   })
 
   return (
@@ -372,6 +406,9 @@ export function AmbassadorsPage() {
             <Button variant="secondary" onClick={() => setBulkOpen(true)}>
               <FileSpreadsheet size={15} /> Bulk upload (Excel)
             </Button>
+            <Button variant="secondary" onClick={() => setShiftsOpen(true)}>
+              <CalendarPlus size={15} /> Create shifts
+            </Button>
             <Link to="/ho/ambassadors/training">
               <Button variant="secondary">Training videos</Button>
             </Link>
@@ -387,11 +424,13 @@ export function AmbassadorsPage() {
           <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs tracking-wide text-slate-500 uppercase">
             <tr>
-              <th className="px-4 py-3">BA</th>
+              <th className="px-4 py-3">BA code</th>
+              <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Location</th>
               <th className="px-4 py-3">Score</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Store</th>
+              <th className="px-4 py-3">September target</th>
               <th className="px-4 py-3">Check-in</th>
               <th className="px-4 py-3">Check-out</th>
               <th className="px-4 py-3">Data filled</th>
@@ -401,6 +440,7 @@ export function AmbassadorsPage() {
           <tbody>
             {filteredAccounts.map((a) => (
               <tr key={a.id} className="border-t border-slate-100 hover:bg-slate-50/70">
+                <td className="px-4 py-3 font-mono text-sm font-semibold text-slate-800">{a.baCode || '—'}</td>
                 <td className="px-4 py-3">
                   <button type="button" onClick={() => setDetailId(a.id)} className="flex items-center gap-3 text-left">
                     <Avatar name={a.name} />
@@ -410,9 +450,14 @@ export function AmbassadorsPage() {
                 <td className="px-4 py-3 text-slate-600">{a.city || '—'}</td>
                 <td className="px-4 py-3 font-semibold">{a.result ? `${a.result.quality}%` : '—'}</td>
                 <td className="px-4 py-3">
-                  <StatusBadge status={a.status} />
+                  <StatusBadge
+                    status={a.result ? (a.result.certified ? 'Certified' : 'Rejected') : a.status}
+                  />
                 </td>
-                <td className="px-4 py-3 text-slate-600">—</td>
+                <td className="px-4 py-3 text-slate-600">{a.storeName || '—'}</td>
+                <td className="px-4 py-3 tabular-nums text-slate-700">
+                  {targetForBa(a.id, targetMonth, monthTargets)?.targetKg.toLocaleString() ?? '—'}
+                </td>
                 <td className="px-4 py-3 tabular-nums text-slate-700">—</td>
                 <td className="px-4 py-3 tabular-nums text-slate-700">—</td>
                 <td className="px-4 py-3">
@@ -429,40 +474,13 @@ export function AmbassadorsPage() {
                 </td>
               </tr>
             ))}
-            {filtered.map((a) => (
-              <tr key={a.id} className="border-t border-slate-100 hover:bg-slate-50/70">
-                <td className="px-4 py-3">
-                  <Link to={`/ho/ambassadors/${a.id}`} className="flex items-center gap-3">
-                    <Avatar name={a.name} />
-                    <span className="font-medium text-slate-900 hover:text-brand-600">{a.name}</span>
-                  </Link>
-                </td>
-                <td className="px-4 py-3 text-slate-600">{a.city}</td>
-                <td className="px-4 py-3 font-semibold">{a.score}%</td>
-                <td className="px-4 py-3">
-                  <StatusBadge status={a.status} />
-                </td>
-                <td className="px-4 py-3 text-slate-600">{a.store}</td>
-                <td className="px-4 py-3 tabular-nums text-slate-700">{a.checkIn}</td>
-                <td className="px-4 py-3 tabular-nums text-slate-700">{a.checkOut}</td>
-                <td className="px-4 py-3">
-                  <StatusBadge status={a.dataFilled} />
-                </td>
-                <td className="px-4 py-3">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      const account = accounts.find((acc) => acc.id === a.id)
-                      if (!account) return
-                      setLinkPrompt({ account, title: `${a.name} · account link` })
-                    }}
-                  >
-                    <ExternalLink size={13} /> Open link
-                  </Button>
+            {filteredAccounts.length === 0 && (
+              <tr>
+                <td colSpan={11} className="px-4 py-8 text-center text-sm text-slate-500">
+                  No ambassadors yet. Add one to create an account link.
                 </td>
               </tr>
-            ))}
+            )}
           </tbody>
         </table>
         </TableScroll>
@@ -493,8 +511,8 @@ export function AmbassadorsPage() {
         {bulkCreated && (
           <div className="space-y-4">
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-800">
-              {bulkCreated.length} {bulkCreated.length === 1 ? 'ambassador' : 'ambassadors'} created. Share each
-              account link — opening it enters that ambassador&apos;s account.
+              {bulkCreated.length} {bulkCreated.length === 1 ? 'ambassador' : 'ambassadors'} created. Each one has a
+              unique BA code. Share the account link — opening it enters that ambassador&apos;s account.
             </div>
             <ul className="max-h-64 space-y-2 overflow-y-auto rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
               {bulkCreated.map((a) => (
@@ -508,6 +526,7 @@ export function AmbassadorsPage() {
                     className="font-medium hover:text-brand-600"
                   >
                     {a.name}
+                    <span className="ml-2 font-mono text-xs text-slate-500">{a.baCode}</span>
                   </button>
                   <Button
                     variant="secondary"
@@ -527,7 +546,7 @@ export function AmbassadorsPage() {
                 className="w-full"
                 onClick={() =>
                   void downloadBaLinks(
-                    bulkCreated.map((a) => ({ name: a.name, email: a.email, url: baAccessUrl(a) })),
+                    bulkCreated.map((a) => ({ name: a.name, email: a.email, code: a.baCode, url: baAccessUrl(a) })),
                   )
                 }
               >
@@ -548,17 +567,13 @@ export function AmbassadorsPage() {
 
       <SetTargetModal open={targetOpen} onClose={() => setTargetOpen(false)} />
       <BulkTargetModal open={targetBulkOpen} onClose={() => setTargetBulkOpen(false)} />
+      <ShiftPlanModal open={shiftsOpen} onClose={() => setShiftsOpen(false)} />
     </div>
   )
 }
 
 function targetPeople(accounts: { id: string; name: string }[]): TargetPerson[] {
-  const map = new Map<string, string>()
-  for (const ambassador of ambassadors) map.set(ambassador.id, ambassador.name)
-  for (const account of accounts) {
-    if (!map.has(account.id)) map.set(account.id, account.name)
-  }
-  return [...map.entries()].map(([id, name]) => ({ id, name }))
+  return accounts.map((account) => ({ id: account.id, name: account.name }))
 }
 
 /** Download the target template, fill Target Kg, then upload it to save many months at once. */
@@ -772,57 +787,48 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
 
 export function AmbassadorProfilePage() {
   const { id } = useParams()
-  const ba = ambassadors.find((a) => a.id === id) ?? ambassadors[0]
-  const { schedule, addShift } = useSchedule()
+  const accounts = useBaAccounts()
+  const account = accounts.find((item) => item.id === id) ?? null
+  const ba = ambassadors.find((a) => a.id === id)
   const [shiftOpen, setShiftOpen] = useState(false)
-  const [shiftTab, setShiftTab] = useState('Current shifts')
-  const [toast, setToast] = useState<string | null>(null)
-  const [form, setForm] = useState({
-    day: scheduleDays[0].key,
-    start: '10:00',
-    end: '14:00',
-    storeId: String(stores[0].id),
-  })
-  const incentive = buildIncentiveRoster().find((r) => r.baId === ba.id)
+  const incentive = buildIncentiveRoster().find((r) => r.baId === ba?.id)
 
-  const currentShifts = useMemo(() => {
-    const dayOrder = scheduleDays.map((d) => d.key)
-    return schedule
-      .filter((s) => s.baId === ba.id)
-      .slice()
-      .sort((a, b) => dayOrder.indexOf(a.day) - dayOrder.indexOf(b.day))
-  }, [schedule, ba.id])
-
-  const historyShifts = useMemo(
-    () => baShiftHistory.filter((s) => s.baId === ba.id),
-    [ba.id],
-  )
-
-  function createShift() {
-    if (form.start >= form.end) {
-      setToast('End time must be after start time')
-      setTimeout(() => setToast(null), 3000)
-      return
-    }
-    const store = stores.find((s) => String(s.id) === form.storeId)
-    const dayInfo = scheduleDays.find((d) => d.key === form.day)
-    if (!store || !dayInfo) return
-
-    addShift({
-      day: form.day,
-      date: dayInfo.date,
-      storeId: store.id,
-      storeName: store.name,
-      city: store.city,
-      shift: shiftLabelFromTimes(form.start, form.end),
-      peakRecommended: false,
-      baId: ba.id,
-      baName: ba.name,
-      status: 'Scheduled',
-    })
-    setShiftOpen(false)
-    setToast(`Shift created for ${ba.name} · ${store.name}`)
-    setTimeout(() => setToast(null), 3000)
+  if (!ba) {
+    return (
+      <div className="space-y-5">
+        <Link to="/ho/ambassadors" className="text-sm text-slate-500 hover:text-brand-600">
+          ← Back to ambassadors
+        </Link>
+        {account ? (
+          <Card>
+            <h2 className="text-2xl font-bold">{account.name}</h2>
+            <p className="mt-1 text-sm text-slate-500">{[account.city, account.email].filter(Boolean).join(' · ')}</p>
+            <div className="mt-4 rounded-xl bg-slate-50 px-4 py-3">
+              <div className="text-xs font-semibold tracking-wide text-slate-500 uppercase">BA code</div>
+              <div className="mt-1 font-mono text-lg font-semibold">{account.baCode || '—'}</div>
+            </div>
+            <div className="mt-4">
+              <AccountLinkPanel account={account} />
+            </div>
+          </Card>
+        ) : (
+          <Card>
+            <p className="text-sm text-slate-600">This ambassador is not on the roster.</p>
+          </Card>
+        )}
+        {account && (
+          <>
+            <div className="flex justify-end">
+              <Button size="sm" onClick={() => setShiftOpen(true)}>
+                Create shift
+              </Button>
+            </div>
+            <BaShiftsCard accountId={account.id} onCreate={() => setShiftOpen(true)} />
+          </>
+        )}
+        <ShiftPlanModal open={shiftOpen} onClose={() => setShiftOpen(false)} />
+      </div>
+    )
   }
 
   return (
@@ -836,11 +842,6 @@ export function AmbassadorProfilePage() {
         </Button>
       </div>
 
-      {toast && (
-        <div className="animate-fade-up rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-          {toast}
-        </div>
-      )}
 
       <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
         {/* Profile + readiness + scores */}
@@ -926,92 +927,7 @@ export function AmbassadorProfilePage() {
             </ol>
           </Card>
 
-          <Card>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <Tabs
-                tabs={['Current shifts', 'Shift history']}
-                value={shiftTab}
-                onChange={setShiftTab}
-              />
-              <span className="text-xs text-slate-400">
-                {shiftTab === 'Current shifts'
-                  ? `${currentShifts.length} this week`
-                  : `${historyShifts.length} past`}
-              </span>
-            </div>
-
-            {shiftTab === 'Current shifts' ? (
-              currentShifts.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-slate-200 py-8 text-center">
-                  <p className="text-sm text-slate-500">No shifts this week</p>
-                  <Button size="sm" className="mt-3" onClick={() => setShiftOpen(true)}>
-                    Create shift
-                  </Button>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {currentShifts.map((s) => (
-                    <div
-                      key={s.id}
-                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2.5 text-sm"
-                    >
-                      <div className="min-w-0">
-                        <div className="font-medium text-slate-900">
-                          {s.day} · {s.date}
-                        </div>
-                        <div className="truncate text-xs text-slate-500">
-                          #{s.storeId} {s.storeName} · {s.city}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-semibold text-slate-800">{s.shift}</span>
-                        <StatusBadge status="Scheduled" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )
-            ) : historyShifts.length === 0 ? (
-              <p className="py-6 text-center text-sm text-slate-500">No past shifts on record.</p>
-            ) : (
-              <TableScroll minWidth={520}>
-                <table className="w-full text-left text-sm">
-                  <thead className="text-xs text-slate-500 uppercase">
-                    <tr>
-                      <th className="pb-2 pr-3 font-medium">Date</th>
-                      <th className="pb-2 pr-3 font-medium">Store</th>
-                      <th className="pb-2 pr-3 font-medium">Shift</th>
-                      <th className="pb-2 pr-3 font-medium">In / Out</th>
-                      <th className="pb-2 font-medium">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {historyShifts.map((s) => (
-                      <tr key={s.id} className="border-t border-slate-100">
-                        <td className="py-2.5 pr-3">
-                          <div className="font-medium">{s.day}</div>
-                          <div className="text-xs text-slate-400">{s.date}</div>
-                        </td>
-                        <td className="py-2.5 pr-3">
-                          <div className="max-w-[140px] truncate">
-                            #{s.storeId} {s.storeName}
-                          </div>
-                          <div className="text-xs text-slate-400">{s.city}</div>
-                        </td>
-                        <td className="py-2.5 pr-3 font-medium whitespace-nowrap">{s.shift}</td>
-                        <td className="py-2.5 pr-3 tabular-nums text-slate-600 whitespace-nowrap">
-                          {s.checkIn} → {s.checkOut}
-                        </td>
-                        <td className="py-2.5">
-                          <StatusBadge status={s.status} />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </TableScroll>
-            )}
-          </Card>
+          <BaShiftsCard accountId={ba.id} onCreate={() => setShiftOpen(true)} />
 
           {incentive && (
             <Card className="flex flex-wrap items-center justify-between gap-3 bg-emerald-50/80">
@@ -1030,64 +946,7 @@ export function AmbassadorProfilePage() {
         </div>
       </div>
 
-      <Modal open={shiftOpen} onClose={() => setShiftOpen(false)} title={`Create shift · ${ba.name}`}>
-        <div className="space-y-3">
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium text-slate-700">Day</span>
-            <Select
-              className="w-full"
-              value={form.day}
-              onChange={(e) => setForm((f) => ({ ...f, day: e.target.value }))}
-            >
-              {scheduleDays.map((d) => (
-                <option key={d.key} value={d.key}>
-                  {d.label} · {d.date}
-                </option>
-              ))}
-            </Select>
-          </label>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block text-sm">
-              <span className="mb-1 block font-medium text-slate-700">Start time</span>
-              <input
-                type="time"
-                className={timeFieldClass}
-                value={form.start}
-                onChange={(e) => setForm((f) => ({ ...f, start: e.target.value }))}
-              />
-            </label>
-            <label className="block text-sm">
-              <span className="mb-1 block font-medium text-slate-700">End time</span>
-              <input
-                type="time"
-                className={timeFieldClass}
-                value={form.end}
-                onChange={(e) => setForm((f) => ({ ...f, end: e.target.value }))}
-              />
-            </label>
-          </div>
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium text-slate-700">Store</span>
-            <Select
-              className="w-full"
-              value={form.storeId}
-              onChange={(e) => setForm((f) => ({ ...f, storeId: e.target.value }))}
-            >
-              {stores.map((s) => (
-                <option key={s.id} value={s.id}>
-                  #{s.id} {s.name} ({s.city})
-                </option>
-              ))}
-            </Select>
-          </label>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" onClick={() => setShiftOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={createShift}>Save shift</Button>
-          </div>
-        </div>
-      </Modal>
+      <ShiftPlanModal open={shiftOpen} onClose={() => setShiftOpen(false)} />
     </div>
   )
 }

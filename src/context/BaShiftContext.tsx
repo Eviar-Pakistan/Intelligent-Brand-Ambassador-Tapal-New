@@ -7,16 +7,31 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { useBaSession } from '../lib/baAccounts'
+import type { ParsedBaReport } from '../lib/baReport'
+import { formatTime12 } from './ScheduleContext'
 
-const SHIFT_START_HOUR = 8
-const SHIFT_END_HOUR = 20
-const SHIFT_END_MINUTE = 0
 /** Demo unlock: Check Out becomes available this many ms after check-in */
 const CHECKOUT_UNLOCK_AFTER_MS = 10_000
-const CITY = 'Lahore'
+/** How often today's shift is fetched again, so HO edits reach the BA. */
+const SHIFT_REFRESH_MS = 5 * 60_000
+
+type TodayShift = {
+  shift: string
+  startTime: string | null
+  endTime: string | null
+  storeLabel: string
+  city: string
+}
+
+/** End of today's shift in minutes after midnight. Null when there is no shift today. */
+let shiftEndMinutes: number | null = null
 
 export type BaShiftState = {
   city: string
+  /** Today's shift from the database, or null when none is scheduled. */
+  hasShift: boolean
+  storeLabel: string
   shiftLabel: string
   shiftEndLabel: string
   checkedIn: boolean
@@ -33,19 +48,32 @@ export type BaShiftState = {
   checkOut: () => void
   setEarlyCheckoutReason: (reason: string | null) => void
   markReportSubmitted: () => void
+  /**
+   * Check-out counts only once the report is submitted. Sends it to the server, which marks the BA Present,
+   * then checks out here. Returns an error message when the server refuses (nothing changes then).
+   */
+  submitCheckoutReport: (report: ParsedBaReport) => Promise<string | null>
   resetShift: () => void
 }
 
 const BaShiftContext = createContext<BaShiftState | null>(null)
 
-/** Checkout is on time when the clock reaches (or passes) shift end time. */
+/** Checkout is on time when the clock reaches (or passes) shift end time. With no shift today nothing is early. */
 export function isAtOrPastShiftEnd(now: Date) {
-  const minutes = now.getHours() * 60 + now.getMinutes()
-  const endMinutes = SHIFT_END_HOUR * 60 + SHIFT_END_MINUTE
-  return minutes >= endMinutes
+  if (shiftEndMinutes === null) return true
+  return now.getHours() * 60 + now.getMinutes() >= shiftEndMinutes
+}
+
+function minutesOf(hhmm: string | null) {
+  if (!hhmm) return null
+  const [h, m] = hhmm.split(':').map(Number)
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null
 }
 
 export function BaShiftProvider({ children }: { children: ReactNode }) {
+  const { account } = useBaSession()
+  const token = account?.accessToken
+  const [todayShift, setTodayShift] = useState<TodayShift | null>(null)
   const [now, setNow] = useState(() => new Date())
   const [checkedIn, setCheckedIn] = useState(false)
   const [checkInAt, setCheckInAt] = useState<Date | null>(null)
@@ -59,6 +87,32 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     const id = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(id)
   }, [])
+
+  useEffect(() => {
+    if (!token || token.startsWith('demo-')) {
+      setTodayShift(null)
+      return
+    }
+    let cancelled = false
+    const load = () =>
+      fetch(`/api/ba/today-shift/?token=${encodeURIComponent(token)}`)
+        .then(async (response) => {
+          if (!response.ok) throw new Error()
+          const data = (await response.json()) as { shift: TodayShift | null }
+          if (!cancelled) setTodayShift(data.shift)
+        })
+        .catch(() => {
+          // keep the last shift we had
+        })
+    void load()
+    const id = window.setInterval(load, SHIFT_REFRESH_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [token])
+
+  shiftEndMinutes = minutesOf(todayShift?.endTime ?? null)
 
   const atShiftEnd = isAtOrPastShiftEnd(now)
   const isEarlyCheckout = checkedIn && !checkedOut && !atShiftEnd
@@ -93,6 +147,31 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     setReportSubmitted(true)
   }, [])
 
+  const submitCheckoutReport = useCallback(
+    async (report: ParsedBaReport) => {
+      if (token && !token.startsWith('demo-')) {
+        try {
+          const response = await fetch('/api/ba/check-out/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token, report, early_reason: earlyCheckoutReason ?? '' }),
+          })
+          if (!response.ok) {
+            const data = (await response.json().catch(() => ({}))) as { detail?: string }
+            return data.detail || 'Your check-out could not be saved. Please try again.'
+          }
+        } catch {
+          return 'No connection. Your report was not sent — please try again.'
+        }
+      }
+      setCheckedOut(true)
+      setCheckOutAt(new Date())
+      setReportSubmitted(true)
+      return null
+    },
+    [token, earlyCheckoutReason],
+  )
+
   const resetShift = useCallback(() => {
     setCheckedIn(false)
     setCheckInAt(null)
@@ -103,12 +182,14 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     setEarlyCheckoutReason(null)
   }, [])
 
-  const shiftEndLabel = `${String(SHIFT_END_HOUR % 12 || 12).padStart(2, '0')}:${String(SHIFT_END_MINUTE).padStart(2, '0')} PM`
+  const shiftEndLabel = todayShift?.endTime ? formatTime12(todayShift.endTime) : ''
 
   const value = useMemo(
     () => ({
-      city: CITY,
-      shiftLabel: `${String(SHIFT_START_HOUR).padStart(2, '0')}:00 AM – ${shiftEndLabel}`,
+      city: todayShift?.city || account?.city || '',
+      hasShift: !!todayShift,
+      storeLabel: todayShift?.storeLabel ?? '',
+      shiftLabel: todayShift?.shift ?? 'No shift scheduled today',
       shiftEndLabel,
       checkedIn,
       checkInAt,
@@ -124,9 +205,12 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       checkOut,
       setEarlyCheckoutReason,
       markReportSubmitted,
+      submitCheckoutReport,
       resetShift,
     }),
     [
+      todayShift,
+      account?.city,
       shiftEndLabel,
       checkedIn,
       checkInAt,
@@ -141,6 +225,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       endShift,
       checkOut,
       markReportSubmitted,
+      submitCheckoutReport,
       resetShift,
     ],
   )

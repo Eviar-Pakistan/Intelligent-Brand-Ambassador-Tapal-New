@@ -1,7 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTrainingContent, type TrainingModule } from '../../context/TrainingContentContext'
-import { MIN_ANSWER_SECONDS, analyzeAnswer, summarizeAssessment } from '../../lib/baAssessment'
+import { MIN_ANSWER_SECONDS } from '../../lib/baAssessment'
+import {
+  baTrainingVideoUrl,
+  createBaSession,
+  engineSessionKey,
+  finishBaSession,
+  getBaSession,
+  metricsFromEngine,
+  resultFromEngine,
+  uploadBaAnswer,
+} from '../../lib/trainingApi'
 import { updateBaAccount, type BaAccount } from '../../lib/baAccounts'
 import { AssessmentReport } from './AssessmentReport'
 
@@ -27,7 +37,7 @@ export function BaOnboarding({ account }: { account: BaAccount }) {
 
   if (account.result) return <ResultStep account={account} />
   if (!account.videoWatched) return <VideoStep account={account} module={module} />
-  return <AssessmentStep account={account} module={module} />
+  return <AssessmentStep account={account} />
 }
 
 // ─── Step 1: training video ──────────────────────────────────────────────────
@@ -37,6 +47,8 @@ function VideoStep({ account, module }: { account: BaAccount; module: TrainingMo
   const furthest = useRef(0)
   const [percent, setPercent] = useState(0)
   const [finished, setFinished] = useState(false)
+  const [serverVideoFailed, setServerVideoFailed] = useState(false)
+  const videoSrc = !serverVideoFailed ? baTrainingVideoUrl() : module?.videoUrl
 
   function onTimeUpdate() {
     const v = videoRef.current
@@ -63,14 +75,17 @@ function VideoStep({ account, module }: { account: BaAccount; module: TrainingMo
         </p>
       </StepCard>
 
-      {module?.videoUrl ? (
+      {videoSrc ? (
         <video
-          key={module.id}
+          key={videoSrc}
           ref={videoRef}
-          src={module.videoUrl}
+          src={videoSrc}
           controls
           controlsList="nodownload noplaybackrate"
           playsInline
+          onError={() => {
+            if (!serverVideoFailed) setServerVideoFailed(true)
+          }}
           onTimeUpdate={onTimeUpdate}
           onSeeking={onSeeking}
           onEnded={() => {
@@ -119,11 +134,13 @@ type BrowserWindow = Window & {
   webkitAudioContext?: typeof AudioContext
 }
 
-type Phase = 'idle' | 'recording' | 'recorded'
+type Phase = 'idle' | 'recording'
 
 type Capture = {
   stream: MediaStream | null
   recorder: MediaRecorder | null
+  audioRecorder: MediaRecorder | null
+  audioChunks: Blob[]
   recognition: SpeechRecognitionLike | null
   audioCtx: AudioContext | null
   timer: number | null
@@ -137,19 +154,24 @@ type Capture = {
 
 const SAMPLE_MS = 200
 
-function AssessmentStep({ account, module }: { account: BaAccount; module: TrainingModule | undefined }) {
-  const questions = module?.questions ?? []
+function AssessmentStep({ account }: { account: BaAccount }) {
+  const [engineQuestions, setEngineQuestions] = useState<{ id: string; prompt: string; description: string }[]>([])
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [preparing, setPreparing] = useState(true)
+  const [scoring, setScoring] = useState(false)
+  const questions = engineQuestions
   const qIndex = account.answers.length
   const question = questions[qIndex]
 
   const [phase, setPhase] = useState<Phase>('idle')
   const [elapsed, setElapsed] = useState(0)
   const [error, setError] = useState<string | null>(null)
-  const [playbackUrl, setPlaybackUrl] = useState<string | null>(null)
   const previewRef = useRef<HTMLVideoElement>(null)
   const capture = useRef<Capture>({
     stream: null,
     recorder: null,
+    audioRecorder: null,
+    audioChunks: [],
     recognition: null,
     audioCtx: null,
     timer: null,
@@ -160,6 +182,65 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
     durationSec: 0,
     speechSec: 0,
   })
+
+  useEffect(() => {
+    let cancelled = false
+    const token = account.accessToken
+    function keepMatching(ids: string[]) {
+      const allowed = new Set(ids)
+      const kept = account.answers.filter((answer) => allowed.has(answer.questionId))
+      if (kept.length !== account.answers.length) {
+        updateBaAccount(account.id, { answers: kept, result: null })
+      }
+    }
+    async function openSession() {
+      try {
+        const saved = sessionStorage.getItem(engineSessionKey(token))
+        if (saved) {
+          try {
+            const existing = await getBaSession(saved)
+            if (!cancelled && existing.status !== 'completed' && existing.questions?.length) {
+              setSessionId(existing.sessionId)
+              setEngineQuestions(
+                existing.questions.map((item) => ({
+                  id: item.id,
+                  prompt: item.question,
+                  description: item.description || '',
+                })),
+              )
+              keepMatching(existing.questions.map((item) => item.id))
+              setPreparing(false)
+              return
+            }
+          } catch {
+            sessionStorage.removeItem(engineSessionKey(token))
+          }
+        }
+        const created = await createBaSession(token)
+        if (cancelled) return
+        sessionStorage.setItem(engineSessionKey(token), created.sessionId)
+        setSessionId(created.sessionId)
+        setEngineQuestions(
+          created.questions.map((item) => ({
+            id: item.id,
+            prompt: item.question,
+            description: item.description || '',
+          })),
+        )
+        keepMatching(created.questions.map((item) => item.id))
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Could not start assessment')
+        }
+      } finally {
+        if (!cancelled) setPreparing(false)
+      }
+    }
+    void openSession()
+    return () => {
+      cancelled = true
+    }
+  }, [account.accessToken])
 
   function release() {
     const c = capture.current
@@ -172,6 +253,7 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
       // already stopped
     }
     if (c.recorder && c.recorder.state !== 'inactive') c.recorder.stop()
+    if (c.audioRecorder && c.audioRecorder.state !== 'inactive') c.audioRecorder.stop()
     c.stream?.getTracks().forEach((t) => t.stop())
     c.audioCtx?.close().catch(() => {})
     c.stream = null
@@ -180,9 +262,6 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
 
   // stop the camera and microphone if the BA leaves the page mid-recording
   useEffect(() => release, [])
-  useEffect(() => () => {
-    if (playbackUrl) URL.revokeObjectURL(playbackUrl)
-  }, [playbackUrl])
 
   // the live preview element only exists while not reviewing a take, so attach the stream here
   useEffect(() => {
@@ -206,7 +285,6 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
       return
     }
 
-    setPlaybackUrl(null)
     const c = capture.current
     Object.assign(c, {
       stream,
@@ -216,6 +294,8 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
       transcript: '',
       durationSec: 0,
       speechSec: 0,
+      audioChunks: [],
+      audioRecorder: null,
     })
 
     // keep a copy of the video so the BA can play it back before submitting
@@ -228,6 +308,21 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
       }
       recorder.start()
       c.recorder = recorder
+    }
+
+    if (typeof MediaRecorder !== 'undefined' && stream.getAudioTracks().length) {
+      const audioStream = new MediaStream(stream.getAudioTracks())
+      const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : ''
+      const audioRecorder = mime ? new MediaRecorder(audioStream, { mimeType: mime }) : new MediaRecorder(audioStream)
+      c.audioChunks = []
+      audioRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) c.audioChunks.push(e.data)
+      }
+      audioRecorder.onstop = () => {
+        c.audioRecorder = null
+      }
+      audioRecorder.start()
+      c.audioRecorder = audioRecorder
     }
 
     // measure how much of the time the BA is actually speaking
@@ -288,53 +383,96 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
     setPhase('recording')
   }
 
-  function stop() {
+  function takeAudio() {
     const c = capture.current
     c.durationSec = (Date.now() - c.startedAt) / 1000
     c.speechSec = (c.speechFrames * SAMPLE_MS) / 1000
-    release()
-    if (previewRef.current) previewRef.current.srcObject = null
-    setPhase('recorded')
-  }
-
-  function submit() {
-    const c = capture.current
-    if (!module || !question || c.durationSec < MIN_ANSWER_SECONDS) return
-    const metrics = analyzeAnswer({
-      questionId: question.id,
-      prompt: question.prompt,
-      reference: `${module.title} ${module.description} ${questions.map((q) => q.prompt).join(' ')}`,
-      durationSec: c.durationSec,
-      speechSec: c.speechSec,
-      transcript: c.transcript,
+    const recorder = c.audioRecorder
+    return new Promise<Blob>((resolve) => {
+      const finish = () => resolve(new Blob(c.audioChunks, { type: 'audio/webm' }))
+      if (!recorder || recorder.state === 'inactive') {
+        release()
+        finish()
+        return
+      }
+      recorder.addEventListener('stop', finish, { once: true })
+      release()
     })
-    const answers = [...account.answers, metrics]
-    if (answers.length >= questions.length) {
-      const result = summarizeAssessment(answers)
-      updateBaAccount(account.id, { answers, result, status: result.certified ? 'Certified' : 'Training' })
-    } else {
-      updateBaAccount(account.id, { answers })
-    }
-    setPlaybackUrl(null)
-    setElapsed(0)
-    setPhase('idle')
   }
 
-  if (!module || questions.length === 0 || !question) {
+  async function stop() {
+    if (scoring) return
+    setScoring(true)
+    setError(null)
+    const audio = await takeAudio()
+    if (previewRef.current) previewRef.current.srcObject = null
+    setPhase('idle')
+    await submit(audio)
+  }
+
+  async function submit(audio: Blob) {
+    const c = capture.current
+    if (!sessionId || !question) {
+      setScoring(false)
+      return
+    }
+    if (c.durationSec < MIN_ANSWER_SECONDS) {
+      setScoring(false)
+      setError(`Your answer was too short. Record again and speak for at least ${MIN_ANSWER_SECONDS} seconds.`)
+      return
+    }
+    if (!audio.size) {
+      setScoring(false)
+      setError('The recording had no audio. Record again and speak into the microphone.')
+      return
+    }
+    try {
+      const scored = await uploadBaAnswer(sessionId, question.id, audio)
+      const metrics = metricsFromEngine(scored.answer, c.durationSec)
+      const answers = [...account.answers, metrics]
+      if (answers.length >= questions.length) {
+        const report = await finishBaSession(sessionId)
+        sessionStorage.removeItem(engineSessionKey(account.accessToken))
+        updateBaAccount(account.id, {
+          answers,
+          result: resultFromEngine(report),
+          status: report.certified ? 'Certified' : 'Training',
+        })
+      } else {
+        updateBaAccount(account.id, { answers })
+      }
+      setElapsed(0)
+      setPhase('idle')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The NLP analyzer could not score this answer.')
+    } finally {
+      setScoring(false)
+    }
+  }
+
+  if (preparing) {
+    return (
+      <div className="py-4">
+        <StepCard step="Step 2 · Assessment" title="Preparing your assessment">
+          <p className="mt-2 text-sm text-slate-500">Connecting to the NLP analyzer…</p>
+        </StepCard>
+      </div>
+    )
+  }
+
+  if (!sessionId || questions.length === 0 || !question) {
     return (
       <div className="py-4">
         <StepCard step="Step 2 · Assessment" title="No assessment questions yet">
           <p className="mt-2 text-sm text-slate-500">
-            Head Office has not added assessment questions. Ask them to add some under Ambassadors → Training
-            videos, then reload this page.
+            {error ||
+              'Head Office has not added a training video with assessment questions. Ask them to upload one under Ambassadors → Training videos, then reload this page.'}
           </p>
         </StepCard>
       </div>
     )
   }
 
-  const lastQuestion = qIndex >= questions.length - 1
-  const longEnough = capture.current.durationSec >= MIN_ANSWER_SECONDS
   const clock = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`
 
   return (
@@ -342,64 +480,55 @@ function AssessmentStep({ account, module }: { account: BaAccount; module: Train
       <StepCard
         step={`Step 2 · Assessment · Question ${qIndex + 1} of ${questions.length}`}
         title={question.prompt}
-      />
+      >
+        {question.description ? (
+          <p className="mt-2 text-base text-slate-600">{question.description}</p>
+        ) : null}
+        <p className="mt-2 text-sm text-slate-500">
+          Answer out loud from what you learned in the training video. Your answer is scored against the video
+          transcript.
+        </p>
+      </StepCard>
 
+      {phase === 'recording' && (
       <div className="relative overflow-hidden rounded-2xl bg-navy-950">
-        {phase === 'recorded' && playbackUrl ? (
-          <video src={playbackUrl} controls playsInline className="aspect-[4/3] w-full bg-black object-cover" />
-        ) : (
-          <video
-            ref={previewRef}
-            muted
-            playsInline
-            autoPlay
-            className="aspect-[4/3] w-full -scale-x-100 bg-slate-900 object-cover"
-          />
-        )}
-        {phase === 'recording' && (
-          <div className="absolute top-3 left-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-xs font-semibold text-white">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
-            REC {clock}
-          </div>
-        )}
+        <video
+          ref={previewRef}
+          muted
+          playsInline
+          autoPlay
+          className="aspect-[4/3] w-full -scale-x-100 bg-slate-900 object-cover"
+        />
+        <div className="absolute top-3 left-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-xs font-semibold text-white">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+          REC {clock}
+        </div>
       </div>
+      )}
 
       <div className="flex flex-wrap gap-3">
-        {phase === 'recording' ? (
-          <button type="button" onClick={stop} className={secondaryButton}>
+        {scoring ? (
+          <button type="button" disabled className={primaryButton}>
+            Analyzing…
+          </button>
+        ) : phase === 'recording' ? (
+          <button type="button" onClick={() => void stop()} className={secondaryButton}>
             Stop
           </button>
         ) : (
           <button
             type="button"
             onClick={() => void start()}
-            className={
-              phase === 'recorded'
-                ? secondaryButton
-                : 'rounded-2xl bg-brand-500 px-5 py-3.5 text-base font-semibold text-white shadow-md shadow-brand-500/25 transition hover:bg-brand-600'
-            }
+            className="rounded-2xl bg-brand-500 px-5 py-3.5 text-base font-semibold text-white shadow-md shadow-brand-500/25 transition hover:bg-brand-600"
           >
-            {phase === 'recorded' ? 'Record again' : 'Start recording'}
+            Start recording
           </button>
         )}
-        <button
-          type="button"
-          disabled={phase !== 'recorded' || !longEnough}
-          onClick={submit}
-          className={primaryButton}
-        >
-          {lastQuestion ? 'Submit & finish' : 'Submit & next question'}
-        </button>
       </div>
 
-      {phase === 'recorded' && !longEnough && (
-        <p className="text-sm text-amber-700">
-          Your answer was too short. Record again — speak for at least {MIN_ANSWER_SECONDS} seconds.
-        </p>
-      )}
-      {phase === 'idle' && (
+      {phase === 'idle' && !scoring && (
         <p className="text-sm text-slate-500">
-          Press Start recording and answer out loud. Your camera and microphone are used only for this assessment.
+          Press Start recording and answer out loud. When you stop, the answer is scored and the analysis is shown.
         </p>
       )}
       {error && (
@@ -417,7 +546,7 @@ function ResultStep({ account }: { account: BaAccount }) {
 
   return (
     <div className="space-y-4 py-4">
-      <AssessmentReport name={account.name} result={account.result} answers={account.answers} />
+      <AssessmentReport name={account.name} result={account.result} />
       {account.result.certified ? (
         <button type="button" onClick={() => navigate('/ba/home')} className={`w-full ${primaryButton}`}>
           Go to Home
@@ -425,7 +554,10 @@ function ResultStep({ account }: { account: BaAccount }) {
       ) : (
         <button
           type="button"
-          onClick={() => updateBaAccount(account.id, { answers: [], result: null, status: 'Training' })}
+          onClick={() => {
+            sessionStorage.removeItem(engineSessionKey(account.accessToken))
+            updateBaAccount(account.id, { answers: [], result: null, videoWatched: false, status: 'Training' })
+          }}
           className={`w-full ${primaryButton}`}
         >
           Retake assessment

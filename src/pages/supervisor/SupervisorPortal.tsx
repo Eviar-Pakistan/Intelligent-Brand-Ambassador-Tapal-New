@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link, Navigate } from 'react-router-dom'
 import { DesktopShell } from '../../components/AppShell'
+import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
 import { Card, Modal, PageHeader, StatusBadge, TableScroll, Tabs } from '../../components/ui'
 import { useComplaints } from '../../context/ComplaintsContext'
 import { formatComplaintDate, type Complaint } from '../../data/complaints'
@@ -54,6 +55,7 @@ export function SupervisorHomePage() {
       {supervisor && (
         <>
           <SupervisorSummary supervisor={supervisor} />
+          <EarlyCheckoutsCard storeIds={supervisor.storeIds} />
           <SupervisorIncentiveCard supervisor={supervisor} />
         </>
       )}

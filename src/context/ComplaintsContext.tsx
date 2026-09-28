@@ -8,6 +8,7 @@ import {
 } from 'react'
 import {
   initialComplaints,
+  isSampleComplaint,
   type BaComplaint,
   type Complaint,
   type ComplaintStatus,
@@ -40,7 +41,11 @@ function loadComplaints(): Complaint[] {
     if (!Array.isArray(parsed)) return initialComplaints
     const stored = parsed.filter(
       (c): c is Complaint =>
-        !!c && typeof c === 'object' && typeof c.id === 'string' && typeof c.storeId === 'number',
+        !!c &&
+        typeof c === 'object' &&
+        typeof c.id === 'string' &&
+        typeof c.storeId === 'number' &&
+        !isSampleComplaint(c.id),
     )
     const ids = new Set(stored.map((c) => c.id))
     return [...stored, ...initialComplaints.filter((c) => !ids.has(c.id))]

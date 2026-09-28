@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { baSignIn, findBaByAccessToken } from '../../lib/baAccounts'
+import { baSignIn, resolveBaAccessToken } from '../../lib/baAccounts'
 
 /** Opens one ambassador's account from their personal link. No password. */
 export function BaAccessPage() {
@@ -9,13 +9,21 @@ export function BaAccessPage() {
   const [missing, setMissing] = useState(false)
 
   useEffect(() => {
-    const account = token ? findBaByAccessToken(token) : null
-    if (!account) {
-      setMissing(true)
-      return
+    let stop = false
+    async function open() {
+      const account = token ? await resolveBaAccessToken(token) : null
+      if (stop) return
+      if (!account) {
+        setMissing(true)
+        return
+      }
+      baSignIn(account.id)
+      navigate(account.status === 'Certified' ? '/ba/home' : '/ba/training', { replace: true })
     }
-    baSignIn(account.id)
-    navigate(account.status === 'Certified' ? '/ba/home' : '/ba/training', { replace: true })
+    void open()
+    return () => {
+      stop = true
+    }
   }, [token, navigate])
 
   if (!missing) {

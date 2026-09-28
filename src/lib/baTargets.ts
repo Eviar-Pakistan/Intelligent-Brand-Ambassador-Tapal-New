@@ -1,24 +1,27 @@
 import { useSyncExternalStore } from 'react'
 
+export type TargetLine = { sku: string; qty: number }
+
 export type BaMonthTarget = {
   baId: string
   baName: string
+  baCode?: string
+  storeName?: string
+  storeCode?: string
+  city?: string
   /** YYYY-MM */
   month: string
+  /** Sum of the September SKU quantities for this store. */
   targetKg: number
   salesKg: number
+  lines?: TargetLine[]
 }
 
 const STORAGE_KEY = 'ba-month-targets-v1'
 
-const seed: BaMonthTarget[] = [
-  { baId: 'ayesha', baName: 'Ayesha Khan', month: '2026-09', targetKg: 120, salesKg: 96 },
-  { baId: 'sara', baName: 'Sara Ahmed', month: '2026-09', targetKg: 100, salesKg: 88 },
-  { baId: 'fatima', baName: 'Fatima Noor', month: '2026-09', targetKg: 90, salesKg: 71 },
-  { baId: 'hamza', baName: 'Hamza Ali', month: '2026-09', targetKg: 80, salesKg: 54 },
-  { baId: 'ayesha', baName: 'Ayesha Khan', month: '2026-08', targetKg: 110, salesKg: 104 },
-  { baId: 'sara', baName: 'Sara Ahmed', month: '2026-08', targetKg: 100, salesKg: 91 },
-]
+const seed: BaMonthTarget[] = []
+
+const SAMPLE_BA_IDS = new Set(['ayesha', 'hamza', 'sara', 'fatima', 'bilal'])
 
 function load(): BaMonthTarget[] {
   try {
@@ -31,7 +34,8 @@ function load(): BaMonthTarget[] {
         typeof row.baId === 'string' &&
         typeof row.month === 'string' &&
         typeof row.targetKg === 'number' &&
-        typeof row.salesKg === 'number',
+        typeof row.salesKg === 'number' &&
+        !SAMPLE_BA_IDS.has(row.baId),
     )
     const keys = new Set(stored.map((row) => `${row.baId}:${row.month}`))
     return [...stored, ...seed.filter((row) => !keys.has(`${row.baId}:${row.month}`))]
@@ -97,6 +101,27 @@ export function setBaMonthTarget(input: BaMonthTarget) {
 }
 
 /** Replaces each ambassador-month in one save. */
+/** Replaces the saved list with the rows returned by the API. */
+export function replaceTargetsFromApi(rows: BaMonthTarget[]) {
+  commit(
+    rows
+      .filter(
+        (row) =>
+          !!row &&
+          typeof row.baId === 'string' &&
+          typeof row.month === 'string' &&
+          typeof row.targetKg === 'number' &&
+          !SAMPLE_BA_IDS.has(row.baId),
+      )
+      .map((row) => ({
+        ...row,
+        baName: row.baName.trim(),
+        salesKg: typeof row.salesKg === 'number' ? row.salesKg : 0,
+        lines: Array.isArray(row.lines) ? row.lines : [],
+      })),
+  )
+}
+
 export function setBaMonthTargets(rows: BaMonthTarget[]) {
   if (rows.length === 0) return
   const keys = new Set(rows.map((row) => `${row.baId}:${row.month}`))
@@ -156,7 +181,7 @@ export async function downloadTargetTemplate(people: TargetPerson[], month = cur
     ['5. Save the file, then upload it with Upload targets.'],
     [],
     TARGET_COLUMNS.map((column) => column.header),
-    ['Ayesha Khan', '2026-09', 120, 96],
+    ['Ambassador name', '2026-09', 120, 96],
   ])
   help['!cols'] = [{ wch: 28 }, { wch: 88 }, { wch: 18 }, { wch: 16 }]
 
@@ -170,7 +195,7 @@ export type TargetParseResult = { rows: BaMonthTarget[]; errors: string[] }
 
 const targetHeaderKey = (value: unknown) => String(value ?? '').replace(/\*/g, '').trim().toLowerCase()
 
-function parseMonthCell(value: unknown, parseDateCode: (value: number) => { y: number; m: number } | null) {
+export function parseMonthCell(value: unknown, parseDateCode: (value: number) => { y: number; m: number } | null) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}`
   }

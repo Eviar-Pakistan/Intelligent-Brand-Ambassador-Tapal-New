@@ -2,14 +2,14 @@ import { useSyncExternalStore } from 'react'
 import { stores, type Store } from '../data/mock'
 
 /**
- * Stores created by hand or from an Excel sheet. There is no backend, so they live in this
- * browser's localStorage and are added to the shared `stores` list at startup, which makes
- * them show up on every page that lists stores.
+ * Stores created by Head Office. They are saved on the server and copied into the shared
+ * `stores` list, which is what the store screens read.
  */
 
 export type Footfall = Store['footfall']
 
 export type StoreInput = {
+  storeCode: string
   name: string
   city: string
   footfall: Footfall
@@ -39,40 +39,15 @@ export const CITIES = [
 export const FOOTFALLS: Footfall[] = ['High', 'Medium', 'Low']
 export const DEFAULT_PEAK_HOURS = '5 PM — 9 PM'
 
+/** Map pins are stored to 6 decimal places. Extra digits from a paste are rounded, not rejected. */
+export function roundCoord(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000
+}
+
 const STORAGE_KEY = 'created-stores-v1'
 
-function toStore(c: CreatedStore): Store {
-  return {
-    id: c.id,
-    name: c.name,
-    city: c.city,
-    footfall: c.footfall,
-    bas: 0,
-    coverage: 0,
-    status: 'NEEDS BA',
-    todayFootfall: 0,
-    engagement: 0,
-    conversion: 0,
-    peak: c.peakHours ? [c.peakHours] : [],
-    assigned: [],
-    qrCode: c.slug,
-  }
-}
-
-function load(): CreatedStore[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? (parsed as CreatedStore[]) : []
-  } catch {
-    return []
-  }
-}
-
-let created = load()
+let created: CreatedStore[] = []
 const listeners = new Set<() => void>()
-
-for (const c of created) if (!stores.some((s) => s.id === c.id)) stores.push(toStore(c))
 
 function subscribe(listener: () => void) {
   listeners.add(listener)
@@ -89,40 +64,143 @@ export function findCreatedStore(id: number) {
   return created.find((c) => c.id === id) ?? null
 }
 
+type ApiStoreRow = {
+  id: number
+  name: string
+  city: string
+  address?: string
+  footfall?: string
+  peak?: string[]
+  peak_hours?: string
+  contact_name?: string
+  contact_phone?: string
+  status?: string
+  coverage?: number
+  bas?: number
+  today_footfall?: number
+  engagement?: number
+  conversion?: number
+  store_code?: string
+  qr_slug?: string
+  latitude?: string | number | null
+  longitude?: string | number | null
+}
+
+function remember(row: ApiStoreRow) {
+  if (!row?.id || !row.name) return null
+  const footfall: Footfall = row.footfall === 'High' || row.footfall === 'Low' ? row.footfall : 'Medium'
+  const status: Store['status'] = row.status === 'LIVE' ? 'Covered' : row.status === 'PARTIAL' ? 'PARTIAL' : 'NEEDS BA'
+  const latitude = row.latitude == null || row.latitude === '' ? null : Number(row.latitude)
+  const longitude = row.longitude == null || row.longitude === '' ? null : Number(row.longitude)
+  const record: CreatedStore = {
+    storeCode: (row.store_code || '').trim().toUpperCase(),
+    name: row.name,
+    city: row.city,
+    footfall,
+    address: row.address ?? '',
+    latitude: Number.isFinite(latitude) ? latitude : null,
+    longitude: Number.isFinite(longitude) ? longitude : null,
+    peakHours: row.peak?.[0] || row.peak_hours || '',
+    contactPerson: row.contact_name ?? '',
+    contactPhone: row.contact_phone ?? '',
+    id: row.id,
+    slug: row.qr_slug || `s${row.id}-api`,
+    createdAt: new Date().toISOString(),
+  }
+  stores.push({
+    id: row.id,
+    storeCode: record.storeCode,
+    name: row.name,
+    city: row.city,
+    footfall,
+    bas: row.bas ?? 0,
+    coverage: row.coverage ?? 0,
+    status,
+    todayFootfall: row.today_footfall ?? 0,
+    engagement: Math.round(row.engagement ?? 0),
+    conversion: Math.round(row.conversion ?? 0),
+    peak: row.peak?.length ? row.peak : record.peakHours ? [record.peakHours] : [],
+    assigned: [],
+    qrCode: record.slug,
+  })
+  created = [record, ...created.filter((item) => item.id !== record.id)]
+  return record
+}
+
+function publish() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(created))
+  } catch {
+    // keep the in-memory list
+  }
+  listeners.forEach((listener) => listener())
+}
+
+/** The server roster replaces the list, so hardcoded and deleted stores disappear. */
+export function replaceStoresFromApi(rows: ApiStoreRow[]) {
+  stores.splice(0, stores.length)
+  created = []
+  for (const row of rows) remember(row)
+  publish()
+}
+
+/** Add a Django store to the same list the screens already read. */
+export function adoptApiStore(row: ApiStoreRow) {
+  if (!row?.id || stores.some((store) => store.id === row.id)) return
+  remember(row)
+  publish()
+}
+
 const norm = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ')
 
 export function storeExists(name: string, city: string) {
   return stores.some((s) => norm(s.name) === norm(name) && norm(s.city) === norm(city))
 }
 
-function randomSuffix() {
-  const bytes = crypto.getRandomValues(new Uint8Array(8))
-  return Array.from(bytes, (b) => (b % 36).toString(36)).join('')
+async function readApiError(res: Response) {
+  try {
+    const data = (await res.json()) as { detail?: string } & Record<string, unknown>
+    if (data.detail) return data.detail
+    const parts = Object.values(data)
+      .flatMap((value) => (Array.isArray(value) ? value : [value]))
+      .filter((value) => typeof value === 'string')
+    if (parts.length) return parts.join(' ')
+  } catch {
+    // use the fallback below
+  }
+  return 'The store could not be saved on the server.'
 }
 
-/** Adds the stores to the app. Returns them with their new ids and shopper slugs. */
-export function createStores(inputs: StoreInput[]): CreatedStore[] {
+/** Saves each store on the server and adds it to the list with the server id and QR slug. */
+export async function createStores(inputs: StoreInput[]): Promise<CreatedStore[]> {
+  const { djangoFetch, djangoToken } = await import('./djangoApi')
+  if (!djangoToken()) {
+    throw new Error('Sign in as Head Office first. The store is saved on the server.')
+  }
   const added: CreatedStore[] = []
   for (const input of inputs) {
-    const id = Math.max(99, ...stores.map((s) => s.id)) + 1
-    const record: CreatedStore = {
-      ...input,
-      name: input.name.trim(),
-      city: input.city.trim(),
-      id,
-      slug: `s${id}-${randomSuffix()}`,
-      createdAt: new Date().toISOString(),
-    }
-    stores.push(toStore(record))
+    const res = await djangoFetch('/api/stores/', {
+      method: 'POST',
+      body: JSON.stringify({
+        store_code: input.storeCode.trim().toUpperCase(),
+        name: input.name.trim(),
+        city: input.city.trim(),
+        address: input.address.trim(),
+        footfall: input.footfall,
+        peak_hours: input.peakHours,
+        contact_name: input.contactPerson,
+        contact_phone: input.contactPhone,
+        latitude: input.latitude == null ? null : roundCoord(input.latitude),
+        longitude: input.longitude == null ? null : roundCoord(input.longitude),
+      }),
+    })
+    if (!res.ok) throw new Error(await readApiError(res))
+    const row = (await res.json()) as ApiStoreRow
+    const record = remember(row)
+    if (!record?.id || !record.slug) throw new Error('The server did not return the new store.')
     added.push(record)
+    publish()
   }
-  created = [...added.slice().reverse(), ...created]
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(created))
-  } catch {
-    // keep in memory for this session
-  }
-  listeners.forEach((l) => l())
   return added
 }
 
@@ -189,6 +267,7 @@ export async function qrDataUrl(text: string, width = 320) {
 
 const SHEET = 'Stores'
 const COLUMNS = [
+  { key: 'storeCode', header: 'Store code', width: 16 },
   { key: 'name', header: 'Store name *', width: 30 },
   { key: 'city', header: 'City *', width: 16 },
   { key: 'footfall', header: 'Footfall', width: 12 },
@@ -200,24 +279,42 @@ const COLUMNS = [
   { key: 'contactPhone', header: 'Contact phone', width: 18 },
 ] as const
 
+const EXAMPLE_STORE = 'Example store'
+
+/** Blank rows under the header so Excel can accept a pasted block of stores. */
+function sheetWithPasteRoom(XLSX: { utils: { aoa_to_sheet: (rows: unknown[][]) => Record<string, unknown> } }, rows: unknown[][]) {
+  const width = COLUMNS.length
+  const padded = rows.map((row) => {
+    const copy = [...row]
+    while (copy.length < width) copy.push('')
+    return copy
+  })
+  while (padded.length < 101) padded.push(Array(width).fill(''))
+  return XLSX.utils.aoa_to_sheet(padded)
+}
+
 /** Downloads the .xlsx a user fills in to create many stores at once. */
 export async function downloadStoreTemplate() {
   const XLSX = await import('xlsx')
-  const sheet = XLSX.utils.aoa_to_sheet([COLUMNS.map((c) => c.header)])
+  const sheet = sheetWithPasteRoom(XLSX, [
+    COLUMNS.map((c) => c.header),
+    ['', EXAMPLE_STORE, 'Lahore', 'High', 'Paste your stores over this row, or start on the next row', '', '', '5 PM - 9 PM', '', ''],
+  ])
   sheet['!cols'] = COLUMNS.map((c) => ({ wch: c.width }))
 
   const help = XLSX.utils.aoa_to_sheet([
     ['How to fill the store template'],
     [],
-    [`1. Add one store per row on the "${SHEET}" sheet, starting on row 2. Do not change the header row.`],
-    ['2. Store name and City are required. Everything else is optional.'],
+    [`1. On the "${SHEET}" sheet, paste or type one store per row under the header. Do not change the header row.`],
+    ['The example row is ignored. Paste over it, or leave it and start your stores on the next row.'],
+    ['2. Store name and City are required. Store code is optional — leave it blank and a unique code is created.'],
     [`3. Footfall must be High, Medium or Low (blank = Medium). Peak hours is free text (blank = ${DEFAULT_PEAK_HOURS}).`],
     ['4. Latitude and Longitude are decimal numbers, e.g. 24.8607 and 67.0011.'],
     ['5. A store that already exists (same name and city) is skipped.'],
     ['6. Save the file, then upload it on the Stores page. Each store gets its own shopper QR code.'],
     [],
     COLUMNS.map((c) => c.header),
-    ['Carrefour Johar Town', 'Lahore', 'High', 'Main Boulevard, Johar Town', 31.4697, 74.2728, '5 PM — 9 PM', 'Ali Raza', '0300-1234567'],
+    ['ST-4K7M2Q', 'Carrefour Johar Town', 'Lahore', 'High', 'Main Boulevard, Johar Town', 31.4697, 74.2728, '5 PM — 9 PM', 'Ali Raza', '0300-1234567'],
   ])
   help['!cols'] = COLUMNS.map((c) => ({ wch: c.width }))
 
@@ -262,6 +359,7 @@ export async function parseStoreFile(file: File): Promise<StoreParseResult> {
   const rows: ParsedStoreRow[] = []
   const errors: string[] = []
   const seen = new Set<string>()
+  const seenCodes = new Set<string>()
 
   table.slice(headerAt + 1).forEach((r, i) => {
     const rowNo = headerAt + i + 2
@@ -269,9 +367,17 @@ export async function parseStoreFile(file: File): Promise<StoreParseResult> {
 
     const name = cell(r, 'store name')
     const city = cell(r, 'city')
+    const storeCode = cell(r, 'store code').toUpperCase()
+    if (name.toLowerCase() === EXAMPLE_STORE.toLowerCase()) return
     const problems: string[] = []
     if (!name) problems.push('Store name is required')
     if (!city) problems.push('City is required')
+    if (storeCode.length > 32) problems.push('Store code must be 32 characters or fewer')
+    if (storeCode) {
+      if (seenCodes.has(storeCode)) problems.push('Duplicate store code in this file')
+      else if (stores.some((s) => s.storeCode.toUpperCase() === storeCode)) problems.push('This store code is already used')
+      seenCodes.add(storeCode)
+    }
 
     const footRaw = cell(r, 'footfall')
     const footfall = FOOTFALLS.find((f) => f.toLowerCase() === footRaw.toLowerCase())
@@ -285,7 +391,7 @@ export async function parseStoreFile(file: File): Promise<StoreParseResult> {
         problems.push(`${header[0].toUpperCase()}${header.slice(1)} must be a number between -${limit} and ${limit} (found "${text}")`)
         return null
       }
-      return n
+      return roundCoord(n)
     }
     const latitude = coord('latitude', 90)
     const longitude = coord('longitude', 180)
@@ -304,6 +410,7 @@ export async function parseStoreFile(file: File): Promise<StoreParseResult> {
     rows.push({
       row: rowNo,
       input: {
+        storeCode,
         name,
         city,
         footfall: footfall ?? 'Medium',
@@ -322,13 +429,13 @@ export async function parseStoreFile(file: File): Promise<StoreParseResult> {
 }
 
 /** Downloads a sheet of store names with their shopper links, e.g. to print QR posters. */
-export async function downloadStoreLinks(list: Pick<Store, 'id' | 'qrCode' | 'name' | 'city'>[]) {
+export async function downloadStoreLinks(list: Pick<Store, 'id' | 'qrCode' | 'name' | 'city' | 'storeCode'>[]) {
   const XLSX = await import('xlsx')
   const sheet = XLSX.utils.aoa_to_sheet([
-    ['Store ID', 'Store', 'City', 'Shopper link'],
-    ...list.map((s) => [s.id, s.name, s.city, shopperLink(s)]),
+    ['Store code', 'Store ID', 'Store', 'City', 'Shopper link'],
+    ...list.map((s) => [s.storeCode, s.id, s.name, s.city, shopperLink(s)]),
   ])
-  sheet['!cols'] = [{ wch: 10 }, { wch: 30 }, { wch: 16 }, { wch: 90 }]
+  sheet['!cols'] = [{ wch: 16 }, { wch: 10 }, { wch: 30 }, { wch: 16 }, { wch: 90 }]
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, sheet, 'Shopper links')
   XLSX.writeFile(wb, 'Tapal_Store_Shopper_Links.xlsx')

@@ -13,6 +13,7 @@ from .ba_training_views import (
     ba_submit_answer,
     ba_training_video,
 )
+from . import portal_views as portal
 from .views import (
     ba_attendance,
     ba_targets,
@@ -81,5 +82,26 @@ urlpatterns = [
     path('ba/sessions/<uuid:session_id>/answers/', ba_submit_answer, name='ba-submit-answer'),
     path('ba/sessions/<uuid:session_id>/finish/', ba_finish_session, name='ba-finish-session'),
     path('ba/sessions/<uuid:session_id>/report/', ba_session_report, name='ba-session-report'),
+    # Supervisors (Head Office management, sign-in, portal)
+    path('supervisors/', portal.supervisors, name='supervisors'),
+    path('supervisors/overviews/', portal.supervisor_overviews, name='supervisor-overviews'),
+    path('supervisors/<str:pk>/', portal.supervisor_detail, name='supervisor-detail'),
+    path('supervisor/login/', portal.supervisor_login, name='supervisor-login'),
+    path('supervisor/logout/', portal.supervisor_logout, name='supervisor-logout'),
+    path('supervisor/me/', portal.supervisor_me, name='supervisor-me'),
+    path('supervisor/overview/', portal.supervisor_overview, name='supervisor-overview'),
+    path('supervisor/notifications/', portal.supervisor_notifications, name='supervisor-notifications'),
+    path('journey-plans/', portal.journey_plans, name='journey-plans'),
+    path('journey-visits/', portal.journey_visits, name='journey-visits'),
+    # Field data
+    path('complaints/', portal.complaints, name='complaints'),
+    path('complaints/<str:pk>/', portal.complaint_detail, name='complaint-detail'),
+    path('daily-reports/', portal.daily_reports, name='daily-reports'),
+    path('interceptions/', portal.interceptions, name='interceptions'),
+    path('early-checkouts/', portal.early_checkouts, name='early-checkouts'),
+    path('kpi-config/', portal.kpi_config, name='kpi-config'),
+    path('ba/stores/', portal.ba_stores, name='ba-stores'),
+    path('shopper/sessions/', portal.shopper_session, name='shopper-session'),
+    path('ba/training/modules/', portal.training_modules, name='ba-training-modules'),
     path('', include(router.urls)),
 ]

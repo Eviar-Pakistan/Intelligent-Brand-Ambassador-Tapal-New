@@ -25,3 +25,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Django
+__pycache__/
+*.pyc
+tapal_backend/staticfiles/
+tapal_backend/.venv/

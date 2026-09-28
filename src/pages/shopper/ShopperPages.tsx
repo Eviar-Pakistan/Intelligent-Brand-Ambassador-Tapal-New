@@ -6,6 +6,7 @@ import { useBrand } from '../../context/BrandContext'
 import { Check, Gift, Leaf, Lock, Percent, Sparkles, Ticket } from 'lucide-react'
 import { productCategories, selectionReasons, surveyOptions } from './shopperData'
 import { getShopperStore } from '../../lib/storeRegistry'
+import { saveShopperFeedback, saveShopperSurvey } from '../../lib/shopperSession'
 
 export function ShopperLandingPage() {
   const { brand } = useBrand()
@@ -421,7 +422,21 @@ export function ShopperSurveyPage() {
             Continue
           </Button>
         ) : (
-          <Link to={canContinue ? '/shopper/product' : '#'}>
+          <Link
+            to={canContinue ? '/shopper/product' : '#'}
+            onClick={() => {
+              if (!canContinue) return
+              void saveShopperSurvey({
+                name: name.trim(),
+                phone: phone.trim(),
+                gender: gender ?? '',
+                age: age.trim(),
+                currentBrand: selected ?? '',
+                reasons,
+                consent,
+              })
+            }}
+          >
             <Button className="w-full" disabled={!canContinue}>
               Continue
             </Button>
@@ -548,6 +563,7 @@ export function ShopperFeedbackPage() {
 
   function finish() {
     if (rating == null) return
+    void saveShopperFeedback(rating, comment)
     demo.completeShopperSession()
     navigate('/shopper/thanks', { state: { rating, label: labels[rating - 1] } })
   }

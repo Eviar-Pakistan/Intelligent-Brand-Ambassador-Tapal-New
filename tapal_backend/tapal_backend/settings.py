@@ -17,14 +17,32 @@ try:
 except ImportError:
     pass
 
-SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-$x_l0#i-j2is28g=#w=47e3z6ai+)@k$+rlhf054^u0ap0k^ap',
-)
+def _env_list(name: str, default: str = '') -> list[str]:
+    return [item.strip() for item in os.environ.get(name, default).split(',') if item.strip()]
 
-DEBUG = True
 
-ALLOWED_HOSTS = ['*']
+# Local development keeps working with no settings. On the server set DJANGO_DEBUG=0 and the
+# values in deploy/backend.env.example.
+DEBUG = os.environ.get('DJANGO_DEBUG', '1').lower() in ('1', 'true', 'yes')
+
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', '')
+if not SECRET_KEY:
+    if not DEBUG:
+        raise RuntimeError('Set DJANGO_SECRET_KEY on the server (see deploy/backend.env.example).')
+    SECRET_KEY = 'django-insecure-$x_l0#i-j2is28g=#w=47e3z6ai+)@k$+rlhf054^u0ap0k^ap'
+
+ALLOWED_HOSTS = _env_list('DJANGO_ALLOWED_HOSTS', '*')
+CSRF_TRUSTED_ORIGINS = _env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
+
+# Behind the frontend server / nginx: trust its X-Forwarded-Proto so links use https.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+
+# Set DJANGO_HTTPS=1 once the site is served over https (after the certificate is installed).
+if os.environ.get('DJANGO_HTTPS', '0').lower() in ('1', 'true', 'yes'):
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(os.environ.get('DJANGO_HSTS_SECONDS', '3600'))
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -45,6 +63,7 @@ AUTH_USER_MODEL = 'core.User'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -76,7 +95,8 @@ WSGI_APPLICATION = 'tapal_backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': os.environ.get('DJANGO_SQLITE_PATH', str(BASE_DIR / 'db.sqlite3')),
+        'OPTIONS': {'timeout': 20},  # several server workers share one SQLite file
     }
 }
 
@@ -93,8 +113,11 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'  # `manage.py collectstatic` (Django admin CSS/JS)
 
-CORS_ALLOW_ALL_ORIGINS = True
+# The frontend calls the API on its own domain, so CORS only matters for other origins.
+CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOWED_ORIGINS = _env_list('DJANGO_CORS_ALLOWED_ORIGINS')
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -123,7 +146,11 @@ DJOSER = {
 }
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# Journey visits send three compressed photos in one request.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
+MEDIA_ROOT = Path(os.environ.get('DJANGO_MEDIA_ROOT', str(BASE_DIR / 'media')))
+# Uploaded photos / videos / QR images are served by Django at /media/ (also when DEBUG is off).
+SERVE_MEDIA = os.environ.get('DJANGO_SERVE_MEDIA', '1').lower() in ('1', 'true', 'yes')
 
 # QR codes encode this host path: {SHOPPER_QR_BASE_URL}/shopper/{qr_slug}
 SHOPPER_QR_BASE_URL = os.environ.get('SHOPPER_QR_BASE_URL', 'http://localhost:5173')

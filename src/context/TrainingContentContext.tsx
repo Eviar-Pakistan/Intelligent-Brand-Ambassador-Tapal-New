@@ -8,6 +8,10 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { SERVER_SYNC_EVENT } from '../lib/serverSyncEvent'
+
+/** Modules from the server (the active training video) have ids starting with this. */
+const SERVER_MODULE_PREFIX = 'tv-'
 
 export type AssessmentQuestion = {
   id: string
@@ -116,11 +120,38 @@ export function TrainingContentProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // The active training video Head Office uploaded, with its questions, on every device.
+  useEffect(() => {
+    let cancelled = false
+    async function sync() {
+      try {
+        const response = await fetch('/api/ba/training/modules/')
+        if (!response.ok) return
+        const data = (await response.json()) as { results?: TrainingModule[] }
+        const server = Array.isArray(data.results) ? data.results : []
+        if (cancelled) return
+        const names = new Set(server.map((m) => m.videoName))
+        setModules((prev) => [
+          ...server,
+          ...prev.filter((m) => !m.id.startsWith(SERVER_MODULE_PREFIX) && !names.has(m.videoName)),
+        ])
+      } catch {
+        // keep the modules already on screen
+      }
+    }
+    void sync()
+    window.addEventListener(SERVER_SYNC_EVENT, sync)
+    return () => {
+      cancelled = true
+      window.removeEventListener(SERVER_SYNC_EVENT, sync)
+    }
+  }, [])
+
   useEffect(() => {
     if (!hydrated.current) return
     try {
       const meta: StoredModule[] = modules
-        .filter((m) => !isRemovedSample(m))
+        .filter((m) => !isRemovedSample(m) && !m.id.startsWith(SERVER_MODULE_PREFIX))
         .map(({ videoUrl, ...m }) => ({ ...m, hasVideo: !!videoUrl }))
       localStorage.setItem(META_KEY, JSON.stringify(meta))
     } catch {

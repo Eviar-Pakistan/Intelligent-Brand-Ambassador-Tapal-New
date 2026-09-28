@@ -1,3 +1,4 @@
+import { ServerSync } from './components/ServerSync'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { DemoProvider, RoleProvider } from './context/AppContext'
 import { BrandProvider } from './context/BrandContext'
@@ -96,6 +97,7 @@ export default function App() {
           <ScheduleProvider>
           <TrainingContentProvider>
           <BrowserRouter>
+          <ServerSync />
           <Routes>
             <Route path="/" element={<LoginPage />} />
             <Route path="/login" element={<LoginPage />} />

@@ -1,5 +1,12 @@
 import { useSyncExternalStore } from 'react'
+import { currentPortal, portalFetch, portalGet, resultsOf } from './serverApi'
 import { supervisorOfStore } from './supervisors'
+
+/**
+ * The supervisor's bell. The server writes a notification whenever a BA checks in or out at one
+ * of the supervisor's stores (/api/supervisor/notifications/); the push message is sent from the
+ * BA's app so the supervisor's phone is alerted straight away.
+ */
 
 export type SupervisorNotification = {
   id: string
@@ -49,11 +56,17 @@ function subscribe(listener: () => void) {
   }
 }
 
-function notifyAttendance(
-  kind: 'check-in' | 'check-out',
-  input: { baName: string; storeId: number; storeName: string; at: Date },
-) {
-  const supervisor = supervisorOfStore(input.storeId)
+type AttendanceNotice = {
+  baName: string
+  storeId: number
+  storeName: string
+  at: Date
+  /** The store's supervisor as the server knows it (from today's shift). */
+  supervisorId?: string | null
+}
+
+function notifyAttendance(kind: 'check-in' | 'check-out', input: AttendanceNotice) {
+  const supervisor = input.supervisorId ? { id: input.supervisorId } : supervisorOfStore(input.storeId)
   if (!supervisor) return
   const time = input.at.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true })
   const verb = kind === 'check-in' ? 'checked in' : 'checked out'
@@ -80,13 +93,22 @@ function notifyAttendance(
 }
 
 /** Tell the supervisor of this store that their BA just checked in. */
-export function notifyBaCheckIn(input: { baName: string; storeId: number; storeName: string; at: Date }) {
+export function notifyBaCheckIn(input: AttendanceNotice) {
   notifyAttendance('check-in', input)
 }
 
 /** Tell the supervisor of this store that their BA just checked out. */
-export function notifyBaCheckOut(input: { baName: string; storeId: number; storeName: string; at: Date }) {
+export function notifyBaCheckOut(input: AttendanceNotice) {
   notifyAttendance('check-out', input)
+}
+
+/** Loads the signed-in supervisor's notifications from the server (replaces what this browser had). */
+export async function syncSupervisorNotifications() {
+  if (currentPortal() !== 'supervisor') return
+  const rows = resultsOf(await portalGet<{ results: SupervisorNotification[] }>('/api/supervisor/notifications/'))
+  if (!rows) return
+  const ids = new Set(rows.map((row) => row.supervisorId))
+  commit([...rows, ...load().filter((item) => !ids.has(item.supervisorId))].slice(0, 80))
 }
 
 export function mergeRemoteNotifications(
@@ -111,6 +133,9 @@ export function mergeRemoteNotifications(
 
 export function clearSupervisorNotifications(supervisorId: string) {
   commit(load().filter((n) => n.supervisorId !== supervisorId))
+  if (currentPortal() === 'supervisor') {
+    void portalFetch('/api/supervisor/notifications/', { method: 'DELETE' }).catch(() => undefined)
+  }
 }
 
 export function useSupervisorNotifications(supervisorId: string | undefined) {

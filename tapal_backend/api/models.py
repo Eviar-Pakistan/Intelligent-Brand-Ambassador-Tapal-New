@@ -45,6 +45,14 @@ class Store(models.Model):
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     qr_slug = models.SlugField(max_length=64, unique=True, blank=True)
     qr_image = models.ImageField(upload_to='store_qr/', blank=True, null=True)
+    supervisor = models.ForeignKey(
+        'Supervisor',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='stores',
+        help_text='A store belongs to one supervisor',
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -207,6 +215,10 @@ class Consumer(models.Model):
     )
     feedback_rating = models.PositiveSmallIntegerField(null=True, blank=True)
     feedback_comment = models.TextField(blank=True)
+    gender = models.CharField(max_length=20, blank=True)
+    age = models.PositiveSmallIntegerField(null=True, blank=True)
+    current_brand = models.CharField(max_length=120, blank=True, help_text='Tea the shopper uses now')
+    reasons = models.JSONField(default=list, blank=True, help_text='Why they chose that tea')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -219,16 +231,37 @@ class Consumer(models.Model):
 
 
 class AmbassadorComplaint(models.Model):
-    """A store issue submitted by a Brand Ambassador for Head Office review."""
+    """
+    A complaint a Brand Ambassador files for Head Office review: either a customer's product
+    complaint (brand, SKU, customer, photo) or the BA's own store issue (category, subject).
+    """
 
     class Status(models.TextChoices):
         OPEN = 'Open', 'Open'
         IN_REVIEW = 'In Review', 'In Review'
         RESOLVED = 'Resolved', 'Resolved'
+        REJECTED = 'Rejected', 'Rejected'
 
-    ambassador = models.ForeignKey('Ambassador', on_delete=models.CASCADE, related_name='complaints')
+    class Kind(models.TextChoices):
+        CUSTOMER = 'customer', 'Customer'
+        BA = 'ba', 'Brand Ambassador'
+
+    client_id = models.CharField(max_length=64, unique=True, null=True, blank=True, help_text='Id the app gave it')
+    kind = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BA)
+    ambassador = models.ForeignKey(
+        'Ambassador', on_delete=models.CASCADE, related_name='complaints', null=True, blank=True
+    )
+    ba_name = models.CharField(max_length=120, blank=True)
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='ambassador_complaints')
-    complaint = models.TextField(max_length=2000)
+    complaint = models.TextField(max_length=2000, help_text='Customer complaint text, or the BA issue details')
+    category = models.CharField(max_length=60, blank=True)
+    subject = models.CharField(max_length=200, blank=True)
+    brand = models.CharField(max_length=80, blank=True)
+    sku = models.CharField(max_length=80, blank=True)
+    customer_name = models.CharField(max_length=120, blank=True)
+    customer_number = models.CharField(max_length=30, blank=True)
+    image = models.ImageField(upload_to='complaints/', blank=True, null=True)
+    ho_note = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -655,3 +688,195 @@ class ShiftAssignment(models.Model):
             self.status = self.Status.SCHEDULED
         elif self.status != self.Status.CONFLICT:
             self.status = self.Status.OPEN
+
+
+# ─── Supervisors ─────────────────────────────────────────────────────────────
+
+
+class Supervisor(models.Model):
+    """Oversees a set of stores. Head Office creates them; they sign in to the supervisor portal."""
+
+    id = models.CharField(primary_key=True, max_length=40, help_text='Id the app gave it, e.g. sup-lx2k9')
+    name = models.CharField(max_length=120)
+    phone = models.CharField(max_length=30, blank=True)
+    email = models.EmailField(unique=True, help_text='Also the sign-in name')
+    city = models.CharField(max_length=100, blank=True)
+    password = models.CharField(max_length=128, blank=True, help_text='Django password hash; empty = no login yet')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.name} ({self.email})'
+
+    def set_password(self, raw: str) -> None:
+        from django.contrib.auth.hashers import make_password
+
+        self.password = make_password(raw)
+
+    def check_password(self, raw: str) -> bool:
+        from django.contrib.auth.hashers import check_password
+
+        return bool(self.password) and check_password(raw, self.password)
+
+
+class SupervisorToken(models.Model):
+    """Sign-in token for the supervisor portal (sent as the X-Supervisor-Token header)."""
+
+    key = models.CharField(primary_key=True, max_length=64)
+    supervisor = models.ForeignKey(Supervisor, on_delete=models.CASCADE, related_name='tokens')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @classmethod
+    def issue(cls, supervisor):
+        return cls.objects.create(key=secrets.token_urlsafe(40), supervisor=supervisor)
+
+
+class JourneyPlan(models.Model):
+    """The stores Head Office wants a supervisor to visit, by weekday, for one week."""
+
+    id = models.CharField(primary_key=True, max_length=64)
+    supervisor = models.ForeignKey(Supervisor, on_delete=models.CASCADE, related_name='journey_plans')
+    week_start = models.DateField(help_text='Monday of the week')
+    stops = models.JSONField(default=list, help_text='[{day: "Mon", storeId: 12}, ...]')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-week_start']
+        constraints = [
+            models.UniqueConstraint(fields=['supervisor', 'week_start'], name='one_journey_plan_per_week'),
+        ]
+
+
+class JourneyVisit(models.Model):
+    """A planned stop the supervisor completed on site, with location and photos."""
+
+    id = models.CharField(primary_key=True, max_length=64)
+    supervisor = models.ForeignKey(Supervisor, on_delete=models.CASCADE, related_name='journey_visits')
+    week_start = models.DateField()
+    day = models.CharField(max_length=3)
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='journey_visits')
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    accuracy = models.FloatField(null=True, blank=True)
+    selfie = models.ImageField(upload_to='journey/')
+    ba_photo = models.ImageField(upload_to='journey/')
+    stock_photo = models.ImageField(upload_to='journey/')
+    completed_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-completed_at']
+        constraints = [
+            models.UniqueConstraint(fields=['supervisor', 'week_start', 'day', 'store'], name='one_visit_per_stop'),
+        ]
+
+
+class SupervisorNotification(models.Model):
+    """What the supervisor sees in their bell: BA check-ins and check-outs at their stores."""
+
+    id = models.CharField(primary_key=True, max_length=80)
+    supervisor = models.ForeignKey(Supervisor, on_delete=models.CASCADE, related_name='notifications')
+    message = models.CharField(max_length=300)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+# ─── BA field reports ────────────────────────────────────────────────────────
+
+
+class DailyReport(models.Model):
+    """Stock, daily sales and competitor prices a BA submits (at checkout, any time, or by Excel)."""
+
+    class Source(models.TextChoices):
+        CHECKOUT = 'checkout', 'Checkout'
+        ANYTIME = 'anytime', 'Any time'
+        EXCEL = 'excel', 'Excel upload'
+
+    id = models.CharField(primary_key=True, max_length=64)
+    ambassador = models.ForeignKey(
+        Ambassador, on_delete=models.SET_NULL, null=True, blank=True, related_name='daily_reports'
+    )
+    ba_name = models.CharField(max_length=120)
+    store = models.ForeignKey(Store, on_delete=models.SET_NULL, null=True, blank=True, related_name='daily_reports')
+    city = models.CharField(max_length=100, blank=True)
+    source = models.CharField(max_length=10, choices=Source.choices)
+    stock = models.JSONField(default=dict, blank=True)
+    sales = models.JSONField(default=dict, blank=True)
+    other_brands = models.JSONField(default=list, blank=True)
+    submitted_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-submitted_at']
+
+
+class UserInterception(models.Model):
+    """A shopper a BA spoke with in store: who they are, what they used, what they bought."""
+
+    id = models.CharField(primary_key=True, max_length=64)
+    ambassador = models.ForeignKey(
+        Ambassador, on_delete=models.SET_NULL, null=True, blank=True, related_name='interceptions'
+    )
+    ba_name = models.CharField(max_length=120)
+    store = models.ForeignKey(Store, on_delete=models.SET_NULL, null=True, blank=True, related_name='interceptions')
+    store_name = models.CharField(max_length=200, blank=True)
+    name = models.CharField(max_length=120)
+    contact = models.CharField(max_length=40)
+    city_area = models.CharField(max_length=120, blank=True)
+    previous_brand = models.CharField(max_length=120, blank=True)
+    previous_sku = models.CharField(max_length=120, blank=True)
+    current_sku = models.CharField(max_length=120, blank=True)
+    feedback = models.TextField(blank=True)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+# ─── Incentive settings ──────────────────────────────────────────────────────
+
+
+class KpiConfig(models.Model):
+    """Incentive KPI settings Head Office sets (single row). Shape matches the app's KpiConfig."""
+
+    config = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+
+    DEFAULTS = {
+        'basePay': 1000,
+        'conversionTarget': 100,
+        'conversionAmount': 500,
+        'sessionTarget': 50,
+        'sessionAmount': 500,
+        'supBasePay': 2000,
+        'supConversionTarget': 100,
+        'supConversionAmount': 1000,
+        'supCoverageTarget': 100,
+        'supCoverageAmount': 1000,
+    }
+    POSITIVE = {'conversionTarget', 'sessionTarget', 'supConversionTarget', 'supCoverageTarget'}
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1, defaults={'config': dict(cls.DEFAULTS)})
+        return obj
+
+    @classmethod
+    def normalize(cls, raw) -> dict:
+        """Same rules as the app: amounts >= 0, targets > 0, anything else falls back to the default."""
+        raw = raw if isinstance(raw, dict) else {}
+        out = {}
+        for key, default in cls.DEFAULTS.items():
+            value = raw.get(key)
+            ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+            if ok and (value > 0 if key in cls.POSITIVE else value >= 0):
+                out[key] = value
+            else:
+                out[key] = default
+        return out
+

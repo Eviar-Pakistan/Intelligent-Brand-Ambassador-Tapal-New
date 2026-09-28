@@ -2,10 +2,14 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from 'react'
+import { djangoToken } from '../lib/djangoApi'
+import { baServerToken, currentPortal, portalGet, portalSend, resultsOf } from '../lib/serverApi'
+import { SERVER_SYNC_EVENT } from '../lib/serverSyncEvent'
 import {
   initialComplaints,
   isSampleComplaint,
@@ -33,6 +37,27 @@ type ComplaintsContextValue = {
 const ComplaintsContext = createContext<ComplaintsContextValue | null>(null)
 
 const STORAGE_KEY = 'complaints-v1'
+
+/** Unique across devices, so complaints filed on different phones never share an id. */
+function newComplaintId() {
+  return `cmp-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+}
+
+/**
+ * Complaints are kept on the server (/api/complaints/): a BA files them with their account link,
+ * Head Office reviews them, a supervisor sees those from their stores. This list mirrors the server;
+ * a complaint that could not be sent yet stays here and is sent again on the next sync.
+ */
+async function sendComplaint(complaint: Complaint): Promise<Complaint | null> {
+  const token = baServerToken()
+  if (!token) return null
+  try {
+    return await portalSend<Complaint>('/api/complaints/', 'POST', { ...complaint, token }, 'ba')
+  } catch (error) {
+    console.warn('[complaints] not sent yet:', error instanceof Error ? error.message : error)
+    return null
+  }
+}
 
 function loadComplaints(): Complaint[] {
   try {
@@ -66,21 +91,54 @@ export function ComplaintsProvider({ children }: { children: ReactNode }) {
     return next
   }, [])
 
+  const replaceWith = useCallback(
+    (saved: Complaint) => setComplaints((prev) => persist([saved, ...prev.filter((c) => c.id !== saved.id)])),
+    [persist],
+  )
+
+  // Load from the server: Head Office sees all, a supervisor their stores, a BA re-sends what is pending.
+  useEffect(() => {
+    let cancelled = false
+    async function sync() {
+      const portal = currentPortal()
+      if (portal === 'ba') {
+        for (const complaint of loadComplaints().filter((c) => c.unsent)) {
+          const saved = await sendComplaint(complaint)
+          if (saved && !cancelled) replaceWith(saved)
+        }
+        return
+      }
+      if (portal === 'shopper' || (portal === 'office' && !djangoToken())) return
+      const rows = resultsOf(await portalGet<{ results: Complaint[] }>('/api/complaints/', portal))
+      if (!rows || cancelled) return
+      setComplaints((prev) =>
+        persist([...rows, ...prev.filter((c) => c.unsent && !rows.some((r) => r.id === c.id))]),
+      )
+    }
+    void sync()
+    window.addEventListener(SERVER_SYNC_EVENT, sync)
+    return () => {
+      cancelled = true
+      window.removeEventListener(SERVER_SYNC_EVENT, sync)
+    }
+  }, [persist, replaceWith])
+
   const submitComplaint = useCallback((input: SubmitComplaintInput) => {
     const now = new Date().toISOString()
     let created!: Complaint
     setComplaints((prev) => {
       created = {
         ...input,
-        id: `cmp-${1000 + prev.length + 1}`,
+        id: newComplaintId(),
         status: 'Open',
         createdAt: now,
         updatedAt: now,
       }
-      return persist([created, ...prev])
+      return persist([{ ...created, unsent: true }, ...prev])
     })
+    void sendComplaint(created).then((saved) => saved && replaceWith(saved))
     return created
-  }, [persist])
+  }, [persist, replaceWith])
 
   const updateComplaintStatus = useCallback(
     (id: string, status: ComplaintStatus, hoNote?: string) => {
@@ -99,8 +157,18 @@ export function ComplaintsProvider({ children }: { children: ReactNode }) {
           ),
         ),
       )
+      if (djangoToken() && currentPortal() === 'office') {
+        void portalSend<Complaint>(
+          `/api/complaints/${encodeURIComponent(id)}/`,
+          'PATCH',
+          { status, ...(hoNote !== undefined ? { hoNote } : {}) },
+          'office',
+        )
+          .then((saved) => saved && replaceWith(saved))
+          .catch((error) => console.warn('[complaints] status not saved:', error instanceof Error ? error.message : error))
+      }
     },
-    [persist],
+    [persist, replaceWith],
   )
 
   const value = useMemo(

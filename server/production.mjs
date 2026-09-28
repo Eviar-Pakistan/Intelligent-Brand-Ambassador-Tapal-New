@@ -24,7 +24,14 @@ const types = {
 }
 
 function proxyDjango(req, res) {
-  const headers = { ...req.headers, host: '127.0.0.1:8000' }
+  // Tell Django the address the visitor used, so the links it builds (photos, videos, QR codes)
+  // point at the site and not at 127.0.0.1.
+  const headers = {
+    ...req.headers,
+    host: '127.0.0.1:8000',
+    'x-forwarded-host': req.headers['x-forwarded-host'] ?? req.headers.host ?? '',
+    'x-forwarded-proto': req.headers['x-forwarded-proto'] ?? 'http',
+  }
   const upstream = http.request(
     {
       hostname: '127.0.0.1',
@@ -72,7 +79,9 @@ const server = http.createServer(async (req, res) => {
   if (
     requestUrl.pathname.startsWith('/api/') ||
     requestUrl.pathname.startsWith('/auth/') ||
-    requestUrl.pathname.startsWith('/media/')
+    requestUrl.pathname.startsWith('/media/') ||
+    requestUrl.pathname.startsWith('/admin') ||
+    requestUrl.pathname.startsWith('/static/')
   ) {
     proxyDjango(req, res)
     return

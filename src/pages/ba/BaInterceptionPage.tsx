@@ -1,8 +1,10 @@
-import { useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, UserRound } from 'lucide-react'
 import { ambassadors, stores } from '../../data/mock'
+import { useBaShift } from '../../context/BaShiftContext'
 import { useBaSession } from '../../lib/baAccounts'
+import { baCurrentStore, useCreatedStores } from '../../lib/storeRegistry'
 import { submitUserInterception } from '../../lib/userInterceptions'
 
 const fieldClass =
@@ -24,7 +26,14 @@ export function BaInterceptionPage() {
   const ba = ambassadors.find((ambassador) => ambassador.id === account?.id)
   const baId = account?.id ?? ba?.id ?? 'ayesha'
   const baName = account?.name ?? ba?.name ?? 'Ayesha Khan'
-  const store = ba?.storeId != null ? stores.find((item) => item.id === ba.storeId) : undefined
+  const { shiftStore } = useBaShift()
+  const knownStores = useCreatedStores()
+  const store = useMemo(() => {
+    const own = ba?.storeId != null ? stores.find((item) => item.id === ba.storeId) : undefined
+    if (own) return own
+    const id = shiftStore?.id ?? baCurrentStore()
+    return id != null ? stores.find((item) => item.id === id) : undefined
+  }, [ba, shiftStore, knownStores])
 
   const [form, setForm] = useState(empty)
   const [error, setError] = useState<string | null>(null)

@@ -3,6 +3,8 @@
  * template, and the dashboard inbox.
  */
 import { useSyncExternalStore } from 'react'
+import { djangoToken } from './djangoApi'
+import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
 export type FieldDef = { key: string; label: string }
 
@@ -272,6 +274,8 @@ export type StoredDailyReport = {
   stock: Record<string, string>
   sales: Record<string, string>
   otherBrands: OtherBrandRow[]
+  /** Submitted on this device but not accepted by the server yet; sent again on the next sync. */
+  unsent?: boolean
 }
 
 const REPORTS_KEY = 'ba-daily-reports-v1'
@@ -303,13 +307,49 @@ function subscribeReports(listener: () => void) {
   }
 }
 
+function commitReports(next: StoredDailyReport[]) {
+  reports = next.slice(0, 500)
+  try {
+    localStorage.setItem(REPORTS_KEY, JSON.stringify(reports))
+  } catch {
+    // keep the in-memory list
+  }
+  reportListeners.forEach((listener) => listener())
+}
+
+async function sendReport(entry: StoredDailyReport) {
+  if (currentPortal() !== 'ba') return
+  try {
+    const { unsent: _unsent, ...body } = entry
+    void _unsent
+    const saved = await portalSend<StoredDailyReport>('/api/daily-reports/', 'POST', body, 'ba')
+    if (saved) commitReports(reports.map((item) => (item.id === entry.id ? saved : item)))
+  } catch (error) {
+    console.warn('[reports] not sent yet:', error instanceof Error ? error.message : error)
+  }
+}
+
+/**
+ * Loads reports from the server (/api/daily-reports/): Head Office sees all, a supervisor their
+ * stores, a BA their own. Reports this device could not send yet are sent first.
+ */
+export async function syncDailyReports() {
+  const portal = currentPortal()
+  if (portal === 'shopper' || (portal === 'office' && !djangoToken())) return
+  if (portal === 'ba') for (const entry of reports.filter((r) => r.unsent)) await sendReport(entry)
+  const rows = resultsOf(await portalGet<{ results: StoredDailyReport[] }>('/api/daily-reports/', portal))
+  if (!rows) return
+  const pending = reports.filter((r) => r.unsent && !rows.some((row) => row.id === r.id))
+  commitReports([...pending, ...rows])
+}
+
 /** Sends a completed daily report to the head-office dashboard inbox. */
 export function recordDailyReport(
   data: ParsedBaReport,
   meta: { baId: string; baName: string; city: string; source: ReportSource },
 ) {
   const entry: StoredDailyReport = {
-    id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    id: `rep-${Date.now().toString(36)}${Math.random().toString(16).slice(2, 8)}`,
     baId: meta.baId,
     baName: meta.baName,
     city: meta.city,
@@ -319,13 +359,8 @@ export function recordDailyReport(
     sales: data.sales,
     otherBrands: data.otherBrands,
   }
-  reports = [entry, ...reports].slice(0, 200)
-  try {
-    localStorage.setItem(REPORTS_KEY, JSON.stringify(reports))
-  } catch {
-    // keep the in-memory list
-  }
-  reportListeners.forEach((listener) => listener())
+  commitReports([{ ...entry, unsent: true }, ...reports])
+  void sendReport(entry)
   return entry
 }
 

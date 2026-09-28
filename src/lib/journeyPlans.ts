@@ -1,8 +1,11 @@
 import { useSyncExternalStore } from 'react'
+import { djangoToken } from './djangoApi'
+import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
 /**
  * Weekly store visits Head Office schedules for a supervisor, and the visit the supervisor
- * completes on site (location, selfie, BA photo, stock photo). Stored in this browser.
+ * completes on site (location, selfie, BA photo, stock photo). Kept on the server
+ * (/api/journey-plans/, /api/journey-visits/); these lists mirror it for the screens.
  */
 
 export const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const
@@ -141,22 +144,9 @@ function readList<T>(key: string, guard: (value: unknown) => value is T): T[] | 
   }
 }
 
+/** Plans come from the server; nothing is built in. */
 function seedPlans(): JourneyPlan[] {
-  const now = new Date().toISOString()
-  return [
-    {
-      id: 'plan-imran-current',
-      supervisorId: 'sup-imran',
-      weekStart: currentWeekStart(),
-      stops: [
-        { day: 'Mon', storeId: 12 },
-        { day: 'Wed', storeId: 4 },
-        { day: 'Sat', storeId: 12 },
-      ],
-      createdAt: now,
-      updatedAt: now,
-    },
-  ]
+  return []
 }
 
 let plans = readList(PLANS_KEY, isPlan) ?? seedPlans()
@@ -202,6 +192,41 @@ export function useJourneyVisits() {
   return useSyncExternalStore(subscribeVisits, () => visits, () => visits)
 }
 
+// ─── Server ──────────────────────────────────────────────────────────────────
+
+/** A visit still holding its photos as data: URLs has not reached the server yet. */
+const isUnsent = (visit: JourneyVisit) => visit.selfie.startsWith('data:')
+
+async function sendVisit(visit: JourneyVisit) {
+  if (currentPortal() !== 'supervisor') return
+  try {
+    const saved = await portalSend<JourneyVisit>('/api/journey-visits/', 'POST', visit, 'supervisor')
+    if (saved) commitVisits([saved, ...visits.filter((item) => item.id !== visit.id && !sameStop(item, saved))])
+  } catch (error) {
+    console.warn('[journey] visit not saved on the server yet:', error instanceof Error ? error.message : error)
+  }
+}
+
+const sameStop = (a: JourneyVisit, b: JourneyVisit) =>
+  a.supervisorId === b.supervisorId && a.weekStart === b.weekStart && a.day === b.day && a.storeId === b.storeId
+
+/** Loads plans and visits (Head Office: everyone's; a supervisor: their own) and sends unsent visits. */
+export async function syncJourney() {
+  const portal = currentPortal() === 'supervisor' ? 'supervisor' : 'office'
+  if (portal === 'office' && !djangoToken()) return
+  if (portal === 'supervisor') {
+    for (const visit of visits.filter(isUnsent)) await sendVisit(visit)
+  }
+  const [planData, visitData] = await Promise.all([
+    portalGet<{ results: JourneyPlan[] }>('/api/journey-plans/', portal),
+    portalGet<{ results: JourneyVisit[] }>('/api/journey-visits/', portal),
+  ])
+  const serverPlans = resultsOf(planData)
+  const serverVisits = resultsOf(visitData)
+  if (serverPlans) commitPlans(serverPlans)
+  if (serverVisits) commitVisits([...visits.filter(isUnsent), ...serverVisits.filter((v) => !visits.some((u) => isUnsent(u) && sameStop(u, v)))])
+}
+
 export function planFor(supervisorId: string, weekStart: string) {
   return plans.find((plan) => plan.supervisorId === supervisorId && plan.weekStart === weekStart) ?? null
 }
@@ -224,6 +249,14 @@ export function saveJourneyPlan(supervisorId: string, weekStart: string, stops: 
     stops.filter((stop, index, list) => list.findIndex((item) => item.day === stop.day && item.storeId === stop.storeId) === index),
   )
   const rest = plans.filter((plan) => !(plan.supervisorId === supervisorId && plan.weekStart === weekStart))
+  if (djangoToken()) {
+    void portalSend<{ plan: JourneyPlan | null }>(
+      '/api/journey-plans/',
+      'PUT',
+      { supervisorId, weekStart, stops: cleaned, id: plans.find((p) => p.supervisorId === supervisorId && p.weekStart === weekStart)?.id },
+      'office',
+    ).catch((error) => console.warn('[journey] plan not saved on the server:', error instanceof Error ? error.message : error))
+  }
   if (cleaned.length === 0) {
     commitPlans(rest)
     return null
@@ -255,5 +288,6 @@ export function completeVisit(input: Omit<JourneyVisit, 'id' | 'completedAt'>) {
     completedAt: new Date().toISOString(),
   }
   commitVisits([next, ...visits.filter((visit) => !same(visit))])
+  void sendVisit(next)
   return next
 }

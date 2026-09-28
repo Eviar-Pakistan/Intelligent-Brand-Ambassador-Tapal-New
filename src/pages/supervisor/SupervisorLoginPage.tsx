@@ -17,7 +17,7 @@ export function SupervisorLoginPage() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
-    const supervisor = authenticate(email, password)
+    const supervisor = await authenticate(email, password)
     if (!supervisor) {
       setError('Incorrect email or password.')
       return

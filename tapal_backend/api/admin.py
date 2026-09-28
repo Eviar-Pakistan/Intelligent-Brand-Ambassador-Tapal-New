@@ -186,3 +186,55 @@ class ShiftAssignmentAdmin(admin.ModelAdmin):
     search_fields = ('store__name', 'ambassador__name', 'shift_label')
     raw_id_fields = ('store', 'ambassador', 'created_by')
     readonly_fields = ('checked_in_at', 'checked_out_at', 'check_in_lat', 'check_in_lng', 'check_in_accuracy_m')
+
+
+from .models import (  # noqa: E402
+    DailyReport,
+    JourneyPlan,
+    JourneyVisit,
+    KpiConfig,
+    Supervisor,
+    SupervisorNotification,
+    UserInterception,
+)
+
+
+@admin.register(Supervisor)
+class SupervisorAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'email', 'city', 'created_at')
+    search_fields = ('name', 'email', 'city')
+    exclude = ('password',)
+
+
+@admin.register(JourneyPlan)
+class JourneyPlanAdmin(admin.ModelAdmin):
+    list_display = ('id', 'supervisor', 'week_start', 'updated_at')
+    list_filter = ('week_start',)
+
+
+@admin.register(JourneyVisit)
+class JourneyVisitAdmin(admin.ModelAdmin):
+    list_display = ('id', 'supervisor', 'store', 'week_start', 'day', 'completed_at')
+    list_filter = ('week_start', 'day')
+
+
+@admin.register(SupervisorNotification)
+class SupervisorNotificationAdmin(admin.ModelAdmin):
+    list_display = ('id', 'supervisor', 'message', 'created_at')
+
+
+@admin.register(DailyReport)
+class DailyReportAdmin(admin.ModelAdmin):
+    list_display = ('id', 'ba_name', 'store', 'source', 'submitted_at')
+    list_filter = ('source',)
+    search_fields = ('ba_name',)
+
+
+@admin.register(UserInterception)
+class UserInterceptionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'ba_name', 'store_name', 'name', 'contact', 'created_at')
+    search_fields = ('ba_name', 'name', 'contact')
+
+
+admin.site.register(KpiConfig)
+

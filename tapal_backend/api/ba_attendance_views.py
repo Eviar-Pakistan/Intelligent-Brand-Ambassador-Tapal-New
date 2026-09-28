@@ -11,6 +11,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from .models import Ambassador, AmbassadorComplaint, MonthlyShift, ShiftAssignment, Store
+from .portal_views import notify_supervisor
 from .shifts import ensure_daily_rows
 
 
@@ -118,6 +119,7 @@ def serialize_ba_shift(shift: ShiftAssignment | None, ambassador: Ambassador) ->
             'storeName': store.name,
             'city': store.city,
             'storeLabel': f'#{store.id} {store.name}, {store.city}'.strip(', '),
+            'supervisorId': store.supervisor_id,
             'peakRecommended': shift.peak_recommended,
             'status': shift.status,
             'checkedIn': bool(shift.checked_in_at),
@@ -241,6 +243,7 @@ def ba_check_in(request):
             'updated_at',
         ]
     )
+    notify_supervisor(shift, 'check-in')
     return Response(serialize_ba_shift(shift, ambassador))
 
 
@@ -301,6 +304,7 @@ def ba_check_out(request):
             'updated_at',
         ]
     )
+    notify_supervisor(shift, 'check-out')
     return Response(serialize_ba_shift(shift, ambassador))
 
 

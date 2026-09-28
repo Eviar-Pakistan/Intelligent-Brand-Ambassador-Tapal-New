@@ -1,3 +1,4 @@
+import { registerBaTokenSource } from './serverApi'
 import { useSyncExternalStore } from 'react'
 import { ambassadors } from '../data/mock'
 import { analysisFromReport, type EngineReport } from './trainingApi'
@@ -377,6 +378,11 @@ function readRaw() {
     return null
   }
 }
+
+registerBaTokenSource(() => {
+  const id = readRaw()
+  return id ? (accounts.find((account) => account.id === id)?.accessToken ?? null) : null
+})
 
 export function baSignIn(id: string) {
   try {

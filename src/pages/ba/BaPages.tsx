@@ -76,6 +76,7 @@ export function BaHomePage() {
   const {
     city,
     storeLabel,
+    shiftStore,
     shiftLabel,
     shiftEndLabel,
     checkedIn,
@@ -151,6 +152,14 @@ export function BaHomePage() {
           baName,
           storeId: store.id,
           storeName: store.name,
+          at: new Date(),
+        })
+      } else if (shiftStore) {
+        notifyBaCheckOut({
+          baName,
+          storeId: shiftStore.id,
+          storeName: shiftStore.name,
+          supervisorId: shiftStore.supervisorId,
           at: new Date(),
         })
       }
@@ -473,6 +482,14 @@ export function BaHomePage() {
               baName: account?.name ?? ambassador.name,
               storeId: store.id,
               storeName: store.name,
+              at: new Date(),
+            })
+          } else if (shiftStore) {
+            notifyBaCheckIn({
+              baName,
+              storeId: shiftStore.id,
+              storeName: shiftStore.name,
+              supervisorId: shiftStore.supervisorId,
               at: new Date(),
             })
           }

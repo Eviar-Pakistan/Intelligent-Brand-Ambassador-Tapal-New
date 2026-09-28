@@ -1,14 +1,17 @@
 import { useSyncExternalStore } from 'react'
 import { ambassadors, baRanking, stores, type Store } from '../data/mock'
+import { djangoToken } from './djangoApi'
+import { currentPortal, portalGet, portalSend, resultsOf, setSupervisorToken, supervisorToken } from './serverApi'
 import { sha256Hex } from './sha256'
+import { upsertApiStores, type ApiStoreRow } from './storeRegistry'
 
 /**
  * Supervisors oversee a set of stores. Head Office creates them (with a login) and assigns
  * stores; a supervisor signs in and sees the BAs and characteristics of those stores only.
  *
- * There is no backend, so supervisors and their sign-in live in this browser. Passwords are
- * salted and hashed rather than stored as text, but this is demo-grade access control: anyone
- * with access to the browser can read or change the data. Real sign-in needs a server.
+ * Supervisors, their stores and their sign-in are kept on the server (/api/supervisors/,
+ * /api/supervisor/login/). This list mirrors the server so screens can read it directly;
+ * the password itself never reaches the browser.
  */
 
 export type Supervisor = {
@@ -31,30 +34,8 @@ const SESSION_KEY = 'supervisor-session'
 
 export const hashPassword = (salt: string, password: string) => sha256Hex(`${salt}:${password}`)
 
-const seed: Supervisor[] = [
-  {
-    id: 'sup-imran',
-    name: 'Imran Sheikh',
-    phone: '0300-5551201',
-    email: 'imran.sheikh@example.com',
-    city: 'Lahore',
-    storeIds: [12, 4],
-    createdAt: new Date().toISOString(),
-    passwordSalt: 'demo',
-    passwordHash: 'f356d35c8674d585ecea9033ee333fa506742b0a9be832cf749f308eaa45b720', // Imran@123
-  },
-  {
-    id: 'sup-nadia',
-    name: 'Nadia Hussain',
-    phone: '0321-5551202',
-    email: 'nadia.hussain@example.com',
-    city: 'Karachi',
-    storeIds: [7, 19],
-    createdAt: new Date().toISOString(),
-    passwordSalt: 'demo',
-    passwordHash: 'a2edd105d785b2846faa86190432da9e2320e7cb06e1ab86a0514e8d73996f12', // Nadia@123
-  },
-]
+/** Supervisors come from the server; nothing is built in. */
+const seed: Supervisor[] = []
 
 function read(key: string): Partial<Supervisor>[] | null {
   try {
@@ -111,6 +92,48 @@ export function getSupervisors() {
   return supervisors
 }
 
+// ─── Server ──────────────────────────────────────────────────────────────────
+
+function replaceOne(next: Supervisor) {
+  commit([next, ...supervisors.filter((s) => s.id !== next.id)])
+}
+
+function sendToServer(path: string, method: 'POST' | 'PATCH' | 'DELETE', body?: unknown) {
+  if (!djangoToken()) return Promise.resolve(null)
+  return portalSend<Supervisor>(path, method, body, 'office').catch((error) => {
+    console.warn('[supervisors] not saved on the server:', error instanceof Error ? error.message : error)
+    return null
+  })
+}
+
+/**
+ * Loads supervisors from the server. Head Office gets everyone (and any supervisor made in this
+ * browser before the server kept them is carried over, without a password); a signed-in
+ * supervisor gets themselves.
+ */
+export async function syncSupervisors() {
+  if (currentPortal() === 'supervisor') {
+    const me = await portalGet<{ supervisor: Supervisor }>('/api/supervisor/me/', 'supervisor')
+    if (!me?.supervisor) return
+    replaceOne(me.supervisor)
+    await syncSupervisorOverview(me.supervisor.id)
+    return
+  }
+  if (!djangoToken()) return
+  const list = resultsOf(await portalGet<{ results: Supervisor[] }>('/api/supervisors/', 'office'))
+  if (!list) return
+  const ids = new Set(list.map((s) => s.id))
+  const emails = new Set(list.map((s) => normEmail(s.email)))
+  for (const local of supervisors) {
+    if (ids.has(local.id) || !local.email || emails.has(normEmail(local.email))) continue
+    const { id, name, phone, email, city, storeIds } = local
+    const saved = await sendToServer('/api/supervisors/', 'POST', { id, name, phone, email, city, storeIds })
+    if (saved) list.push(saved)
+  }
+  commit(list)
+  await Promise.all(list.map((s) => syncSupervisorOverview(s.id)))
+}
+
 /** A store belongs to one supervisor, so assigning it here takes it from anyone else. */
 function withStoresAssigned(list: Supervisor[], supervisorId: string, storeIds: number[]) {
   return list.map((s) =>
@@ -154,6 +177,14 @@ export function createSupervisor(
     ...newCredentials(fields.password),
   }
   commit(withStoresAssigned([supervisor, ...supervisors], supervisor.id, storeIds))
+  const { id, name, phone, email, city } = supervisor
+  void sendToServer('/api/supervisors/', 'POST', { id, name, phone, email, city, storeIds, password: fields.password }).then(
+    (saved) => {
+      if (!saved) return
+      replaceOne(saved)
+      void syncSupervisors()
+    },
+  )
   return { ...supervisor, storeIds }
 }
 
@@ -162,14 +193,23 @@ export function setLogin(supervisorId: string, email: string, password: string) 
   commit(
     supervisors.map((s) => (s.id === supervisorId ? { ...s, email: email.trim(), ...newCredentials(password) } : s)),
   )
+  void sendToServer(`/api/supervisors/${encodeURIComponent(supervisorId)}/`, 'PATCH', {
+    email: email.trim(),
+    password,
+  }).then((saved) => saved && replaceOne(saved))
 }
 
 export function assignStores(supervisorId: string, storeIds: number[]) {
   commit(withStoresAssigned(supervisors, supervisorId, storeIds))
+  void sendToServer(`/api/supervisors/${encodeURIComponent(supervisorId)}/`, 'PATCH', { storeIds }).then(() =>
+    syncSupervisors(),
+  )
 }
 
 export function deleteSupervisor(supervisorId: string) {
   commit(supervisors.filter((s) => s.id !== supervisorId))
+  overviewCache.delete(supervisorId)
+  void sendToServer(`/api/supervisors/${encodeURIComponent(supervisorId)}/`, 'DELETE')
   if (readSession()?.id === supervisorId) signOut()
 }
 
@@ -179,11 +219,22 @@ export function supervisorOfStore(storeId: number) {
 
 // ─── Signing in ──────────────────────────────────────────────────────────────
 
-/** The supervisor these credentials belong to, or null. */
-export function authenticate(email: string, password: string): Supervisor | null {
-  const found = supervisors.find((s) => normEmail(s.email) === normEmail(email))
-  if (!found || !found.passwordHash) return null
-  return hashPassword(found.passwordSalt, password) === found.passwordHash ? found : null
+/** Checks the email and password on the server. Keeps the sign-in token; returns the supervisor, or null. */
+export async function authenticate(email: string, password: string): Promise<Supervisor | null> {
+  try {
+    const response = await fetch('/api/supervisor/login/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim(), password }),
+    })
+    if (!response.ok) return null
+    const data = (await response.json()) as { token: string; supervisor: Supervisor }
+    setSupervisorToken(data.token)
+    replaceOne(data.supervisor)
+    return data.supervisor
+  } catch {
+    return null
+  }
 }
 
 /** `preview` = Head Office looking at the portal as this supervisor, without their password. */
@@ -220,6 +271,13 @@ export function signIn(id: string, preview = false) {
 }
 
 export function signOut() {
+  const token = supervisorToken()
+  if (token) {
+    void fetch('/api/supervisor/logout/', { method: 'POST', headers: { 'X-Supervisor-Token': token } }).catch(
+      () => undefined,
+    )
+  }
+  setSupervisorToken(null)
   try {
     localStorage.removeItem(SESSION_KEY)
   } catch {
@@ -279,8 +337,48 @@ export type SupervisorOverview = {
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0)
 
+type ApiOverview = {
+  stores: ApiStoreRow[]
+  bas: SupervisorBa[]
+  teamConversion: number
+  coverage: number
+  todayFootfall: number
+}
+
+const overviewCache = new Map<string, SupervisorOverview>()
+
+/**
+ * Loads a supervisor's stores, their BAs today and the headline numbers from the server.
+ * Screens keep calling `supervisorOverview()`; it returns this once loaded.
+ */
+export async function syncSupervisorOverview(supervisorId: string) {
+  const portal = currentPortal() === 'supervisor' ? 'supervisor' : 'office'
+  const path =
+    portal === 'supervisor'
+      ? '/api/supervisor/overview/'
+      : `/api/supervisor/overview/?supervisor=${encodeURIComponent(supervisorId)}`
+  const data = await portalGet<ApiOverview>(path, portal)
+  if (!data) return
+  upsertApiStores(data.stores)
+  const ids = new Set(data.stores.map((row) => row.id))
+  overviewCache.set(supervisorId, {
+    stores: stores.filter((store) => ids.has(store.id)),
+    bas: data.bas,
+    teamConversion: data.teamConversion,
+    coverage: data.coverage,
+    todayFootfall: data.todayFootfall,
+  })
+  commit([...supervisors])
+}
+
 /** The stores assigned to a supervisor, the BAs working in them, and their headline numbers. */
 export function supervisorOverview(supervisor: Supervisor): SupervisorOverview {
+  const loaded = overviewCache.get(supervisor.id)
+  if (loaded) return loaded
+  return localOverview(supervisor)
+}
+
+function localOverview(supervisor: Supervisor): SupervisorOverview {
   const mine = stores.filter((s) => supervisor.storeIds.includes(s.id))
 
   const bas: SupervisorBa[] = mine.flatMap((store) =>

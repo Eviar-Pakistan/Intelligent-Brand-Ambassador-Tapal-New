@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { stores, type Store } from '../data/mock'
+import { currentPortal, portalGet } from './serverApi'
 
 /**
  * Stores created by Head Office. They are saved on the server and copied into the shared
@@ -64,7 +65,7 @@ export function findCreatedStore(id: number) {
   return created.find((c) => c.id === id) ?? null
 }
 
-type ApiStoreRow = {
+export type ApiStoreRow = {
   id: number
   name: string
   city: string
@@ -84,6 +85,8 @@ type ApiStoreRow = {
   qr_slug?: string
   latitude?: string | number | null
   longitude?: string | number | null
+  /** BAs working there today (supervisor overview) */
+  assigned?: Store['assigned']
 }
 
 function remember(row: ApiStoreRow) {
@@ -120,7 +123,7 @@ function remember(row: ApiStoreRow) {
     engagement: Math.round(row.engagement ?? 0),
     conversion: Math.round(row.conversion ?? 0),
     peak: row.peak?.length ? row.peak : record.peakHours ? [record.peakHours] : [],
-    assigned: [],
+    assigned: row.assigned ?? [],
     qrCode: record.slug,
   })
   created = [record, ...created.filter((item) => item.id !== record.id)]
@@ -149,6 +152,39 @@ export function adoptApiStore(row: ApiStoreRow) {
   if (!row?.id || stores.some((store) => store.id === row.id)) return
   remember(row)
   publish()
+}
+
+let baCurrentStoreId: number | null = null
+
+/** The store the signed-in BA works at today (from their shift), once loaded. */
+export function baCurrentStore() {
+  return baCurrentStoreId
+}
+
+/** On the BA's device: loads the stores that BA works at, so their forms can offer them. */
+export async function syncBaStores() {
+  if (currentPortal() !== 'ba') return
+  const data = await portalGet<{ current_store_id: number | null; results: ApiStoreRow[] }>('/api/ba/stores/', 'ba')
+  if (!data) return
+  baCurrentStoreId = data.current_store_id
+  upsertApiStores(data.results)
+  listeners.forEach((listener) => listener())
+}
+
+/**
+ * Add or refresh stores from the server without dropping the rest. BA and supervisor devices
+ * use this: they never load the full Head Office list, only the stores they work with.
+ */
+export function upsertApiStores(rows: ApiStoreRow[]) {
+  let changed = false
+  for (const row of rows) {
+    if (!row?.id || !row.name) continue
+    const at = stores.findIndex((store) => store.id === row.id)
+    if (at >= 0) stores.splice(at, 1)
+    remember(row)
+    changed = true
+  }
+  if (changed) publish()
 }
 
 const norm = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ')
@@ -225,7 +261,7 @@ export function shopperLink(store: Pick<Store, 'id' | 'qrCode' | 'name' | 'city'
   return `${window.location.origin}${shopperPath(store)}`
 }
 
-export type ShopperStore = { id: number | null; name: string; city: string }
+export type ShopperStore = { id: number | null; name: string; city: string; slug?: string }
 
 const SHOPPER_KEY = 'shopper-store'
 
@@ -235,7 +271,7 @@ export function enterShopperStore(slug: string, params: URLSearchParams): Shoppe
   const known = Number.isFinite(id) ? stores.find((s) => s.id === id) : undefined
   const name = known?.name ?? params.get('store') ?? ''
   const shopperStore = name
-    ? { id: known?.id ?? null, name, city: known?.city ?? params.get('city') ?? '' }
+    ? { id: known?.id ?? null, name, city: known?.city ?? params.get('city') ?? '', slug }
     : null
   try {
     if (shopperStore) sessionStorage.setItem(SHOPPER_KEY, JSON.stringify(shopperStore))
@@ -243,6 +279,23 @@ export function enterShopperStore(slug: string, params: URLSearchParams): Shoppe
     // ignore
   }
   return shopperStore
+}
+
+/**
+ * A shopper's phone has no store list, so the scanned QR slug is looked up on the server.
+ * Keeps the store (with its QR slug) for the rest of the visit.
+ */
+export async function resolveShopperStore(slug: string): Promise<ShopperStore | null> {
+  try {
+    const response = await fetch(`/api/shopper/store/${encodeURIComponent(slug)}/`)
+    if (!response.ok) return getShopperStore()
+    const row = (await response.json()) as { id: number; name: string; city: string; qr_slug: string }
+    const shopperStore: ShopperStore = { id: row.id, name: row.name, city: row.city, slug: row.qr_slug }
+    sessionStorage.setItem(SHOPPER_KEY, JSON.stringify(shopperStore))
+    return shopperStore
+  } catch {
+    return getShopperStore()
+  }
 }
 
 export function getShopperStore(): ShopperStore | null {

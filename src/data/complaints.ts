@@ -46,6 +46,8 @@ type ComplaintBase = {
   createdAt: string
   updatedAt: string
   hoNote?: string
+  /** Filed on this device but not accepted by the server yet; sent again on the next sync. */
+  unsent?: boolean
 }
 
 export type CustomerComplaint = ComplaintBase & {

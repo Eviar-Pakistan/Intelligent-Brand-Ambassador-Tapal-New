@@ -22,7 +22,13 @@ type TodayShift = {
   endTime: string | null
   storeLabel: string
   city: string
+  storeId: number
+  storeName: string
+  supervisorId: string | null
 }
+
+/** Where today's shift is, and who supervises that store (for check-in / check-out notices). */
+export type ShiftStore = { id: number; name: string; supervisorId: string | null }
 
 /** End of today's shift in minutes after midnight. Null when there is no shift today. */
 let shiftEndMinutes: number | null = null
@@ -32,6 +38,7 @@ export type BaShiftState = {
   /** Today's shift from the database, or null when none is scheduled. */
   hasShift: boolean
   storeLabel: string
+  shiftStore: ShiftStore | null
   shiftLabel: string
   shiftEndLabel: string
   checkedIn: boolean
@@ -189,6 +196,9 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       city: todayShift?.city || account?.city || '',
       hasShift: !!todayShift,
       storeLabel: todayShift?.storeLabel ?? '',
+      shiftStore: todayShift
+        ? { id: todayShift.storeId, name: todayShift.storeName, supervisorId: todayShift.supervisorId ?? null }
+        : null,
       shiftLabel: todayShift?.shift ?? 'No shift scheduled today',
       shiftEndLabel,
       checkedIn,

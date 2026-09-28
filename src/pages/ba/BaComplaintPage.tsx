@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, MessageSquareWarning, UserRound } from 'lucide-react'
 import { ambassadors, stores } from '../../data/mock'
@@ -10,7 +10,7 @@ import {
   type ComplaintKind,
 } from '../../data/complaints'
 import { useComplaints } from '../../context/ComplaintsContext'
-import { mirrorComplaint } from '../../lib/djangoApi'
+import { baCurrentStore, useCreatedStores } from '../../lib/storeRegistry'
 
 const fieldClass =
   'w-full rounded-xl border border-slate-200 bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-brand-500 focus:bg-white focus:ring-2 focus:ring-brand-500/15'
@@ -23,16 +23,22 @@ export function BaComplaintPage() {
   const baId = account?.id ?? ba?.id ?? 'ayesha'
   const baName = account?.name ?? ba?.name ?? 'Ayesha Khan'
 
+  // Stores refresh when the BA's store list arrives from the server.
+  const knownStores = useCreatedStores()
   const storeOptions = useMemo(
     () =>
       [...stores]
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((s) => ({ id: s.id, name: s.name, city: s.city })),
-    [],
+    [knownStores],
   )
 
   const [kind, setKind] = useState<ComplaintKind>('customer')
   const [customerStoreId, setCustomerStoreId] = useState(ba?.storeId ? String(ba.storeId) : '')
+  useEffect(() => {
+    const current = baCurrentStore()
+    if (!customerStoreId && current != null) setCustomerStoreId(String(current))
+  }, [knownStores, customerStoreId])
 
   const [brand, setBrand] = useState('')
   const [sku, setSku] = useState('')
@@ -91,7 +97,6 @@ export function BaComplaintPage() {
         complaint: complaint.trim(),
         ...(image ? { image } : {}),
       })
-      mirrorComplaint(account?.accessToken, store.id, complaint.trim())
       setSubmittedId(created.id)
       return
     }
@@ -110,7 +115,6 @@ export function BaComplaintPage() {
       subject: subject.trim(),
       details: details.trim(),
     })
-    mirrorComplaint(account?.accessToken, store.id, `${subject.trim()}: ${details.trim()}`)
     setSubmittedId(created.id)
   }
 

@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react'
 import { isAtOrPastShiftEnd } from '../context/BaShiftContext'
 import { ambassadors, stores } from '../data/mock'
+import { djangoToken } from './djangoApi'
+import { currentPortal, portalGet, resultsOf } from './serverApi'
 
 export type EarlyCheckout = {
   id: string
@@ -51,6 +53,17 @@ function commit(next: EarlyCheckout[]) {
 function subscribe(listener: () => void) {
   listeners.add(listener)
   return () => listeners.delete(listener)
+}
+
+/**
+ * Head Office and supervisors load today's early check-outs from the server: they are recorded
+ * with the BA's check-out report (/api/early-checkouts/). The BA's own device keeps its local list.
+ */
+export async function syncEarlyCheckouts() {
+  const portal = currentPortal()
+  if (portal === 'ba' || portal === 'shopper' || (portal === 'office' && !djangoToken())) return
+  const rows = resultsOf(await portalGet<{ results: EarlyCheckout[] }>('/api/early-checkouts/', portal))
+  if (rows) commit(rows)
 }
 
 function sameLocalDay(iso: string, now: Date) {

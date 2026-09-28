@@ -1,0 +1,1069 @@
+"""
+Server side for the parts of the app that used to live only in the browser:
+supervisors (and their sign-in), journey plans and visits, supervisor notifications,
+complaints, BA daily reports and interceptions, early check-outs, KPI settings, the BA's
+store list, and the shopper session.
+
+Every response uses the field names of the app's TypeScript types, so screens read
+server data exactly as they read their local lists.
+
+Who is asking:
+  Head Office  — signed in with the Django JWT (Authorization: Bearer …)
+  Supervisor   — X-Supervisor-Token header from /api/supervisor/login/
+                 (Head Office can act as a supervisor with ?supervisor=<id> — the portal preview)
+  BA           — their invite token (?token=… or "token" in the body)
+  Shopper      — no sign-in; the store's QR slug
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import re
+import secrets
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+
+from django.core.files.base import ContentFile
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Q
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+
+from .models import (
+    Ambassador,
+    AmbassadorComplaint,
+    Consumer,
+    DailyReport,
+    JourneyPlan,
+    JourneyVisit,
+    KpiConfig,
+    MonthlyShift,
+    ShiftAssignment,
+    Store,
+    Supervisor,
+    SupervisorNotification,
+    SupervisorToken,
+    SurveyQuestion,
+    UserInterception,
+)
+from .serializers import StoreSerializer
+
+WEEKDAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+MAX_IMAGE_BYTES = 6 * 1024 * 1024
+
+
+# ─── Who is asking ───────────────────────────────────────────────────────────
+
+
+def _is_head_office(request) -> bool:
+    user = getattr(request, 'user', None)
+    return bool(user and user.is_authenticated)
+
+
+def _supervisor_from_header(request) -> Supervisor | None:
+    key = (request.headers.get('X-Supervisor-Token') or '').strip()
+    if not key:
+        return None
+    token = SupervisorToken.objects.select_related('supervisor').filter(key=key).first()
+    return token.supervisor if token else None
+
+
+@dataclass
+class Scope:
+    head_office: bool = False
+    supervisor: Supervisor | None = None
+    ambassador: Ambassador | None = None
+
+    @property
+    def store_ids(self) -> set[int] | None:
+        """Stores this caller may see. None = every store (Head Office)."""
+        if self.supervisor is not None:
+            return set(self.supervisor.stores.values_list('id', flat=True))
+        if self.head_office:
+            return None
+        return set()
+
+
+def _scope(request, *, allow_ba: bool = False) -> Scope | None:
+    """Head Office (optionally previewing a supervisor), a supervisor, or — when allowed — a BA."""
+    supervisor = _supervisor_from_header(request)
+    if supervisor:
+        return Scope(supervisor=supervisor)
+    if _is_head_office(request):
+        preview = (request.query_params.get('supervisor') or '').strip()
+        if preview:
+            found = Supervisor.objects.filter(pk=preview).first()
+            return Scope(head_office=True, supervisor=found) if found else None
+        return Scope(head_office=True)
+    if allow_ba:
+        token = request.query_params.get('token') or (request.data.get('token') if hasattr(request, 'data') else None)
+        ambassador = _ambassador_from_token(token)
+        if ambassador:
+            return Scope(ambassador=ambassador)
+    return None
+
+
+def _ambassador_from_token(token) -> Ambassador | None:
+    token = str(token or '').strip()
+    return Ambassador.objects.filter(invite_token=token).first() if token else None
+
+
+def _denied():
+    return Response({'detail': 'Sign in to continue.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+
+def _forbidden(message='Head Office only.'):
+    return Response({'detail': message}, status=status.HTTP_403_FORBIDDEN)
+
+
+# ─── Small helpers ───────────────────────────────────────────────────────────
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _client_id(raw, prefix: str) -> str:
+    text = str(raw or '').strip()
+    if re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', text):
+        return text
+    return f'{prefix}-{secrets.token_hex(6)}'
+
+
+def _when(raw) -> datetime:
+    parsed = parse_datetime(str(raw)) if raw else None
+    if parsed is None:
+        return timezone.now()
+    return parsed if timezone.is_aware(parsed) else timezone.make_aware(parsed)
+
+
+def _ba_id(ambassador_id) -> str:
+    return f'api-{ambassador_id}' if ambassador_id else ''
+
+
+def _ambassador_pk(ba_id) -> int | None:
+    match = re.fullmatch(r'api-(\d+)', str(ba_id or ''))
+    return int(match.group(1)) if match else None
+
+
+def _image_from_data_url(value, name: str) -> ContentFile | None:
+    """Photos arrive as data: URLs (the app compresses them). Anything else is ignored."""
+    match = re.fullmatch(r'data:image/(png|jpe?g|webp);base64,(.+)', str(value or ''), re.S)
+    if not match:
+        return None
+    try:
+        data = base64.b64decode(match.group(2), validate=False)
+    except (binascii.Error, ValueError):
+        return None
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        return None
+    ext = 'jpg' if match.group(1).startswith('jp') else match.group(1)
+    return ContentFile(data, name=f'{name}.{ext}')
+
+
+def _media_url(request, field) -> str:
+    if not field:
+        return ''
+    try:
+        return request.build_absolute_uri(field.url) if request else field.url
+    except ValueError:
+        return ''
+
+
+def _monday(value) -> date | None:
+    try:
+        day = date.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return day - timedelta(days=day.weekday())
+
+
+def _date_param(request, key) -> date | None:
+    try:
+        return date.fromisoformat(request.query_params.get(key, ''))
+    except ValueError:
+        return None
+
+
+# ─── Supervisors: Head Office management ─────────────────────────────────────
+
+
+def supervisor_payload(sup: Supervisor) -> dict:
+    return {
+        'id': sup.id,
+        'name': sup.name,
+        'phone': sup.phone,
+        'email': sup.email,
+        'city': sup.city,
+        'storeIds': sorted(sup.stores.values_list('id', flat=True)),
+        'createdAt': _iso(sup.created_at),
+        # The password never leaves the server; the app only needs to know whether one is set.
+        'passwordSalt': '',
+        'passwordHash': 'set' if sup.password else '',
+    }
+
+
+def _assign_stores(sup: Supervisor, store_ids) -> None:
+    """A store belongs to one supervisor, so assigning it here takes it from anyone else."""
+    ids = {int(i) for i in store_ids if str(i).lstrip('-').isdigit()}
+    Store.objects.filter(supervisor=sup).exclude(id__in=ids).update(supervisor=None)
+    Store.objects.filter(id__in=ids).update(supervisor=sup)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def supervisors(request):
+    """GET the supervisor list · POST {id?, name, phone, email, city, password, storeIds}."""
+    if not _is_head_office(request):
+        return _denied()
+    if request.method == 'GET':
+        rows = Supervisor.objects.prefetch_related('stores').all()
+        return Response({'results': [supervisor_payload(s) for s in rows]})
+
+    data = request.data
+    name = str(data.get('name') or '').strip()
+    email = str(data.get('email') or '').strip()
+    if not name or not email:
+        return Response({'detail': 'Name and email are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if Supervisor.objects.filter(email__iexact=email).exists():
+        return Response({'detail': 'Another supervisor already signs in with this email.'}, status=status.HTTP_400_BAD_REQUEST)
+    sup = Supervisor(
+        id=_client_id(data.get('id'), 'sup'),
+        name=name,
+        phone=str(data.get('phone') or '').strip(),
+        email=email,
+        city=str(data.get('city') or '').strip(),
+    )
+    if data.get('password'):
+        sup.set_password(str(data['password']))
+    try:
+        with transaction.atomic():
+            sup.save(force_insert=True)
+            _assign_stores(sup, data.get('storeIds') or [])
+    except IntegrityError:
+        return Response({'detail': 'This supervisor already exists.'}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(supervisor_payload(sup), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([AllowAny])
+def supervisor_detail(request, pk):
+    """PATCH {name?, phone?, email?, city?, password?, storeIds?} · DELETE."""
+    if not _is_head_office(request):
+        return _denied()
+    sup = get_object_or_404(Supervisor, pk=pk)
+    if request.method == 'DELETE':
+        sup.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    data = request.data
+    for field in ('name', 'phone', 'city'):
+        if field in data:
+            setattr(sup, field, str(data.get(field) or '').strip())
+    if 'email' in data:
+        email = str(data.get('email') or '').strip()
+        if not email:
+            return Response({'detail': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if Supervisor.objects.filter(email__iexact=email).exclude(pk=sup.pk).exists():
+            return Response({'detail': 'Another supervisor already signs in with this email.'}, status=status.HTTP_400_BAD_REQUEST)
+        sup.email = email
+    if data.get('password'):
+        sup.set_password(str(data['password']))
+        sup.tokens.all().delete()  # a new password signs everyone out
+    with transaction.atomic():
+        sup.save()
+        if 'storeIds' in data:
+            _assign_stores(sup, data.get('storeIds') or [])
+    return Response(supervisor_payload(sup))
+
+
+# ─── Supervisors: signing in ─────────────────────────────────────────────────
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def supervisor_login(request):
+    """POST {email, password} → {token, supervisor}. The token goes in X-Supervisor-Token."""
+    email = str(request.data.get('email') or '').strip()
+    password = str(request.data.get('password') or '')
+    sup = Supervisor.objects.filter(email__iexact=email).first() if email else None
+    if not sup or not sup.check_password(password):
+        return Response({'detail': 'Incorrect email or password.'}, status=status.HTTP_400_BAD_REQUEST)
+    token = SupervisorToken.issue(sup)
+    return Response({'token': token.key, 'supervisor': supervisor_payload(sup)})
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def supervisor_logout(request):
+    key = (request.headers.get('X-Supervisor-Token') or '').strip()
+    if key:
+        SupervisorToken.objects.filter(key=key).delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def supervisor_me(request):
+    scope = _scope(request)
+    if not scope or not scope.supervisor:
+        return _denied()
+    return Response({'supervisor': supervisor_payload(scope.supervisor), 'preview': scope.head_office})
+
+
+# ─── Supervisor portal: stores, BAs, headline numbers ────────────────────────
+
+
+def _store_status_label(status_value: str) -> str:
+    return 'Covered' if status_value == 'LIVE' else 'PARTIAL' if status_value == 'PARTIAL' else 'NEEDS BA'
+
+
+def build_supervisor_overview(sup: Supervisor, request=None) -> dict:
+    """Stores assigned to the supervisor, the BAs working in them today, and their headline numbers."""
+    from .intelligence import build_ba_leaderboard, build_store_map_pins
+    from .shifts import ensure_daily_rows
+
+    today = timezone.localdate()
+    ensure_daily_rows(today)
+    stores = list(Store.objects.filter(supervisor=sup).order_by('name'))
+    store_ids = [s.id for s in stores]
+    pins = {p['id']: p for p in build_store_map_pins() if p['id'] in store_ids}
+    ranked = {row['id']: row for row in build_ba_leaderboard()['results']}
+
+    # Who works where: this month's monthly shifts, plus BAs deployed to the store.
+    pairs: dict[tuple[int, int], Ambassador] = {}
+    for shift in MonthlyShift.objects.filter(
+        store_id__in=store_ids, month=today.strftime('%Y-%m'), ambassador__isnull=False
+    ).select_related('ambassador'):
+        pairs[(shift.ambassador_id, shift.store_id)] = shift.ambassador
+    for ba in Ambassador.objects.filter(store_id__in=store_ids):
+        pairs.setdefault((ba.id, ba.store_id), ba)
+
+    today_rows = ShiftAssignment.objects.filter(date=today, store_id__in=store_ids).exclude(ambassador_id=None)
+    on_shift = {(r.ambassador_id, r.store_id) for r in today_rows if r.checked_in_at and not r.checked_out_at}
+    scheduled = {}
+    checked_in = {}
+    for r in today_rows:
+        scheduled[r.store_id] = scheduled.get(r.store_id, 0) + 1
+        if r.checked_in_at:
+            checked_in[r.store_id] = checked_in.get(r.store_id, 0) + 1
+
+    week_start = today - timedelta(days=today.weekday())
+    sessions = dict(
+        UserInterception.objects.filter(created_at__date__gte=week_start, ambassador__isnull=False)
+        .values_list('ambassador_id')
+        .annotate(n=Count('id'))
+    )
+
+    bas = []
+    assigned_by_store: dict[int, list] = {sid: [] for sid in store_ids}
+    store_names = {s.id: s.name for s in stores}
+    for (ba_pk, store_id), ba in sorted(pairs.items(), key=lambda item: item[1].name):
+        state = 'Active' if (ba_pk, store_id) in on_shift else 'Offline'
+        rank = ranked.get(ba_pk, {})
+        bas.append(
+            {
+                'id': _ba_id(ba_pk),
+                'name': ba.name,
+                'storeId': store_id,
+                'store': store_names[store_id],
+                'state': state,
+                'conversion': rank.get('conversion', 0.0),
+                'points': rank.get('points', 0),
+                'sessions': sessions.get(ba_pk, 0),
+                'score': round(float(ba.overall_score or 0), 1),
+            }
+        )
+        assigned_by_store[store_id].append({'id': _ba_id(ba_pk), 'name': ba.name, 'state': state})
+
+    store_rows = []
+    coverage_values = []
+    for store in stores:
+        row = StoreSerializer(store, context={'request': request}).data
+        pin = pins.get(store.id, {})
+        # Coverage today: scheduled BAs who checked in. Falls back to the store's saved coverage.
+        coverage = (
+            round(checked_in.get(store.id, 0) / scheduled[store.id] * 100)
+            if scheduled.get(store.id)
+            else int(store.coverage or 0)
+        )
+        coverage_values.append(coverage)
+        store_rows.append(
+            {
+                **row,
+                'coverage': coverage,
+                'engagement': pin.get('engagement_rate', row.get('engagement') or 0),
+                'conversion': pin.get('conversion_rate', row.get('conversion') or 0),
+                'status_label': _store_status_label(store.status),
+                'assigned': assigned_by_store[store.id],
+            }
+        )
+
+    unique = {b['id']: b for b in bas}.values()
+    conversions = [b['conversion'] for b in unique]
+    mean = lambda xs: round(sum(xs) / len(xs), 1) if xs else 0.0  # noqa: E731
+    return {
+        'supervisor': supervisor_payload(sup),
+        'stores': store_rows,
+        'bas': bas,
+        'teamConversion': mean(conversions),
+        'coverage': mean(coverage_values),
+        'todayFootfall': sum(int(s.today_footfall or 0) for s in stores),
+    }
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def supervisor_overview(request):
+    scope = _scope(request)
+    if not scope or not scope.supervisor:
+        return _denied()
+    return Response(build_supervisor_overview(scope.supervisor, request))
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def supervisor_overviews(request):
+    """Head Office: every supervisor's headline numbers (for supervisor incentives)."""
+    if not _is_head_office(request):
+        return _denied()
+    rows = []
+    for sup in Supervisor.objects.all():
+        data = build_supervisor_overview(sup, request)
+        rows.append({key: data[key] for key in ('supervisor', 'teamConversion', 'coverage', 'todayFootfall')} | {
+            'storeCount': len(data['stores']),
+            'baCount': len({b['id'] for b in data['bas']}),
+        })
+    return Response({'results': rows})
+
+
+# ─── Supervisor notifications ────────────────────────────────────────────────
+
+
+def notify_supervisor(shift: ShiftAssignment, kind: str) -> None:
+    """Called when a BA checks in or out: tells the supervisor of that store."""
+    store = shift.store
+    if not store.supervisor_id or not shift.ambassador_id:
+        return
+    at = shift.checked_in_at if kind == 'check-in' else shift.checked_out_at
+    at = at or timezone.now()
+    verb = 'checked in' if kind == 'check-in' else 'checked out'
+    time_label = timezone.localtime(at).strftime('%I:%M %p').lstrip('0')
+    SupervisorNotification.objects.get_or_create(
+        id=f'{kind}-{store.id}-{shift.id}',
+        defaults={
+            'supervisor_id': store.supervisor_id,
+            'message': f'{shift.ambassador.name} {verb} at {store.name} · {time_label}',
+            'created_at': at,
+        },
+    )
+
+
+@api_view(['GET', 'DELETE'])
+@permission_classes([AllowAny])
+def supervisor_notifications(request):
+    """GET the supervisor's latest notifications · DELETE clears them."""
+    scope = _scope(request)
+    if not scope or not scope.supervisor:
+        return _denied()
+    qs = SupervisorNotification.objects.filter(supervisor=scope.supervisor)
+    if request.method == 'DELETE':
+        qs.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    return Response(
+        {
+            'results': [
+                {'id': n.id, 'supervisorId': n.supervisor_id, 'message': n.message, 'createdAt': _iso(n.created_at)}
+                for n in qs[:40]
+            ]
+        }
+    )
+
+
+# ─── Journey plans and visits ────────────────────────────────────────────────
+
+
+def _plan_payload(plan: JourneyPlan) -> dict:
+    return {
+        'id': plan.id,
+        'supervisorId': plan.supervisor_id,
+        'weekStart': plan.week_start.isoformat(),
+        'stops': plan.stops,
+        'createdAt': _iso(plan.created_at),
+        'updatedAt': _iso(plan.updated_at),
+    }
+
+
+def _clean_stops(raw) -> list[dict] | None:
+    if not isinstance(raw, list):
+        return None
+    seen, stops = set(), []
+    for stop in raw:
+        if not isinstance(stop, dict) or stop.get('day') not in WEEKDAYS:
+            return None
+        try:
+            store_id = int(stop.get('storeId'))
+        except (TypeError, ValueError):
+            return None
+        key = (stop['day'], store_id)
+        if key not in seen:
+            seen.add(key)
+            stops.append({'day': stop['day'], 'storeId': store_id})
+    stops.sort(key=lambda s: (WEEKDAYS.index(s['day']), s['storeId']))
+    return stops
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([AllowAny])
+def journey_plans(request):
+    """
+    GET plans (Head Office: all, or ?supervisor=; a supervisor: their own).
+    PUT {supervisorId, weekStart, stops, id?} — Head Office replaces the week's stops; empty stops remove it.
+    """
+    scope = _scope(request)
+    if not scope:
+        return _denied()
+    if request.method == 'GET':
+        qs = JourneyPlan.objects.all()
+        if scope.supervisor:
+            qs = qs.filter(supervisor=scope.supervisor)
+        return Response({'results': [_plan_payload(p) for p in qs]})
+
+    if not scope.head_office:
+        return _forbidden()
+    sup = Supervisor.objects.filter(pk=request.data.get('supervisorId')).first()
+    week_start = _monday(request.data.get('weekStart'))
+    stops = _clean_stops(request.data.get('stops'))
+    if not sup or not week_start or stops is None:
+        return Response({'detail': 'Give a supervisor, a week and the stops.'}, status=status.HTTP_400_BAD_REQUEST)
+    known = set(Store.objects.filter(id__in=[s['storeId'] for s in stops]).values_list('id', flat=True))
+    if any(s['storeId'] not in known for s in stops):
+        return Response({'detail': 'One of the stores no longer exists.'}, status=status.HTTP_400_BAD_REQUEST)
+    existing = JourneyPlan.objects.filter(supervisor=sup, week_start=week_start).first()
+    if not stops:
+        if existing:
+            existing.delete()
+        return Response({'plan': None})
+    plan = existing or JourneyPlan(id=_client_id(request.data.get('id'), 'plan'), supervisor=sup, week_start=week_start)
+    plan.stops = stops
+    plan.save()
+    return Response({'plan': _plan_payload(plan)})
+
+
+def _visit_payload(visit: JourneyVisit, request) -> dict:
+    return {
+        'id': visit.id,
+        'supervisorId': visit.supervisor_id,
+        'weekStart': visit.week_start.isoformat(),
+        'day': visit.day,
+        'storeId': visit.store_id,
+        'latitude': visit.latitude,
+        'longitude': visit.longitude,
+        'accuracy': visit.accuracy,
+        'selfie': _media_url(request, visit.selfie),
+        'baPhoto': _media_url(request, visit.ba_photo),
+        'stockPhoto': _media_url(request, visit.stock_photo),
+        'completedAt': _iso(visit.completed_at),
+    }
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def journey_visits(request):
+    """
+    GET completed visits (Head Office: all or ?supervisor=; a supervisor: their own).
+    POST {weekStart, day, storeId, latitude, longitude, accuracy, selfie, baPhoto, stockPhoto} — the supervisor
+    completes a planned stop. Photos are data: URLs. Completing the same stop again replaces it.
+    """
+    scope = _scope(request)
+    if not scope:
+        return _denied()
+    if request.method == 'GET':
+        qs = JourneyVisit.objects.all()
+        if scope.supervisor:
+            qs = qs.filter(supervisor=scope.supervisor)
+        return Response({'results': [_visit_payload(v, request) for v in qs]})
+
+    sup = scope.supervisor
+    if not sup:
+        return _forbidden('Only the supervisor completes a visit.')
+    data = request.data
+    week_start = _monday(data.get('weekStart'))
+    day = data.get('day')
+    try:
+        store_id = int(data.get('storeId'))
+        latitude = float(data.get('latitude'))
+        longitude = float(data.get('longitude'))
+    except (TypeError, ValueError):
+        return Response({'detail': 'A store and your location are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not week_start or day not in WEEKDAYS:
+        return Response({'detail': 'Give the week and day of the visit.'}, status=status.HTTP_400_BAD_REQUEST)
+    plan = JourneyPlan.objects.filter(supervisor=sup, week_start=week_start).first()
+    if not plan or {'day': day, 'storeId': store_id} not in plan.stops:
+        return Response({'detail': 'This stop is not on your journey plan.'}, status=status.HTTP_400_BAD_REQUEST)
+    photos = {}
+    for key, field in (('selfie', 'selfie'), ('baPhoto', 'ba_photo'), ('stockPhoto', 'stock_photo')):
+        photos[field] = _image_from_data_url(data.get(key), f'{sup.id}-{week_start}-{day}-{store_id}-{field}')
+        if photos[field] is None:
+            return Response({'detail': 'Take all three photos (selfie, BA and stock).'}, status=status.HTTP_400_BAD_REQUEST)
+    accuracy = data.get('accuracy')
+    try:
+        accuracy = float(accuracy) if accuracy not in (None, '') else None
+    except (TypeError, ValueError):
+        accuracy = None
+
+    with transaction.atomic():
+        existing = JourneyVisit.objects.filter(supervisor=sup, week_start=week_start, day=day, store_id=store_id).first()
+        visit = existing or JourneyVisit(
+            id=_client_id(data.get('id'), 'visit'), supervisor=sup, week_start=week_start, day=day, store_id=store_id
+        )
+        visit.latitude, visit.longitude, visit.accuracy = latitude, longitude, accuracy
+        visit.completed_at = timezone.now()
+        for field, content in photos.items():
+            getattr(visit, field).save(content.name, content, save=False)
+        visit.save()
+    return Response(_visit_payload(visit, request), status=status.HTTP_201_CREATED)
+
+
+# ─── Complaints ──────────────────────────────────────────────────────────────
+
+
+def complaint_payload(c: AmbassadorComplaint, request) -> dict:
+    base = {
+        'id': c.client_id or f'cmp-{c.pk}',
+        'kind': c.kind,
+        'baId': _ba_id(c.ambassador_id),
+        'baName': c.ba_name or (c.ambassador.name if c.ambassador_id else ''),
+        'storeId': c.store_id,
+        'storeName': c.store.name,
+        'city': c.store.city,
+        'status': c.status,
+        'createdAt': _iso(c.created_at),
+        'updatedAt': _iso(c.updated_at),
+    }
+    if c.ho_note:
+        base['hoNote'] = c.ho_note
+    if c.kind == AmbassadorComplaint.Kind.CUSTOMER:
+        base.update(
+            {
+                'brand': c.brand,
+                'sku': c.sku,
+                'customerName': c.customer_name,
+                'customerNumber': c.customer_number,
+                'complaint': c.complaint,
+            }
+        )
+        if c.image:
+            base['image'] = _media_url(request, c.image)
+    else:
+        base.update({'category': c.category or 'Other', 'subject': c.subject, 'details': c.complaint})
+    return base
+
+
+def _complaint_by_id(pk) -> AmbassadorComplaint | None:
+    qs = AmbassadorComplaint.objects.select_related('store', 'ambassador')
+    found = qs.filter(client_id=pk).first()
+    if not found and re.fullmatch(r'cmp-\d+', str(pk)):
+        found = qs.filter(pk=int(str(pk)[4:]), client_id__isnull=True).first()
+    return found
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def complaints(request):
+    """
+    GET complaints (Head Office: all; supervisor: their stores).
+    POST — a BA files one with their invite token: {token, id?, kind, storeId, …customer or BA fields}.
+    """
+    if request.method == 'GET':
+        scope = _scope(request)
+        if not scope:
+            return _denied()
+        qs = AmbassadorComplaint.objects.select_related('store', 'ambassador')
+        if scope.store_ids is not None:
+            qs = qs.filter(store_id__in=scope.store_ids)
+        return Response({'results': [complaint_payload(c, request) for c in qs]})
+
+    data = request.data
+    ambassador = _ambassador_from_token(data.get('token'))
+    if not ambassador:
+        return Response({'detail': 'Open the app from your account link to file a complaint.'}, status=status.HTTP_401_UNAUTHORIZED)
+    store = Store.objects.filter(pk=data.get('storeId')).first()
+    if not store:
+        return Response({'detail': 'Choose a store.'}, status=status.HTTP_400_BAD_REQUEST)
+    kind = data.get('kind')
+    client_id = _client_id(data.get('id'), 'cmp')
+    existing = AmbassadorComplaint.objects.filter(client_id=client_id).first()
+    if existing:
+        return Response(complaint_payload(existing, request))
+
+    complaint = AmbassadorComplaint(
+        client_id=client_id,
+        ambassador=ambassador,
+        ba_name=str(data.get('baName') or ambassador.name)[:120],
+        store=store,
+    )
+    if kind == 'customer':
+        fields = {k: str(data.get(k) or '').strip() for k in ('brand', 'sku', 'customerName', 'customerNumber', 'complaint')}
+        missing = [k for k in ('brand', 'sku', 'customerName', 'customerNumber', 'complaint') if not fields[k]]
+        if missing:
+            return Response({'detail': 'Fill in the brand, SKU, customer and complaint.'}, status=status.HTTP_400_BAD_REQUEST)
+        complaint.kind = AmbassadorComplaint.Kind.CUSTOMER
+        complaint.brand, complaint.sku = fields['brand'][:80], fields['sku'][:80]
+        complaint.customer_name, complaint.customer_number = fields['customerName'][:120], fields['customerNumber'][:30]
+        complaint.complaint = fields['complaint'][:2000]
+        image = _image_from_data_url(data.get('image'), f'{client_id}-image')
+    elif kind == 'ba':
+        subject = str(data.get('subject') or '').strip()
+        details = str(data.get('details') or '').strip()
+        if not subject or not details:
+            return Response({'detail': 'Give a subject and the details.'}, status=status.HTTP_400_BAD_REQUEST)
+        complaint.kind = AmbassadorComplaint.Kind.BA
+        complaint.category = str(data.get('category') or 'Other')[:60]
+        complaint.subject, complaint.complaint = subject[:200], details[:2000]
+        image = None
+    else:
+        return Response({'detail': 'Unknown complaint type.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    complaint.save()
+    if image:
+        complaint.image.save(image.name, image, save=True)
+    return Response(complaint_payload(complaint, request), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH'])
+@permission_classes([AllowAny])
+def complaint_detail(request, pk):
+    """Head Office: PATCH {status, hoNote?}."""
+    if not _is_head_office(request):
+        return _denied()
+    complaint = _complaint_by_id(pk)
+    if not complaint:
+        return Response({'detail': 'Complaint not found.'}, status=status.HTTP_404_NOT_FOUND)
+    new_status = request.data.get('status')
+    if new_status is not None:
+        if new_status not in AmbassadorComplaint.Status.values:
+            return Response({'detail': 'Unknown status.'}, status=status.HTTP_400_BAD_REQUEST)
+        complaint.status = new_status
+    if 'hoNote' in request.data:
+        complaint.ho_note = str(request.data.get('hoNote') or '').strip()[:2000]
+    complaint.save()
+    return Response(complaint_payload(complaint, request))
+
+
+# ─── BA daily reports ────────────────────────────────────────────────────────
+
+
+def report_payload(r: DailyReport) -> dict:
+    return {
+        'id': r.id,
+        'baId': _ba_id(r.ambassador_id),
+        'baName': r.ba_name,
+        'city': r.city,
+        'submittedAt': _iso(r.submitted_at),
+        'source': r.source,
+        'stock': r.stock,
+        'sales': r.sales,
+        'otherBrands': r.other_brands,
+    }
+
+
+def _ba_store(ambassador: Ambassador) -> Store | None:
+    """The store the BA works at today (their shift), else the store they are deployed to."""
+    today = timezone.localdate()
+    shift = (
+        MonthlyShift.objects.filter(ambassador=ambassador, month=today.strftime('%Y-%m'))
+        .select_related('store')
+        .order_by('start_time')
+        .first()
+    )
+    return shift.store if shift else ambassador.store
+
+
+def _ba_visible(qs, scope: Scope, store_field='store'):
+    """Head Office sees all; a supervisor sees their stores; a BA sees their own."""
+    if scope.ambassador:
+        return qs.filter(ambassador=scope.ambassador)
+    if scope.store_ids is not None:
+        return qs.filter(**{f'{store_field}_id__in': scope.store_ids})
+    return qs
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def daily_reports(request):
+    """GET reports (Head Office / supervisor / the BA's own) · POST — the BA submits one with their token."""
+    scope = _scope(request, allow_ba=True)
+    if not scope:
+        return _denied()
+    if request.method == 'GET':
+        qs = _ba_visible(DailyReport.objects.all(), scope)
+        return Response({'results': [report_payload(r) for r in qs[:500]]})
+
+    if not scope.ambassador:
+        return _forbidden('Only a BA submits a daily report.')
+    data = request.data
+    source = data.get('source')
+    if source not in DailyReport.Source.values:
+        return Response({'detail': 'Unknown report source.'}, status=status.HTTP_400_BAD_REQUEST)
+    stock = data.get('stock') if isinstance(data.get('stock'), dict) else {}
+    sales = data.get('sales') if isinstance(data.get('sales'), dict) else {}
+    others = data.get('otherBrands') if isinstance(data.get('otherBrands'), list) else []
+    if not (stock or sales or others):
+        return Response({'detail': 'The report is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+    report_id = _client_id(data.get('id'), 'rep')
+    report, created = DailyReport.objects.get_or_create(
+        id=report_id,
+        defaults={
+            'ambassador': scope.ambassador,
+            'ba_name': str(data.get('baName') or scope.ambassador.name)[:120],
+            'store': _ba_store(scope.ambassador),
+            'city': str(data.get('city') or scope.ambassador.city or '')[:100],
+            'source': source,
+            'stock': stock,
+            'sales': sales,
+            'other_brands': others,
+            'submitted_at': _when(data.get('submittedAt')),
+        },
+    )
+    return Response(report_payload(report), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+# ─── BA user interceptions ───────────────────────────────────────────────────
+
+
+def interception_payload(r: UserInterception) -> dict:
+    return {
+        'id': r.id,
+        'baId': _ba_id(r.ambassador_id),
+        'baName': r.ba_name,
+        'storeId': r.store_id,
+        'storeName': r.store_name,
+        'name': r.name,
+        'contact': r.contact,
+        'cityArea': r.city_area,
+        'previousBrand': r.previous_brand,
+        'previousSku': r.previous_sku,
+        'currentSku': r.current_sku,
+        'feedback': r.feedback,
+        'createdAt': _iso(r.created_at),
+    }
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def interceptions(request):
+    """GET (Head Office / supervisor / the BA's own) · POST — a BA records a shopper they spoke with."""
+    scope = _scope(request, allow_ba=True)
+    if not scope:
+        return _denied()
+    if request.method == 'GET':
+        qs = _ba_visible(UserInterception.objects.all(), scope)
+        return Response({'results': [interception_payload(r) for r in qs[:1000]]})
+
+    if not scope.ambassador:
+        return _forbidden('Only a BA records an interception.')
+    data = request.data
+    text = {k: str(data.get(k) or '').strip() for k in (
+        'name', 'contact', 'cityArea', 'previousBrand', 'previousSku', 'currentSku', 'feedback', 'storeName'
+    )}
+    if not text['name'] or not text['contact']:
+        return Response({'detail': 'Name and contact are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    store = Store.objects.filter(pk=data.get('storeId')).first() if data.get('storeId') else None
+    store = store or _ba_store(scope.ambassador)
+    record, created = UserInterception.objects.get_or_create(
+        id=_client_id(data.get('id'), 'int'),
+        defaults={
+            'ambassador': scope.ambassador,
+            'ba_name': str(data.get('baName') or scope.ambassador.name)[:120],
+            'store': store,
+            'store_name': (text['storeName'] or (store.name if store else ''))[:200],
+            'name': text['name'][:120],
+            'contact': text['contact'][:40],
+            'city_area': text['cityArea'][:120],
+            'previous_brand': text['previousBrand'][:120],
+            'previous_sku': text['previousSku'][:120],
+            'current_sku': text['currentSku'][:120],
+            'feedback': text['feedback'][:2000],
+            'created_at': _when(data.get('createdAt')),
+        },
+    )
+    return Response(interception_payload(record), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+# ─── Early check-outs ────────────────────────────────────────────────────────
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def early_checkouts(request):
+    """BAs who checked out before shift end, with their reason. ?date_from&date_to (default today)."""
+    scope = _scope(request)
+    if not scope:
+        return _denied()
+    today = timezone.localdate()
+    date_to = _date_param(request, 'date_to') or today
+    date_from = _date_param(request, 'date_from') or date_to
+    qs = (
+        ShiftAssignment.objects.filter(date__gte=date_from, date__lte=date_to, checked_out_at__isnull=False)
+        .exclude(early_checkout_reason='')
+        .select_related('store', 'ambassador')
+        .order_by('-checked_out_at')
+    )
+    if scope.store_ids is not None:
+        qs = qs.filter(store_id__in=scope.store_ids)
+    return Response(
+        {
+            'results': [
+                {
+                    'id': f'early-{r.id}',
+                    'baId': _ba_id(r.ambassador_id),
+                    'baName': r.ambassador.name if r.ambassador_id else '',
+                    'storeId': r.store_id,
+                    'storeName': r.store.name,
+                    'reason': r.early_checkout_reason,
+                    'at': _iso(r.checked_out_at),
+                }
+                for r in qs
+            ]
+        }
+    )
+
+
+# ─── KPI / incentive settings ────────────────────────────────────────────────
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([AllowAny])
+def kpi_config(request):
+    """GET the incentive KPI settings (anyone in the app) · PUT — Head Office saves them."""
+    cfg = KpiConfig.get_solo()
+    if request.method == 'PUT':
+        if not _is_head_office(request):
+            return _denied()
+        cfg.config = KpiConfig.normalize(request.data)
+        cfg.updated_by = request.user
+        cfg.save()
+    return Response(KpiConfig.normalize(cfg.config))
+
+
+# ─── The BA's stores ─────────────────────────────────────────────────────────
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def ba_stores(request):
+    """GET ?token= — the stores a BA works at (their monthly shifts and deployment), for their forms."""
+    ambassador = _ambassador_from_token(request.query_params.get('token'))
+    if not ambassador:
+        return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
+    ids = set(MonthlyShift.objects.filter(ambassador=ambassador).values_list('store_id', flat=True))
+    if ambassador.store_id:
+        ids.add(ambassador.store_id)
+    stores = Store.objects.filter(id__in=ids).order_by('name')
+    return Response(
+        {
+            'current_store_id': (_ba_store(ambassador).id if _ba_store(ambassador) else None),
+            'results': StoreSerializer(stores, many=True, context={'request': request}).data,
+        }
+    )
+
+
+# ─── Shopper session ─────────────────────────────────────────────────────────
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def shopper_session(request):
+    """
+    POST {store (QR slug) or storeId, name, phone, gender, age, currentBrand, reasons[], consent}
+    Saves what the shopper entered in the survey. Returns {id} for the feedback step.
+    """
+    data = request.data
+    store = None
+    if data.get('store'):
+        store = Store.objects.filter(qr_slug=str(data['store'])).first()
+    if not store and data.get('storeId'):
+        store = Store.objects.filter(pk=data.get('storeId')).first()
+    if not store:
+        return Response({'detail': 'Scan the store QR code to start.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not data.get('consent'):
+        return Response({'detail': 'Consent is required to save your answers.'}, status=status.HTTP_400_BAD_REQUEST)
+    name = str(data.get('name') or '').strip()[:120]
+    phone = str(data.get('phone') or '').strip()[:30]
+    current_brand = str(data.get('currentBrand') or '').strip()[:120]
+    reasons = [str(r).strip()[:80] for r in (data.get('reasons') or []) if str(r).strip()][:10]
+    if not name or not phone or not current_brand:
+        return Response({'detail': 'Name, number and current tea are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        age = int(data.get('age'))
+        if not 5 <= age <= 120:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response({'detail': 'Enter a valid age.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Keep campaign insights working: the current tea also answers survey question 1 ("Which tea…").
+    answers = {}
+    first = (
+        SurveyQuestion.objects.filter(is_active=True, order=1)
+        .filter(Q(store=store) | Q(store__isnull=True))
+        .order_by('-store_id')
+        .first()
+    )
+    if first:
+        answers[str(first.id)] = current_brand
+    consumer = Consumer.objects.create(
+        store=store,
+        name=name,
+        phone=phone,
+        consent=True,
+        gender=str(data.get('gender') or '').strip()[:20],
+        age=age,
+        current_brand=current_brand,
+        reasons=reasons,
+        answers=answers,
+    )
+    return Response({'id': consumer.id, 'store': store.name}, status=status.HTTP_201_CREATED)
+
+
+# ─── Training modules for the BA app ─────────────────────────────────────────
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def training_modules(request):
+    """The active training video and its questions, in the app's TrainingModule shape."""
+    from pathlib import PurePath
+
+    from .ba_training_views import active_training_video
+
+    video = active_training_video()
+    if not video or not video.file:
+        return Response({'results': []})
+    questions = video.normalized_questions()
+    name = video.original_name or 'Training video'
+    return Response(
+        {
+            'results': [
+                {
+                    'id': f'tv-{video.id}',
+                    'title': PurePath(name).stem.replace('_', ' ').replace('-', ' ').strip() or 'Training video',
+                    'description': next((q.get('description', '') for q in questions if q.get('description')), ''),
+                    'videoName': name,
+                    'videoUrl': '/api/ba/training/video/',
+                    'questions': [
+                        {'id': str(q.get('id') or f'q{i + 1}'), 'prompt': q.get('question', '')}
+                        for i, q in enumerate(questions)
+                        if q.get('question')
+                    ],
+                    'createdAt': _iso(video.created_at),
+                }
+            ]
+        }
+    )

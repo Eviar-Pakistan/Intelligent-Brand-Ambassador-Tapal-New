@@ -1,4 +1,6 @@
 import { useSyncExternalStore } from 'react'
+import { djangoToken } from './djangoApi'
+import { portalSend } from './serverApi'
 
 /**
  * Incentive KPI settings. Head Office sets these in the "Set KPIs" dialog; every incentive
@@ -84,7 +86,7 @@ export function getKpiConfig() {
   return current
 }
 
-export function setKpiConfig(next: KpiConfig) {
+function keep(next: KpiConfig) {
   current = normalizeKpiConfig(next)
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(current))
@@ -92,6 +94,26 @@ export function setKpiConfig(next: KpiConfig) {
     // keep the in-memory value for this session
   }
   listeners.forEach((l) => l())
+}
+
+/** Head Office saves the settings; they are kept on the server so every screen pays the same. */
+export function setKpiConfig(next: KpiConfig) {
+  keep(next)
+  if (djangoToken()) {
+    void portalSend<KpiConfig>('/api/kpi-config/', 'PUT', current, 'office')
+      .then((saved) => saved && keep(saved))
+      .catch((error) => console.warn('[kpi] not saved on the server:', error instanceof Error ? error.message : error))
+  }
+}
+
+/** Loads the settings Head Office saved (/api/kpi-config/). */
+export async function syncKpiConfig() {
+  try {
+    const response = await fetch('/api/kpi-config/')
+    if (response.ok) keep((await response.json()) as KpiConfig)
+  } catch {
+    // keep the settings already on screen
+  }
 }
 
 function subscribe(listener: () => void) {

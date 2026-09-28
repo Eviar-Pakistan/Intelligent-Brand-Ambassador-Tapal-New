@@ -383,7 +383,7 @@ export function BaOtherBrandsPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
-  const { submitCheckoutReport, earlyCheckoutReason, city } = useBaShift()
+  const { submitCheckoutReport, earlyCheckoutReason, city, shiftStore } = useBaShift()
   const { account } = useBaSession()
   const [rows, setRows] = useState<OtherBrandRow[]>(DEFAULT_OTHER_BRANDS)
   const [submitted, setSubmitted] = useState(false)
@@ -436,6 +436,14 @@ export function BaOtherBrandsPage() {
           baName: account?.name ?? ambassador.name,
           storeId: store.id,
           storeName: store.name,
+          at: new Date(),
+        })
+      } else if (shiftStore) {
+        notifyBaCheckOut({
+          baName: account?.name ?? 'Brand Ambassador',
+          storeId: shiftStore.id,
+          storeName: shiftStore.name,
+          supervisorId: shiftStore.supervisorId,
           at: new Date(),
         })
       }

@@ -162,10 +162,16 @@ export function adoptApiStore(row: ApiStoreRow) {
 }
 
 let baCurrentStoreId: number | null = null
+let baOwnStoreIds: number[] = []
 
 /** The store the signed-in BA works at today (from their shift), once loaded. */
 export function baCurrentStore() {
   return baCurrentStoreId
+}
+
+/** The stores the signed-in BA works at (shifts and deployment), once loaded. */
+export function baStoreIds() {
+  return baOwnStoreIds
 }
 
 /** On the BA's device: loads the stores that BA works at, so their forms can offer them. */
@@ -174,6 +180,7 @@ export async function syncBaStores() {
   const data = await portalGet<{ current_store_id: number | null; results: ApiStoreRow[] }>('/api/ba/stores/', 'ba')
   if (!data) return
   baCurrentStoreId = data.current_store_id
+  baOwnStoreIds = data.results.map((row) => row.id)
   upsertApiStores(data.results)
   listeners.forEach((listener) => listener())
 }

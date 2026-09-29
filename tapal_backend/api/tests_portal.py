@@ -197,6 +197,10 @@ class JourneyTests(PortalTestBase):
 
 
 class ComplaintTests(PortalTestBase):
+    def setUp(self):
+        super().setUp()
+        self.schedule_ba_today()  # a BA files complaints only for a store they work at
+
     def file(self, **extra):
         body = {
             'token': self.ba.invite_token, 'id': 'cmp-abc', 'kind': 'customer', 'storeId': self.store.id,
@@ -221,6 +225,8 @@ class ComplaintTests(PortalTestBase):
         self.assertEqual(self.file(id='cmp-4', token='nope').status_code, 401)
 
     def test_head_office_updates_and_supervisor_sees_own_stores(self):
+        build_monthly_shift(store=self.other_store, ambassador=self.ba, month=self.today.strftime('%Y-%m'),
+                            start=parse_hhmm('00:00'), end=parse_hhmm('23:59')).save()
         self.file()
         self.file(id='cmp-other', storeId=self.other_store.id)
         res = self.ho.patch('/api/complaints/cmp-abc/', {'status': 'Rejected', 'hoNote': 'Duplicate'}, format='json')
@@ -508,10 +514,13 @@ class BaAppDataTests(PortalTestBase):
         self.assertEqual(len(self.anon.get(f'/api/ba/training/practice/?token={token}').data['results']), 1)
 
     def test_ba_sees_own_complaints_with_status(self):
+        self.schedule_ba_today()
         other = Ambassador.objects.create(name='Zara')
         body = {'kind': 'ba', 'storeId': self.store.id, 'category': 'Other', 'subject': 'Shelf', 'details': 'Empty shelf'}
         self.anon.post('/api/complaints/', {**body, 'token': self.ba.invite_token, 'id': 'cmp-mine'}, format='json')
-        self.anon.post('/api/complaints/', {**body, 'token': other.invite_token, 'id': 'cmp-other'}, format='json')
+        # Zara does not work at this store, so she cannot file a complaint for it.
+        refused = self.anon.post('/api/complaints/', {**body, 'token': other.invite_token, 'id': 'cmp-other'}, format='json')
+        self.assertEqual(refused.status_code, 400)
         self.ho.patch('/api/complaints/cmp-mine/', {'status': 'Resolved', 'hoNote': 'Restocked'}, format='json')
         mine = self.anon.get(f'/api/complaints/?token={self.ba.invite_token}').data['results']
         self.assertEqual([(c['id'], c['status'], c['hoNote']) for c in mine], [('cmp-mine', 'Resolved', 'Restocked')])

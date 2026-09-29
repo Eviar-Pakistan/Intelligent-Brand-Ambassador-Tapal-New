@@ -736,6 +736,8 @@ def complaints(request):
     store = Store.objects.filter(pk=data.get('storeId')).first()
     if not store:
         return Response({'detail': 'Choose a store.'}, status=status.HTTP_400_BAD_REQUEST)
+    if store.id not in _ba_store_ids(ambassador):
+        return Response({'detail': 'You can only file complaints for your own store.'}, status=status.HTTP_400_BAD_REQUEST)
     kind = data.get('kind')
     client_id = _client_id(data.get('id'), 'cmp')
     existing = AmbassadorComplaint.objects.filter(client_id=client_id).first()
@@ -1010,6 +1012,14 @@ def kpi_config(request):
 # ─── The BA's stores ─────────────────────────────────────────────────────────
 
 
+def _ba_store_ids(ambassador) -> set[int]:
+    """The stores a BA works at: their monthly shifts and their deployment."""
+    ids = set(MonthlyShift.objects.filter(ambassador=ambassador).values_list('store_id', flat=True))
+    if ambassador.store_id:
+        ids.add(ambassador.store_id)
+    return ids
+
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def ba_stores(request):
@@ -1017,10 +1027,7 @@ def ba_stores(request):
     ambassador = _ambassador_from_token(request.query_params.get('token'))
     if not ambassador:
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
-    ids = set(MonthlyShift.objects.filter(ambassador=ambassador).values_list('store_id', flat=True))
-    if ambassador.store_id:
-        ids.add(ambassador.store_id)
-    stores = Store.objects.filter(id__in=ids).order_by('name')
+    stores = Store.objects.filter(id__in=_ba_store_ids(ambassador)).order_by('name')
     return Response(
         {
             'current_store_id': (_ba_store(ambassador).id if _ba_store(ambassador) else None),

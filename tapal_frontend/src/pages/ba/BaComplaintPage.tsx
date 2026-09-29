@@ -14,7 +14,7 @@ import {
   type ComplaintKind,
 } from '../../data/complaints'
 import { useComplaints } from '../../context/ComplaintsContext'
-import { baCurrentStore, useCreatedStores } from '../../lib/storeRegistry'
+import { baCurrentStore, baStoreIds, syncBaStores, useCreatedStores } from '../../lib/storeRegistry'
 
 const fieldClass =
   'w-full rounded-xl border border-slate-200 bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-brand-500 focus:bg-white focus:ring-2 focus:ring-brand-500/15'
@@ -27,22 +27,36 @@ export function BaComplaintPage() {
   const baId = account?.id ?? ba?.id ?? 'ayesha'
   const baName = account?.name ?? ba?.name ?? 'Ayesha Khan'
 
-  // Stores refresh when the BA's store list arrives from the server.
+  // Only the BA's own stores (shifts and deployment); refreshes when the list arrives from the server.
   const knownStores = useCreatedStores()
-  const storeOptions = useMemo(
-    () =>
-      [...stores]
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((s) => ({ id: s.id, name: s.name, city: s.city })),
-    [knownStores],
-  )
+  useEffect(() => {
+    void syncBaStores()
+  }, [])
+  const storeOptions = useMemo(() => {
+    const own = new Set<number>(baStoreIds())
+    if (ba?.storeId) own.add(ba.storeId)
+    return stores
+      .filter((s) => own.has(s.id))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((s) => ({ id: s.id, name: s.name, city: s.city }))
+  }, [knownStores, ba?.storeId])
 
   const [kind, setKind] = useState<ComplaintKind>('customer')
   const [customerStoreId, setCustomerStoreId] = useState(ba?.storeId ? String(ba.storeId) : '')
+  const [storeId, setStoreId] = useState('')
+  // Pre-select today's store (or the only one) on both forms.
   useEffect(() => {
     const current = baCurrentStore()
-    if (!customerStoreId && current != null) setCustomerStoreId(String(current))
-  }, [knownStores, customerStoreId])
+    const pick =
+      current != null && storeOptions.some((s) => s.id === current)
+        ? String(current)
+        : storeOptions.length === 1
+          ? String(storeOptions[0].id)
+          : ''
+    if (!pick) return
+    setCustomerStoreId((prev) => (prev && storeOptions.some((s) => String(s.id) === prev) ? prev : pick))
+    setStoreId((prev) => (prev && storeOptions.some((s) => String(s.id) === prev) ? prev : pick))
+  }, [storeOptions])
 
   const [brand, setBrand] = useState('')
   const [sku, setSku] = useState('')
@@ -52,7 +66,6 @@ export function BaComplaintPage() {
   const [image, setImage] = useState<string | null>(null)
   const [imageError, setImageError] = useState<string | null>(null)
 
-  const [storeId, setStoreId] = useState('')
   const [category, setCategory] = useState<ComplaintCategory | ''>('')
   const [subject, setSubject] = useState('')
   const [details, setDetails] = useState('')
@@ -191,7 +204,7 @@ export function BaComplaintPage() {
               className={fieldClass}
               required
             >
-              <option value="">Choose a store…</option>
+              <option value="">{storeOptions.length ? 'Choose your store…' : 'No store assigned to you yet'}</option>
               {storeOptions.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} · {s.city}
@@ -317,7 +330,7 @@ export function BaComplaintPage() {
                 className={fieldClass}
                 required
               >
-                <option value="">Choose a store…</option>
+                <option value="">{storeOptions.length ? 'Choose your store…' : 'No store assigned to you yet'}</option>
                 {storeOptions.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name} · {s.city}

@@ -14,6 +14,7 @@ django-cors-headers==4.9.0
 python-dotenv==1.2.1
 whitenoise==6.12.0
 gunicorn==23.0.0
+firebase-admin==6.9.0
 
 # Files, QR codes, Excel
 pillow==12.1.1

@@ -14,16 +14,11 @@ export default defineConfig({
       ignored: ['**/tapal_backend/**'],
     },
     proxy: {
-      '/api': {
-        target: django,
-        changeOrigin: true,
-        bypass(req) {
-          const url = req.url ?? ''
-          if (url.startsWith('/api/push')) return url
-        },
-      },
+      '/api': { target: django, changeOrigin: true },
       '/auth': { target: django, changeOrigin: true },
       '/media': { target: django, changeOrigin: true },
+      '/firebase-config.json': { target: django, changeOrigin: true },
+      '/firebase-messaging-sw.js': { target: django, changeOrigin: true },
     },
   },
 })

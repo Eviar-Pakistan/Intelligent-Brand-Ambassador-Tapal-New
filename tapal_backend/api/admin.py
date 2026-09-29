@@ -13,6 +13,8 @@ from .models import (
     ShiftAssignment,
     Store,
     StoreReward,
+    SupervisorPushEvent,
+    SupervisorPushToken,
     SurveyQuestion,
     TrainingVideo,
 )
@@ -237,4 +239,17 @@ class UserInterceptionAdmin(admin.ModelAdmin):
 
 
 admin.site.register(KpiConfig)
+
+
+@admin.register(SupervisorPushToken)
+class SupervisorPushTokenAdmin(admin.ModelAdmin):
+    list_display = ('id', 'supervisor_id', 'updated_at')
+    search_fields = ('supervisor_id', 'token')
+
+
+@admin.register(SupervisorPushEvent)
+class SupervisorPushEventAdmin(admin.ModelAdmin):
+    list_display = ('id', 'event_id', 'supervisor_id', 'title', 'created_at')
+    search_fields = ('event_id', 'supervisor_id', 'title')
+    list_filter = ('supervisor_id',)
 

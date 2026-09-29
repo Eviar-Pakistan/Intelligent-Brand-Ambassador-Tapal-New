@@ -175,3 +175,22 @@ if OPENAI_API_KEY:
 os.environ.setdefault('ANSWER_STT_PROVIDER', ANSWER_STT_PROVIDER)
 os.environ.setdefault('GROQ_STT_MODEL', GROQ_STT_MODEL)
 os.environ.setdefault('BRAND_NAME', BRAND_NAME)
+
+# Supervisor FCM web push (same values the Vite app used as VITE_FIREBASE_*)
+FIREBASE_API_KEY = os.environ.get('FIREBASE_API_KEY', os.environ.get('VITE_FIREBASE_API_KEY', ''))
+FIREBASE_AUTH_DOMAIN = os.environ.get('FIREBASE_AUTH_DOMAIN', os.environ.get('VITE_FIREBASE_AUTH_DOMAIN', ''))
+FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', os.environ.get('VITE_FIREBASE_PROJECT_ID', ''))
+FIREBASE_STORAGE_BUCKET = os.environ.get(
+    'FIREBASE_STORAGE_BUCKET',
+    os.environ.get('VITE_FIREBASE_STORAGE_BUCKET', ''),
+)
+FIREBASE_MESSAGING_SENDER_ID = os.environ.get(
+    'FIREBASE_MESSAGING_SENDER_ID',
+    os.environ.get('VITE_FIREBASE_MESSAGING_SENDER_ID', ''),
+)
+FIREBASE_APP_ID = os.environ.get('FIREBASE_APP_ID', os.environ.get('VITE_FIREBASE_APP_ID', ''))
+FIREBASE_VAPID_KEY = os.environ.get('FIREBASE_VAPID_KEY', os.environ.get('VITE_FIREBASE_VAPID_KEY', ''))
+FIREBASE_SERVICE_ACCOUNT_PATH = os.environ.get(
+    'FIREBASE_SERVICE_ACCOUNT_PATH',
+    str(BASE_DIR.parent / 'firebase-service-account.json'),
+)

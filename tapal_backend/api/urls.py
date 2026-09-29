@@ -14,6 +14,7 @@ from .ba_training_views import (
     ba_training_video,
 )
 from . import portal_views as portal
+from . import push_views
 from .views import (
     ba_attendance,
     ba_targets,
@@ -103,5 +104,8 @@ urlpatterns = [
     path('ba/stores/', portal.ba_stores, name='ba-stores'),
     path('shopper/sessions/', portal.shopper_session, name='shopper-session'),
     path('ba/training/modules/', portal.training_modules, name='ba-training-modules'),
+    path('push/register', push_views.push_register, name='push-register'),
+    path('push/send', push_views.push_send, name='push-send'),
+    path('push/inbox', push_views.push_inbox, name='push-inbox'),
     path('', include(router.urls)),
 ]

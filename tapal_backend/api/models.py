@@ -880,3 +880,40 @@ class KpiConfig(models.Model):
                 out[key] = default
         return out
 
+
+class SupervisorPushToken(models.Model):
+    """FCM web-push token for a supervisor browser (was data/supervisor-push.json)."""
+
+    supervisor_id = models.CharField(max_length=64, db_index=True)
+    token = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['supervisor_id', 'token'],
+                name='unique_supervisor_push_token',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.supervisor_id} · {self.token[:24]}…'
+
+
+class SupervisorPushEvent(models.Model):
+    """Inbox row for a supervisor push alert."""
+
+    event_id = models.CharField(max_length=120, unique=True)
+    supervisor_id = models.CharField(max_length=64, db_index=True)
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.supervisor_id} · {self.title}'
+

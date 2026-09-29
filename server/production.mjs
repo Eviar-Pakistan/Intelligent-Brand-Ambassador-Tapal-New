@@ -1,11 +1,9 @@
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
-import { createPushRuntime } from './pushApi.mjs'
 
 const root = process.cwd()
 const dist = path.join(root, 'dist')
-const push = createPushRuntime(root)
 const port = Number(process.env.PORT || 4173)
 
 const types = {
@@ -62,27 +60,21 @@ function sendFile(res, filePath) {
   res.end(body)
 }
 
-const server = http.createServer(async (req, res) => {
-  try {
-    if (await push.handle(req, res)) return
-  } catch (error) {
-    console.error('[push]', error)
-    if (!res.headersSent) {
-      res.statusCode = 500
-      res.setHeader('Content-Type', 'application/json')
-      res.end(JSON.stringify({ ok: false }))
-    }
-    return
-  }
+function goesToDjango(pathname) {
+  return (
+    pathname.startsWith('/api/') ||
+    pathname.startsWith('/auth/') ||
+    pathname.startsWith('/media/') ||
+    pathname.startsWith('/admin') ||
+    pathname.startsWith('/static/') ||
+    pathname === '/firebase-config.json' ||
+    pathname === '/firebase-messaging-sw.js'
+  )
+}
 
+const server = http.createServer((req, res) => {
   const requestUrl = new URL(req.url ?? '/', 'http://localhost')
-  if (
-    requestUrl.pathname.startsWith('/api/') ||
-    requestUrl.pathname.startsWith('/auth/') ||
-    requestUrl.pathname.startsWith('/media/') ||
-    requestUrl.pathname.startsWith('/admin') ||
-    requestUrl.pathname.startsWith('/static/')
-  ) {
+  if (goesToDjango(requestUrl.pathname)) {
     proxyDjango(req, res)
     return
   }
@@ -94,8 +86,7 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  const url = new URL(req.url ?? '/', 'http://localhost')
-  const relative = path.normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '')
+  const relative = path.normalize(decodeURIComponent(requestUrl.pathname)).replace(/^(\.\.[/\\])+/, '')
   const filePath = path.join(dist, relative)
   if (filePath.startsWith(dist) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
     if (req.method === 'HEAD') {
@@ -107,7 +98,7 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  if (path.extname(url.pathname)) {
+  if (path.extname(requestUrl.pathname)) {
     res.statusCode = 404
     res.end('Not found')
     return

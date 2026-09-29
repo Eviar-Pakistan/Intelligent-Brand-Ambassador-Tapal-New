@@ -1,32 +1,11 @@
-import type { Connect, Plugin, PreviewServer, ViteDevServer } from 'vite'
-import { createPushRuntime } from './pushApi.mjs'
+import type { Plugin } from 'vite'
 
-function mount(middlewares: Connect.Server, root: string) {
-  const push = createPushRuntime(root)
-  middlewares.use(async (req, res, next) => {
-    try {
-      if (await push.handle(req, res)) return
-    } catch (error) {
-      console.error('[push]', error)
-      if (!res.headersSent) {
-        res.statusCode = 500
-        res.setHeader('Content-Type', 'application/json')
-        res.end(JSON.stringify({ ok: false }))
-      }
-      return
-    }
-    next()
-  })
-}
-
+/**
+ * Push + Firebase config are served by Django. This plugin is kept so older
+ * imports of supervisorPushPlugin still resolve; it no longer mounts a Node push API.
+ */
 export function supervisorPushPlugin(): Plugin {
   return {
     name: 'supervisor-push',
-    configureServer(server: ViteDevServer) {
-      mount(server.middlewares, server.config.root)
-    },
-    configurePreviewServer(server: PreviewServer) {
-      mount(server.middlewares, server.config.root)
-    },
   }
 }

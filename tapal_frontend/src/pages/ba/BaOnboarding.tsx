@@ -298,18 +298,6 @@ function AssessmentStep({ account }: { account: BaAccount }) {
       audioRecorder: null,
     })
 
-    // keep a copy of the video so the BA can play it back before submitting
-    if (typeof MediaRecorder !== 'undefined') {
-      const chunks: Blob[] = []
-      const recorder = new MediaRecorder(stream)
-      recorder.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data)
-      recorder.onstop = () => {
-        if (chunks.length) setPlaybackUrl(URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType })))
-      }
-      recorder.start()
-      c.recorder = recorder
-    }
-
     if (typeof MediaRecorder !== 'undefined' && stream.getAudioTracks().length) {
       const audioStream = new MediaStream(stream.getAudioTracks())
       const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : ''

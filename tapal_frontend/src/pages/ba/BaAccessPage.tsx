@@ -18,7 +18,7 @@ export function BaAccessPage() {
         return
       }
       baSignIn(account.id)
-      navigate(account.status === 'Certified' ? '/ba/home' : '/ba/training', { replace: true })
+      navigate('/ba/home', { replace: true })
     }
     void open()
     return () => {

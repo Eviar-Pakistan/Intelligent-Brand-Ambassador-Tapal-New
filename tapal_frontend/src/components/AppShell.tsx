@@ -36,7 +36,7 @@ import {
   useSupervisorNotifications,
 } from '../lib/supervisorNotifications'
 import { enableSupervisorPush } from '../lib/supervisorPush'
-import { djangoLogout } from '../lib/djangoApi'
+import { displayName, djangoLogout, useDjangoUser } from '../lib/djangoApi'
 import { useBrand } from '../context/BrandContext'
 
 type NavItem = {
@@ -198,6 +198,27 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
   const [pushError, setPushError] = useState<string | null>(null)
   const meta = roleMeta[role]
   const navGroups = groupNav(cfg.nav)
+  // Who is signed in: the supervisor, or the Head Office / admin user from the server.
+  const officeUser = useDjangoUser()
+  const person =
+    kind === 'supervisor'
+      ? {
+          name: sv.supervisor?.name ?? cfg.brand,
+          detail: sv.preview ? 'Head Office preview' : meta.label,
+        }
+      : officeUser
+        ? {
+            name: displayName(officeUser),
+            detail: `${officeUser.user_type_label || meta.label} · ${officeUser.city || 'All cities'}`,
+          }
+        : { name: cfg.brand, detail: meta.label }
+  const personInitials =
+    person.name
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((word) => word[0]?.toUpperCase())
+      .join('') || meta.short
 
   useEffect(() => {
     setRole(cfg.role)
@@ -376,11 +397,11 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
         <div className="relative z-[1] border-t border-white/10 bg-black/20 p-3 backdrop-blur-sm">
           <div className="mb-2 flex items-center gap-2.5 rounded-xl bg-white/8 px-2.5 py-2.5 ring-1 ring-white/10">
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-gold-400 to-gold-600 text-[11px] font-bold text-navy-950 shadow-md shadow-gold-500/25">
-              {meta.short}
+              {personInitials}
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-xs font-semibold text-white">{cfg.brand}</div>
-              <div className="truncate text-[10px] text-white/55">{meta.label}</div>
+              <div className="truncate text-xs font-semibold text-white">{person.name}</div>
+              <div className="truncate text-[10px] text-white/55">{person.detail}</div>
             </div>
           </div>
           <button
@@ -467,15 +488,11 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-2 rounded-xl border border-slate-200 px-2 py-1.5">
                 <div className="flex h-8 w-8 items-center justify-center rounded-full bg-navy-900 text-xs font-semibold text-white">
-                  {meta.short}
+                  {personInitials}
                 </div>
                 <div className="hidden text-left sm:block">
-                  <div className="text-xs font-semibold text-slate-800">
-                    {kind === 'supervisor' ? (sv.supervisor?.name ?? cfg.brand) : cfg.brand}
-                  </div>
-                  <div className="text-[10px] text-slate-500">
-                    {kind === 'supervisor' && sv.preview ? 'Head Office preview' : meta.label}
-                  </div>
+                  <div className="text-xs font-semibold text-slate-800">{person.name}</div>
+                  <div className="text-[10px] text-slate-500">{person.detail}</div>
                 </div>
               </div>
               <button

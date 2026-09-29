@@ -321,3 +321,20 @@ class ShiftsStillWork(PortalTestBase):
         self.assertEqual(MonthlyShift.objects.count(), 1)
         self.anon.get(f'/api/ba/today-shift/?token={self.ba.invite_token}')
         self.assertEqual(ShiftAssignment.objects.count(), 1)
+
+
+class UncertifiedBaCanUseAppTests(PortalTestBase):
+    def test_pending_ba_has_full_access(self):
+        ba = Ambassador.objects.create(name='New BA', status=Ambassador.Status.PENDING)
+        build_monthly_shift(
+            store=self.store, ambassador=ba, month=self.today.strftime('%Y-%m'),
+            start=parse_hhmm('00:00'), end=parse_hhmm('23:59'),
+        ).save()
+        token = ba.invite_token
+        self.assertTrue(self.anon.get(f'/api/ba/today-shift/?token={token}').data['has_shift'])
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 200)
+        out = self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(self.anon.get(f'/api/ba/leaderboard/?token={token}').status_code, 200)
+        legacy = self.anon.post('/api/ba/complaints/', {'token': token, 'store_id': self.store.id, 'complaint': 'x'}, format='json')
+        self.assertEqual(legacy.status_code, 201)

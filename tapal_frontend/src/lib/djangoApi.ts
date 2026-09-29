@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+
 const ACCESS_KEY = 'django-access-token'
 
 export type DjangoUser = {
@@ -5,6 +7,43 @@ export type DjangoUser = {
   email: string
   user_type: number
   user_type_label?: string
+  first_name?: string
+  last_name?: string
+  /** Blank = every city (Head Office); otherwise the one city this login covers */
+  city?: string
+}
+
+// The signed-in Head Office user, shared by every screen (loaded once per sign-in).
+let currentUser: DjangoUser | null = null
+let currentUserLoad: Promise<DjangoUser | null> | null = null
+const userListeners = new Set<(user: DjangoUser | null) => void>()
+
+function setCurrentUser(user: DjangoUser | null) {
+  currentUser = user
+  userListeners.forEach((listener) => listener(user))
+}
+
+/** The signed-in Head Office user (name, email, city), or null while loading / signed out. */
+export function useDjangoUser() {
+  const [user, setUser] = useState<DjangoUser | null>(currentUser)
+  useEffect(() => {
+    userListeners.add(setUser)
+    if (!currentUser && djangoToken()) {
+      currentUserLoad ??= djangoMe().finally(() => {
+        currentUserLoad = null
+      })
+    }
+    return () => {
+      userListeners.delete(setUser)
+    }
+  }, [])
+  return user
+}
+
+/** "Zoraiz Khan", or the part of the email before @ when no name is set. */
+export function displayName(user: DjangoUser) {
+  const full = [user.first_name, user.last_name].filter(Boolean).join(' ').trim()
+  return full || user.email.split('@')[0]
 }
 
 export function djangoToken() {
@@ -21,6 +60,7 @@ export function djangoLogout() {
   } catch {
     // the sign-in page is the lock either way
   }
+  setCurrentUser(null)
 }
 
 export async function djangoMe(): Promise<DjangoUser | null> {
@@ -31,7 +71,9 @@ export async function djangoMe(): Promise<DjangoUser | null> {
       djangoLogout()
       return null
     }
-    return (await response.json()) as DjangoUser
+    const user = (await response.json()) as DjangoUser
+    setCurrentUser(user)
+    return user
   } catch {
     return null
   }

@@ -51,6 +51,17 @@ class TrainingVideoViewSet(viewsets.ModelViewSet):
         ctx['request'] = self.request
         return ctx
 
+    def initial(self, request, *args, **kwargs):
+        # The training video is shared by every city: city Head Office users can view, not change it.
+        from rest_framework.exceptions import PermissionDenied
+        from rest_framework.permissions import SAFE_METHODS
+
+        from .city_scope import scope_for
+
+        super().initial(request, *args, **kwargs)
+        if request.method not in SAFE_METHODS and not scope_for(request.user).is_all:
+            raise PermissionDenied('Only the all-city Head Office can change the training video.')
+
     def create(self, request, *args, **kwargs):
         upload = request.FILES.get('file') or request.FILES.get('video')
         if not upload:
@@ -168,7 +179,9 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
-        qs = Ambassador.objects.select_related('created_by', 'store').all()
+        from .city_scope import scope_for
+
+        qs = scope_for(self.request.user).ambassadors(Ambassador.objects.select_related('created_by', 'store').all(), 'id')
         status_q = self.request.query_params.get('status')
         if status_q:
             qs = qs.filter(status__iexact=status_q)
@@ -185,7 +198,13 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = AmbassadorCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        ambassador = serializer.save(created_by=request.user, status=Ambassador.Status.PENDING)
+        from .city_scope import scope_for
+
+        # A city Head Office user's new BAs belong to their city (so they stay visible to them).
+        city = scope_for(request.user).city
+        ambassador = serializer.save(
+            created_by=request.user, status=Ambassador.Status.PENDING, **({'city': city} if city else {})
+        )
         out = AmbassadorSerializer(ambassador, context={'request': request})
         return Response(out.data, status=status.HTTP_201_CREATED)
 
@@ -222,7 +241,9 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
         if not store_id:
             return Response({'detail': 'store_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        store = Store.objects.filter(pk=store_id).first()
+        from .city_scope import scope_for
+
+        store = scope_for(request.user).stores(Store.objects.all(), 'id').filter(pk=store_id).first()
         if not store:
             return Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
 

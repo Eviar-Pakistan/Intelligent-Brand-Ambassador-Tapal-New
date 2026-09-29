@@ -12,10 +12,11 @@ class UserAdmin(DjangoUserAdmin):
         'first_name',
         'last_name',
         'user_type',
+        'city',
         'is_active',
         'is_staff',
     )
-    list_filter = ('user_type', 'is_active', 'is_staff', 'is_superuser')
+    list_filter = ('user_type', 'city', 'is_active', 'is_staff', 'is_superuser')
     search_fields = ('username', 'email', 'first_name', 'last_name', 'phone')
     ordering = ('-created_at',)
 
@@ -23,7 +24,7 @@ class UserAdmin(DjangoUserAdmin):
         (
             'Role & profile',
             {
-                'fields': ('user_type', 'phone', 'is_active_user'),
+                'fields': ('user_type', 'city', 'phone', 'is_active_user'),
             },
         ),
     )
@@ -31,7 +32,7 @@ class UserAdmin(DjangoUserAdmin):
         (
             'Role & profile',
             {
-                'fields': ('user_type', 'phone'),
+                'fields': ('user_type', 'city', 'phone'),
             },
         ),
     )

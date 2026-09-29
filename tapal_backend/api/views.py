@@ -9,6 +9,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
+from .city_scope import scope_for
 from .manager_ops import build_manager_overview
 from .intelligence import (
     build_ba_leaderboard,
@@ -59,7 +60,8 @@ class StoreViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return (
-            Store.objects.select_related('created_by')
+            scope_for(self.request.user)
+            .stores(Store.objects.select_related('created_by'), 'id')
             .annotate(
                 shopper_count_ann=Count('consumers', distinct=True),
                 assigned_bas_ann=Count(
@@ -82,7 +84,13 @@ class StoreViewSet(viewsets.ModelViewSet):
         return ctx
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        # A city Head Office user's new stores are in their city.
+        city = scope_for(self.request.user).city
+        serializer.save(created_by=self.request.user, **({'city': city} if city else {}))
+
+    def perform_update(self, serializer):
+        city = scope_for(self.request.user).city
+        serializer.save(**({'city': city} if city else {}))
 
     @action(detail=True, methods=['post'], url_path='regenerate-qr')
     def regenerate_qr(self, request, pk=None):
@@ -100,7 +108,11 @@ class SurveyQuestionViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        scope = scope_for(self.request.user)
         questions = SurveyQuestion.objects.select_related('store').all()
+        if not scope.is_all:
+            mine = Q(store_id__in=scope.store_ids)
+            questions = questions.filter(mine if self.action not in ('list', 'retrieve') else mine | Q(store__isnull=True))
         store_id = self.request.query_params.get('store')
         if store_id:
             questions = questions.filter(store_id=store_id)
@@ -115,6 +127,9 @@ class AmbassadorComplaintViewSet(viewsets.ModelViewSet):
     queryset = AmbassadorComplaint.objects.select_related('ambassador', 'store').all()
     http_method_names = ['get', 'patch', 'head', 'options']
 
+    def get_queryset(self):
+        return scope_for(self.request.user).stores(super().get_queryset())
+
 
 class MonthlyShiftViewSet(viewsets.ModelViewSet):
     """
@@ -126,7 +141,7 @@ class MonthlyShiftViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = MonthlyShift.objects.select_related('store', 'ambassador').all()
+        qs = scope_for(self.request.user).stores(MonthlyShift.objects.select_related('store', 'ambassador').all())
         if getattr(self, 'action', None) != 'list':
             return qs
         params = self.request.query_params
@@ -150,7 +165,19 @@ class MonthlyShiftViewSet(viewsets.ModelViewSet):
             return Response({'month': f'{first:%Y-%m}', 'month_label': f'{first:%B %Y}', 'results': data})
         return Response({'results': data})
 
+    def _check_store(self, serializer):
+        from rest_framework.exceptions import PermissionDenied
+
+        store = serializer.validated_data.get('store')
+        if store is not None and not scope_for(self.request.user).allows_store(store.id):
+            raise PermissionDenied('You can only schedule shifts at stores in your city.')
+
+    def perform_create(self, serializer):
+        self._check_store(serializer)
+        serializer.save()
+
     def perform_update(self, serializer):
+        self._check_store(serializer)
         sync_daily_rows(serializer.save())
 
     def perform_destroy(self, instance):
@@ -165,7 +192,9 @@ class MonthlyShiftViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Send at least one shift row.'}, status=status.HTTP_400_BAD_REQUEST)
         if len(rows) > 2000:
             return Response({'detail': 'Upload at most 2000 rows at a time.'}, status=status.HTTP_400_BAD_REQUEST)
-        result = create_month_shifts([r for r in rows if isinstance(r, dict)], request.user)
+        result = create_month_shifts(
+            [r for r in rows if isinstance(r, dict)], request.user, scope=scope_for(request.user)
+        )
         code = status.HTTP_201_CREATED if result['rows_saved'] else status.HTTP_400_BAD_REQUEST
         return Response(result, status=code)
 
@@ -180,7 +209,9 @@ class ShiftDayViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = ShiftAssignment.objects.select_related('store', 'ambassador').order_by('-date', 'shift_label', 'id')
+        qs = scope_for(self.request.user).stores(
+            ShiftAssignment.objects.select_related('store', 'ambassador').order_by('-date', 'shift_label', 'id')
+        )
         params = self.request.query_params
         if params.get('ambassador'):
             qs = qs.filter(ambassador_id=params['ambassador'])
@@ -202,7 +233,7 @@ class ConsumerViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Consumer.objects.select_related('store').all()
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = scope_for(self.request.user).stores(super().get_queryset())
         store_id = self.request.query_params.get('store')
         store_slug = self.request.query_params.get('store_slug')
         if store_id:
@@ -220,7 +251,7 @@ class StoreRewardViewSet(viewsets.ModelViewSet):
     queryset = StoreReward.objects.select_related('store').all()
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = scope_for(self.request.user).stores(super().get_queryset())
         store_id = self.request.query_params.get('store')
         if store_id:
             qs = qs.filter(store_id=store_id)
@@ -250,6 +281,7 @@ def ba_attendance(request):
             date_to,
             ambassador_id=request.query_params.get('ambassador') or None,
             store_id=request.query_params.get('store') or None,
+            scope=scope_for(request.user),
         )
     )
 
@@ -258,7 +290,7 @@ def ba_attendance(request):
 @permission_classes([IsAuthenticated])
 def campaign_metrics(request):
     """Head Office Campaign Metrics page: KPIs, trend, map, insights, operations, BAs, stores."""
-    return Response(build_campaign_metrics())
+    return Response(build_campaign_metrics(scope_for(request.user)))
 
 
 @api_view(['GET'])
@@ -269,28 +301,28 @@ def intelligence_overview(request):
     shoppers, active stores, engagement/conversion rates,
     7-day trend, consumer insights, shopper intelligence.
     """
-    return Response(build_intelligence_overview())
+    return Response(build_intelligence_overview(scope_for(request.user)))
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def intelligence_store_map(request):
     """Mapbox pins for Live Store Map on the Command Center."""
-    return Response({'pins': build_store_map_pins()})
+    return Response({'pins': build_store_map_pins(scope_for(request.user))})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def intelligence_leaderboard(request):
     """Ranked BA leaderboard with points, conversion, and week activity."""
-    return Response(build_ba_leaderboard())
+    return Response(build_ba_leaderboard(scope_for(request.user)))
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def manager_overview(request):
     """Store Manager dashboard: KPIs, live attendance, coverage stores."""
-    return Response(build_manager_overview())
+    return Response(build_manager_overview(scope_for(request.user)))
 
 
 @api_view(['GET'])
@@ -396,10 +428,10 @@ def _target_payload(row):
         'baId': f'api-{ambassador.id}',
         'baName': ambassador.name,
         'baCode': ambassador.ba_code or '',
-        'storeId': store.id,
-        'storeName': store.name,
-        'storeCode': store.store_code or '',
-        'city': store.city or '',
+        'storeId': store.id if store else None,
+        'storeName': store.name if store else '',
+        'storeCode': (store.store_code or '') if store else '',
+        'city': (store.city if store else ambassador.city) or '',
         'month': row.month,
         'targetKg': float(row.target_total),
         'salesKg': float(row.sales_total),
@@ -407,17 +439,70 @@ def _target_payload(row):
     }
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def ba_targets(request):
-    """September (or any YYYY-MM) targets assigned to each store's ambassador."""
-    month = (request.query_params.get('month') or '2026-09').strip()
-    rows = (
-        AmbassadorMonthTarget.objects.select_related('ambassador', 'store')
-        .filter(month=month)
-        .order_by('store__name')
-    )
+    """
+    GET ?month=YYYY-MM — every BA's target for the month (SKU lines included).
+    POST {rows: [{baCode, month, lines: [{sku, brand?, qty, sales?, grammage?}]}]} — save SKU targets per BA.
+    """
+    scope = scope_for(request.user)
+    if request.method == 'POST':
+        from .target_sheet import save_ba_sku_targets
+
+        rows = request.data.get('rows')
+        if not isinstance(rows, list) or not rows:
+            return Response({'detail': 'Send at least one BA target.'}, status=status.HTTP_400_BAD_REQUEST)
+        result = save_ba_sku_targets([r for r in rows if isinstance(r, dict)], scope)
+        return Response(result, status=status.HTTP_201_CREATED if result['saved'] else status.HTTP_400_BAD_REQUEST)
+
+    month = (request.query_params.get('month') or timezone.localdate().strftime('%Y-%m')).strip()
+    rows = AmbassadorMonthTarget.objects.select_related('ambassador', 'store').filter(month=month)
+    if not scope.is_all:
+        rows = rows.filter(Q(store_id__in=scope.store_ids) | Q(ambassador_id__in=scope.ambassador_ids))
+    rows = rows.order_by('ambassador__name')
     return Response({'month': month, 'results': [_target_payload(row) for row in rows]})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def ba_targets_upload(request):
+    """
+    POST multipart {file, month=YYYY-MM}: the store SKU target sheet
+    (Region | City | Store name | Brand | SKU Name | KG Count | Count | Grammage).
+    Each store's SKU targets are saved for that month on the store's BA(s).
+    """
+    from .shifts import parse_month
+    from .target_sheet import import_store_sku_targets
+
+    upload = request.FILES.get('file')
+    parsed = parse_month(request.data.get('month'))
+    if not upload:
+        return Response({'detail': 'Choose the target Excel file.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not parsed:
+        return Response({'detail': 'Choose the month (YYYY-MM).'}, status=status.HTTP_400_BAD_REQUEST)
+    result = import_store_sku_targets(upload, '%04d-%02d' % parsed, scope_for(request.user))
+    code = status.HTTP_201_CREATED if result['saved'] else status.HTTP_400_BAD_REQUEST
+    return Response(result, status=code)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def ba_targets_template(request):
+    """GET ?month=YYYY-MM: Excel template with the SKU column, one block per store and BA (user's city)."""
+    from django.http import HttpResponse
+
+    from .shifts import parse_month
+    from .target_sheet import build_ba_sku_template
+
+    parsed = parse_month(request.query_params.get('month')) or parse_month(timezone.localdate().strftime('%Y-%m'))
+    month = '%04d-%02d' % parsed
+    response = HttpResponse(
+        build_ba_sku_template(month, scope_for(request.user)),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    response['Content-Disposition'] = f'attachment; filename="Tapal_BA_Target_Template_{month}.xlsx"'
+    return response
 
 
 @api_view(['GET', 'PATCH'])
@@ -431,6 +516,8 @@ def platform_settings(request):
     if request.method == 'GET':
         return Response(PlatformSettingsSerializer(cfg).data)
 
+    if not scope_for(request.user).is_all:
+        return Response({'detail': 'Only the all-city Head Office can change this setting.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = PlatformSettingsSerializer(cfg, data=request.data, partial=True)
     serializer.is_valid(raise_exception=True)
     serializer.save(updated_by=request.user)

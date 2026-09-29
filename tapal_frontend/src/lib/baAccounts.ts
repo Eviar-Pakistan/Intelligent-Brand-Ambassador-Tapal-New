@@ -428,7 +428,7 @@ const SHEET = 'Ambassadors'
 const COLUMNS = [
   { key: 'name', header: 'Name *', width: 26 },
   { key: 'city', header: 'City', width: 16 },
-  { key: 'email', header: 'Email *', width: 28 },
+  { key: 'email', header: 'Email', width: 28 },
   { key: 'phone', header: 'Phone', width: 18 },
 ] as const
 
@@ -442,9 +442,9 @@ export async function downloadAmbassadorTemplate() {
     ['How to fill the ambassador template'],
     [],
     [`1. Add one ambassador per row on the "${SHEET}" sheet, starting on row 2. Do not change the header row.`],
-    ['2. Name and Email are required. City and Phone are optional. There is no password.'],
+    ['2. Only Name is required. City, Email and Phone are optional. There is no password.'],
     ['3. Each ambassador gets a personal account link after creation. They open that link to enter their account.'],
-    ['4. An email already used by another ambassador is skipped.'],
+    ['4. If you enter an email, it must be valid and not already used by another ambassador.'],
     ['5. Save the file, then upload it on the Ambassadors page. Account links can be downloaded after creation.'],
     [],
     COLUMNS.map((c) => c.header),
@@ -505,8 +505,7 @@ export async function parseAmbassadorFile(file: File): Promise<AmbassadorParseRe
     const phone = cell(r, 'phone')
     const problems: string[] = []
     if (!name) problems.push('Name is required')
-    if (!email) problems.push('Email is required')
-    else if (!validEmail(email)) problems.push(`Email looks invalid (found "${email}")`)
+    if (email && !validEmail(email)) problems.push(`Email looks invalid (found "${email}")`)
 
     if (email) {
       const key = normEmail(email)

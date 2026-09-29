@@ -412,7 +412,9 @@ class AmbassadorMonthTarget(models.Model):
     )
     store = models.ForeignKey(
         Store,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='month_targets',
     )
     month = models.CharField(max_length=7, help_text='YYYY-MM')

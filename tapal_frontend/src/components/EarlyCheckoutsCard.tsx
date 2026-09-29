@@ -10,8 +10,8 @@ export function EarlyCheckoutsCard({ storeIds }: { storeIds?: number[] }) {
         title="Early checkouts"
         subtitle={
           storeIds
-            ? 'BAs in your stores who left before 8:00 PM'
-            : 'BAs who left before the 8:00 PM shift end'
+            ? 'BAs in your stores who left before their shift end today'
+            : 'BAs who left before their shift end today'
         }
       />
       {rows.length === 0 ? (

@@ -7,6 +7,7 @@ from django.db.models import Count, Sum
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
+from .city_scope import ALL, CityScope
 from .models import Ambassador, Consumer, ShiftAssignment, Store, SurveyQuestion
 
 
@@ -36,8 +37,8 @@ def _distribution(answers: list[str], options: list[str] | None = None) -> list[
     return rows
 
 
-def build_intelligence_overview() -> dict:
-    stores = Store.objects.all()
+def build_intelligence_overview(scope: CityScope = ALL) -> dict:
+    stores = scope.stores(Store.objects.all(), 'id')
     store_count = stores.count()
     active_stores = stores.exclude(status=Store.Status.INACTIVE).count()
     if active_stores == 0:
@@ -46,7 +47,7 @@ def build_intelligence_overview() -> dict:
     footfall_total = stores.aggregate(total=Sum('today_footfall'))['total'] or 0
     bas_total = stores.aggregate(total=Sum('bas'))['total'] or 0
 
-    consumers = list(Consumer.objects.select_related('store').all())
+    consumers = list(scope.stores(Consumer.objects.select_related('store').all()))
     shoppers = len(consumers)
     with_answers = sum(1 for c in consumers if c.answers)
     with_feedback = sum(1 for c in consumers if c.feedback_rating is not None)
@@ -87,7 +88,7 @@ def build_intelligence_overview() -> dict:
     today = timezone.localdate()
     start = today - timedelta(days=6)
     daily = (
-        Consumer.objects.filter(created_at__date__gte=start)
+        scope.stores(Consumer.objects.filter(created_at__date__gte=start))
         .annotate(day=TruncDate('created_at'))
         .values('day')
         .annotate(count=Count('id'))
@@ -107,7 +108,7 @@ def build_intelligence_overview() -> dict:
         )
     # Fill conversion per day properly
     converted_daily = (
-        Consumer.objects.filter(created_at__date__gte=start)
+        scope.stores(Consumer.objects.filter(created_at__date__gte=start))
         .only('created_at', 'answers')
     )
     conv_by_day: dict = defaultdict(int)
@@ -206,12 +207,12 @@ def build_intelligence_overview() -> dict:
     }
 
 
-def build_store_map_pins() -> list[dict]:
+def build_store_map_pins(scope: CityScope = ALL) -> list[dict]:
     """Live map pins for Head Office Mapbox map."""
-    stores = list(Store.objects.all())
+    stores = list(scope.stores(Store.objects.all(), 'id'))
     consumer_counts = {
         row['store_id']: row['c']
-        for row in Consumer.objects.values('store_id').annotate(c=Count('id'))
+        for row in scope.stores(Consumer.objects.all()).values('store_id').annotate(c=Count('id'))
     }
 
     # Switch intent for conversion per store
@@ -220,7 +221,7 @@ def build_store_map_pins() -> list[dict]:
     yes_by_store: dict[int, int] = defaultdict(int)
     answered_by_store: dict[int, int] = defaultdict(int)
     if switch_id:
-        for c in Consumer.objects.only('store_id', 'answers'):
+        for c in scope.stores(Consumer.objects.all()).only('store_id', 'answers'):
             ans = c.answers if isinstance(c.answers, dict) else {}
             val = str(ans.get(switch_id, ''))
             if not val:
@@ -275,7 +276,7 @@ def build_store_map_pins() -> list[dict]:
     return pins
 
 
-def build_ba_leaderboard() -> dict:
+def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
     """
     Rank certified / deployed ambassadors using assessment score,
     this week's shifts & check-ins, and deployed-store conversion.
@@ -307,8 +308,9 @@ def build_ba_leaderboard() -> dict:
             yes_by_store[c.store_id] += 1
 
     ambassadors = list(
-        Ambassador.objects.filter(
-            status__in=(Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED)
+        scope.ambassadors(
+            Ambassador.objects.filter(status__in=(Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED)),
+            'id',
         )
         .select_related('store')
         .order_by('-overall_score', 'name')
@@ -394,14 +396,14 @@ def build_ba_leaderboard() -> dict:
     }
 
 
-def _operations_today() -> dict:
+def _operations_today(scope: CityScope = ALL) -> dict:
     """Attendance for today, from the daily rows made out of monthly shifts."""
     from .models import MonthlyShift
     from .shifts import ensure_daily_rows
 
     today = timezone.localdate()
     ensure_daily_rows(today)
-    rows = list(ShiftAssignment.objects.filter(date=today).exclude(ambassador_id=None))
+    rows = list(scope.stores(ShiftAssignment.objects.filter(date=today).exclude(ambassador_id=None)))
     scheduled = len({r.ambassador_id for r in rows})
     checked_in = {r.ambassador_id for r in rows if r.checked_in_at}
     on_shift = {r.ambassador_id for r in rows if r.checked_in_at and not r.checked_out_at}
@@ -411,9 +413,9 @@ def _operations_today() -> dict:
         if r.checked_in_at and not r.checked_out_at and r.check_in_lat is not None
     }
 
-    live_stores = Store.objects.exclude(status=Store.Status.INACTIVE).count()
+    live_stores = scope.stores(Store.objects.exclude(status=Store.Status.INACTIVE), 'id').count()
     covered = (
-        MonthlyShift.objects.filter(month=today.strftime('%Y-%m'), ambassador__isnull=False)
+        scope.stores(MonthlyShift.objects.filter(month=today.strftime('%Y-%m'), ambassador__isnull=False))
         .values('store_id')
         .distinct()
         .count()
@@ -430,8 +432,8 @@ def _operations_today() -> dict:
     }
 
 
-def _conversion_between(start, end, switch_id: str | None) -> float:
-    consumers = Consumer.objects.filter(created_at__date__gte=start, created_at__date__lte=end).only(
+def _conversion_between(start, end, switch_id: str | None, scope: CityScope = ALL) -> float:
+    consumers = scope.stores(Consumer.objects.filter(created_at__date__gte=start, created_at__date__lte=end)).only(
         'answers', 'feedback_rating'
     )
     total = converted = 0
@@ -494,23 +496,23 @@ def _recommendations(pins: list[dict], covered_store_ids: set[int]) -> list[dict
     return recs
 
 
-def build_campaign_metrics() -> dict:
-    """Everything the Head Office Campaign Metrics page shows, from live data."""
+def build_campaign_metrics(scope: CityScope = ALL) -> dict:
+    """Everything the Head Office Campaign Metrics page shows, from live data (one city when scoped)."""
     from .models import MonthlyShift
 
-    overview = build_intelligence_overview()
-    pins = build_store_map_pins()
-    operations = _operations_today()
+    overview = build_intelligence_overview(scope)
+    pins = build_store_map_pins(scope)
+    operations = _operations_today(scope)
 
     today = timezone.localdate()
     switch_q = SurveyQuestion.objects.filter(is_active=True, order=5).first()
     switch_id = str(switch_q.id) if switch_q else None
-    this_week = _conversion_between(today - timedelta(days=6), today, switch_id)
-    last_week = _conversion_between(today - timedelta(days=13), today - timedelta(days=7), switch_id)
-    shoppers_today = Consumer.objects.filter(created_at__date=today).count()
+    this_week = _conversion_between(today - timedelta(days=6), today, switch_id, scope)
+    last_week = _conversion_between(today - timedelta(days=13), today - timedelta(days=7), switch_id, scope)
+    shoppers_today = scope.stores(Consumer.objects.filter(created_at__date=today)).count()
 
     covered_ids = set(
-        MonthlyShift.objects.filter(month=today.strftime('%Y-%m'), ambassador__isnull=False).values_list(
+        scope.stores(MonthlyShift.objects.filter(month=today.strftime('%Y-%m'), ambassador__isnull=False)).values_list(
             'store_id', flat=True
         )
     )
@@ -533,7 +535,7 @@ def build_campaign_metrics() -> dict:
         'consumer_insight': first_question,
         'shopper_intelligence': overview['shopper_intelligence'],
         'operations': operations,
-        'top_bas': build_ba_leaderboard()['results'][:4],
+        'top_bas': build_ba_leaderboard(scope)['results'][:4],
         'recommendations': _recommendations(pins, covered_ids)[:4],
         'top_stores': top_stores,
     }

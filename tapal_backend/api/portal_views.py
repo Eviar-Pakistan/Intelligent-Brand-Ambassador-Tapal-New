@@ -52,6 +52,7 @@ from .models import (
     SurveyQuestion,
     UserInterception,
 )
+from .city_scope import ALL, CityScope, scope_for
 from .serializers import StoreSerializer
 
 WEEKDAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
@@ -79,15 +80,28 @@ class Scope:
     head_office: bool = False
     supervisor: Supervisor | None = None
     ambassador: Ambassador | None = None
+    city: CityScope = ALL
 
     @property
     def store_ids(self) -> set[int] | None:
-        """Stores this caller may see. None = every store (Head Office)."""
+        """Stores this caller may see. None = every store (all-city Head Office)."""
         if self.supervisor is not None:
             return set(self.supervisor.stores.values_list('id', flat=True))
         if self.head_office:
-            return None
+            return None if self.city.is_all else set(self.city.store_ids)
         return set()
+
+
+def _visible_supervisors(city: CityScope):
+    """Supervisors a Head Office user may manage: all, or those in / covering their city."""
+    qs = Supervisor.objects.all()
+    if city.is_all:
+        return qs
+    return qs.filter(Q(city__iexact=city.city) | Q(stores__id__in=city.store_ids)).distinct()
+
+
+def _stores_allowed(city: CityScope, store_ids) -> bool:
+    return all(city.allows_store(i) for i in store_ids if str(i).lstrip('-').isdigit())
 
 
 def _scope(request, *, allow_ba: bool = False) -> Scope | None:
@@ -96,11 +110,12 @@ def _scope(request, *, allow_ba: bool = False) -> Scope | None:
     if supervisor:
         return Scope(supervisor=supervisor)
     if _is_head_office(request):
+        city = scope_for(request.user)
         preview = (request.query_params.get('supervisor') or '').strip()
         if preview:
-            found = Supervisor.objects.filter(pk=preview).first()
-            return Scope(head_office=True, supervisor=found) if found else None
-        return Scope(head_office=True)
+            found = _visible_supervisors(city).filter(pk=preview).first()
+            return Scope(head_office=True, supervisor=found, city=city) if found else None
+        return Scope(head_office=True, city=city)
     if allow_ba:
         token = request.query_params.get('token') or (request.data.get('token') if hasattr(request, 'data') else None)
         ambassador = _ambassador_from_token(token)
@@ -222,11 +237,14 @@ def supervisors(request):
     """GET the supervisor list · POST {id?, name, phone, email, city, password, storeIds}."""
     if not _is_head_office(request):
         return _denied()
+    city = scope_for(request.user)
     if request.method == 'GET':
-        rows = Supervisor.objects.prefetch_related('stores').all()
+        rows = _visible_supervisors(city).prefetch_related('stores')
         return Response({'results': [supervisor_payload(s) for s in rows]})
 
     data = request.data
+    if not _stores_allowed(city, data.get('storeIds') or []):
+        return _forbidden('You can only assign stores in your city.')
     name = str(data.get('name') or '').strip()
     email = str(data.get('email') or '').strip()
     if not name or not email:
@@ -238,7 +256,7 @@ def supervisors(request):
         name=name,
         phone=str(data.get('phone') or '').strip(),
         email=email,
-        city=str(data.get('city') or '').strip(),
+        city=str(data.get('city') or '').strip() or city.city,
     )
     if data.get('password'):
         sup.set_password(str(data['password']))
@@ -257,7 +275,10 @@ def supervisor_detail(request, pk):
     """PATCH {name?, phone?, email?, city?, password?, storeIds?} · DELETE."""
     if not _is_head_office(request):
         return _denied()
-    sup = get_object_or_404(Supervisor, pk=pk)
+    city = scope_for(request.user)
+    sup = get_object_or_404(_visible_supervisors(city), pk=pk)
+    if 'storeIds' in request.data and not _stores_allowed(city, request.data.get('storeIds') or []):
+        return _forbidden('You can only assign stores in your city.')
     if request.method == 'DELETE':
         sup.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -434,7 +455,7 @@ def supervisor_overviews(request):
     if not _is_head_office(request):
         return _denied()
     rows = []
-    for sup in Supervisor.objects.all():
+    for sup in _visible_supervisors(scope_for(request.user)):
         data = build_supervisor_overview(sup, request)
         rows.append({key: data[key] for key in ('supervisor', 'teamConversion', 'coverage', 'todayFootfall')} | {
             'storeCount': len(data['stores']),
@@ -533,15 +554,19 @@ def journey_plans(request):
         qs = JourneyPlan.objects.all()
         if scope.supervisor:
             qs = qs.filter(supervisor=scope.supervisor)
+        elif not scope.city.is_all:
+            qs = qs.filter(supervisor__in=_visible_supervisors(scope.city))
         return Response({'results': [_plan_payload(p) for p in qs]})
 
     if not scope.head_office:
         return _forbidden()
-    sup = Supervisor.objects.filter(pk=request.data.get('supervisorId')).first()
+    sup = _visible_supervisors(scope.city).filter(pk=request.data.get('supervisorId')).first()
     week_start = _monday(request.data.get('weekStart'))
     stops = _clean_stops(request.data.get('stops'))
     if not sup or not week_start or stops is None:
         return Response({'detail': 'Give a supervisor, a week and the stops.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not _stores_allowed(scope.city, [s['storeId'] for s in stops]):
+        return _forbidden('You can only plan visits to stores in your city.')
     known = set(Store.objects.filter(id__in=[s['storeId'] for s in stops]).values_list('id', flat=True))
     if any(s['storeId'] not in known for s in stops):
         return Response({'detail': 'One of the stores no longer exists.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -588,6 +613,8 @@ def journey_visits(request):
         qs = JourneyVisit.objects.all()
         if scope.supervisor:
             qs = qs.filter(supervisor=scope.supervisor)
+        elif scope.store_ids is not None:
+            qs = qs.filter(store_id__in=scope.store_ids)
         return Response({'results': [_visit_payload(v, request) for v in qs]})
 
     sup = scope.supervisor
@@ -744,7 +771,7 @@ def complaint_detail(request, pk):
     if not _is_head_office(request):
         return _denied()
     complaint = _complaint_by_id(pk)
-    if not complaint:
+    if not complaint or not scope_for(request.user).allows_store(complaint.store_id):
         return Response({'detail': 'Complaint not found.'}, status=status.HTTP_404_NOT_FOUND)
     new_status = request.data.get('status')
     if new_status is not None:
@@ -790,6 +817,10 @@ def _ba_visible(qs, scope: Scope, store_field='store'):
     """Head Office sees all; a supervisor sees their stores; a BA sees their own."""
     if scope.ambassador:
         return qs.filter(ambassador=scope.ambassador)
+    if scope.supervisor is None and scope.head_office and not scope.city.is_all:
+        return qs.filter(
+            Q(**{f'{store_field}_id__in': scope.city.store_ids}) | Q(ambassador_id__in=scope.city.ambassador_ids)
+        )
     if scope.store_ids is not None:
         return qs.filter(**{f'{store_field}_id__in': scope.store_ids})
     return qs
@@ -947,6 +978,8 @@ def kpi_config(request):
     if request.method == 'PUT':
         if not _is_head_office(request):
             return _denied()
+        if not scope_for(request.user).is_all:
+            return _forbidden('Incentive settings apply to every city; ask Head Office to change them.')
         cfg.config = KpiConfig.normalize(request.data)
         cfg.updated_by = request.user
         cfg.save()

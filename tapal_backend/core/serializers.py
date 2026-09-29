@@ -18,6 +18,7 @@ class UserSerializer(serializers.ModelSerializer):
             'user_type',
             'user_type_label',
             'phone',
+            'city',
             'is_staff',
             'is_active',
         )

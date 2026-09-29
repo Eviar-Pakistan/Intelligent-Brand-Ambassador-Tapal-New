@@ -1,6 +1,16 @@
 import { useSyncExternalStore } from 'react'
+import { djangoFetch, djangoToken } from './djangoApi'
 
-export type TargetLine = { sku: string; qty: number }
+/** One SKU of a store target. qty is kg; from the store SKU sheet also brand, grammage (kg per pack) and packs. */
+export type TargetLine = {
+  sku: string
+  qty: number
+  brand?: string
+  grammage?: number
+  count?: number | null
+  /** Sales kg for this SKU, when recorded */
+  sales?: number | null
+}
 
 export type BaMonthTarget = {
   baId: string
@@ -129,15 +139,9 @@ export function setBaMonthTargets(rows: BaMonthTarget[]) {
   commit([...rows.map((row) => ({ ...row, baName: row.baName.trim() })), ...kept])
 }
 
-export type TargetPerson = { id: string; name: string }
+export type TargetPerson = { id: string; name: string; baCode?: string }
 
 const TARGET_SHEET = 'Targets'
-const TARGET_COLUMNS = [
-  { key: 'name', header: 'Name *', width: 26 },
-  { key: 'month', header: 'Month *', width: 14 },
-  { key: 'target kg', header: 'Target Kg *', width: 14 },
-  { key: 'sales kg', header: 'Sales Kg', width: 14 },
-] as const
 
 const MONTH_NAMES = [
   'january',
@@ -154,41 +158,22 @@ const MONTH_NAMES = [
   'december',
 ]
 
-/** Downloads a template prefilled with every ambassador for the given month. */
-export async function downloadTargetTemplate(people: TargetPerson[], month = currentMonthKey()) {
-  const XLSX = await import('xlsx')
-  const saved = targets.filter((row) => row.month === month)
-  const body = [...people]
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((person) => {
-      const row = saved.find((item) => item.baId === person.id)
-      return [person.name, month, row ? row.targetKg : '', row ? row.salesKg : '']
-    })
-  const sheet = XLSX.utils.aoa_to_sheet([TARGET_COLUMNS.map((column) => column.header), ...body])
-  sheet['!cols'] = TARGET_COLUMNS.map((column) => ({ wch: column.width }))
-  for (let index = 0; index < body.length; index += 1) {
-    const cell = sheet[`B${index + 2}`]
-    if (cell) cell.z = '@'
-  }
-
-  const help = XLSX.utils.aoa_to_sheet([
-    ['How to fill the target template'],
-    [],
-    [`1. Use the "${TARGET_SHEET}" sheet. One row is one ambassador for one month. Do not change the header row.`],
-    ['2. Month must be YYYY-MM, for example 2026-09. Copy a row to add another month.'],
-    ['3. Target Kg is required on each row you want to save. A row with no Target Kg is left unchanged.'],
-    ['4. Sales Kg can be left blank to keep the sales already saved (or 0 if none). The name must match an ambassador.'],
-    ['5. Save the file, then upload it with Upload targets.'],
-    [],
-    TARGET_COLUMNS.map((column) => column.header),
-    ['Ambassador name', '2026-09', 120, 96],
-  ])
-  help['!cols'] = [{ wch: 28 }, { wch: 88 }, { wch: 18 }, { wch: 16 }]
-
-  const book = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(book, sheet, TARGET_SHEET)
-  XLSX.utils.book_append_sheet(book, help, 'Instructions')
-  XLSX.writeFile(book, 'Tapal_BA_Target_Template.xlsx')
+/**
+ * Downloads the target template for a month: every BA (by BA Code) x every SKU, with the
+ * targets already saved for that month filled in. Built on the server.
+ */
+export async function downloadTargetTemplate(month = currentMonthKey()) {
+  if (!djangoToken()) throw new Error('Sign in to Head Office to download the template.')
+  const response = await djangoFetch(`/api/ba-targets/template/?month=${encodeURIComponent(month)}`)
+  if (!response.ok) throw new Error('The template could not be downloaded.')
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `Tapal_BA_Target_Template_${month}.xlsx`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }
 
 export type TargetParseResult = { rows: BaMonthTarget[]; errors: string[] }
@@ -227,9 +212,12 @@ function parseKg(value: unknown) {
   return Number.isFinite(number) ? number : null
 }
 
-const normName = (name: string) => name.trim().toLowerCase().replace(/\s+/g, ' ')
 
-/** Reads a filled target template. Valid rows are returned even when others have problems. */
+/**
+ * Reads a filled target template: one row per BA per SKU (BA Code, Month, Brand, SKU Name, Target Kg,
+ * Sales Kg, Grammage). Rows are grouped so each BA gets all their SKU targets for the month.
+ * Valid BAs are returned even when other rows have problems.
+ */
 export async function parseTargetFile(file: File, people: TargetPerson[]): Promise<TargetParseResult> {
   const XLSX = await import('xlsx')
   let table: unknown[][]
@@ -241,71 +229,100 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
     return { rows: [], errors: ['This file could not be read. Please upload the downloaded .xlsx template.'] }
   }
 
-  const headerAt = table.findIndex((row) => row.some((cell) => targetHeaderKey(cell) === 'name'))
+  const headerAt = table.findIndex((row) => row.some((cell) => targetHeaderKey(cell) === 'ba code'))
   if (headerAt === -1) {
-    return { rows: [], errors: ['This is not the target template (no "Name" column). Download the template and fill that.'] }
+    return { rows: [], errors: ['This is not the target template (no "BA Code" column). Download the template and fill that.'] }
   }
   const columns = new Map<string, number>()
   table[headerAt].forEach((header, index) => columns.set(targetHeaderKey(header), index))
-  if (!columns.has('target kg') || !columns.has('month')) {
-    return { rows: [], errors: ['The template needs Name, Month, and Target Kg columns. Download a fresh template.'] }
+  const skuColumn = columns.has('sku name') ? 'sku name' : 'sku'
+  if (!columns.has('target kg') || !columns.has('month') || !columns.has(skuColumn)) {
+    return { rows: [], errors: ['The template needs BA Code, Month, SKU Name and Target Kg columns. Download a fresh template.'] }
   }
 
   const cell = (row: unknown[], header: string) => row[columns.get(header) ?? -1]
-  const byName = new Map<string, TargetPerson[]>()
-  for (const person of people) {
-    const key = normName(person.name)
-    byName.set(key, [...(byName.get(key) ?? []), person])
-  }
+  const byCode = new Map(
+    people.filter((p) => p.baCode).map((person) => [person.baCode!.trim().toUpperCase(), person] as const),
+  )
 
-  const rows: BaMonthTarget[] = []
+  const grouped = new Map<string, BaMonthTarget>()
   const errors: string[] = []
-  const seen = new Set<string>()
+  const seenSku = new Set<string>()
 
   table.slice(headerAt + 1).forEach((row, index) => {
     const rowNo = headerAt + index + 2
     if (row.every((value) => String(value ?? '').trim() === '')) return
-    const name = String(cell(row, 'name') ?? '').trim()
+    const code = String(cell(row, 'ba code') ?? '').trim().toUpperCase()
+    const sku = String(cell(row, skuColumn) ?? '').trim()
     const month = parseMonthCell(cell(row, 'month'), (value) => XLSX.SSF.parse_date_code(value))
     const target = parseKg(cell(row, 'target kg'))
     const sales = parseKg(columns.has('sales kg') ? cell(row, 'sales kg') : '')
-    if (target === null && sales === null) return
+    if (target === null) return // no target on this SKU: skipped
 
     const problems: string[] = []
-    if (!name) problems.push('Name is required')
+    if (!code) problems.push('BA Code is required')
+    if (!sku) problems.push('SKU Name is required')
     if (!month) problems.push('Month must be YYYY-MM, for example 2026-09')
-    if (target === null) problems.push('Target Kg is required')
-    else if (target < 0) problems.push('Target Kg cannot be negative')
+    if (target < 0) problems.push('Target Kg cannot be negative')
     if (sales !== null && sales < 0) problems.push('Sales Kg cannot be negative')
-
-    const matches = name ? (byName.get(normName(name)) ?? []) : []
-    if (name && matches.length === 0) problems.push(`No ambassador named "${name}"`)
-    if (matches.length > 1) problems.push(`More than one ambassador is named "${name}"`)
-
-    const person = matches.length === 1 ? matches[0] : null
-    const key = person && month ? `${person.id}:${month}` : ''
-    if (key && seen.has(key)) problems.push('Duplicate of an earlier row for this ambassador and month')
-    if (key) seen.add(key)
+    const person = code ? byCode.get(code) : undefined
+    if (code && !person) problems.push(`No ambassador with BA code ${code}`)
+    const skuKey = `${code}:${month}:${sku.toLowerCase()}`
+    if (code && sku && month && seenSku.has(skuKey)) problems.push('This SKU is already listed for this BA and month')
+    seenSku.add(skuKey)
 
     if (problems.length > 0) {
-      errors.push(`Row ${rowNo}${name ? ` (${name})` : ''}: ${problems.join('; ')}.`)
+      errors.push(`Row ${rowNo}${code ? ` (${code}${sku ? ` · ${sku}` : ''})` : ''}: ${problems.join('; ')}.`)
       return
     }
-    if (!person || !month || target === null) return
-    const existing = targets.find((item) => item.baId === person.id && item.month === month)
-    rows.push({
-      baId: person.id,
-      baName: person.name,
-      month,
-      targetKg: target,
-      salesKg: sales === null ? (existing?.salesKg ?? 0) : sales,
+    if (!person || !month) return
+    const key = `${person.id}:${month}`
+    const entry =
+      grouped.get(key) ??
+      ({ baId: person.id, baName: person.name, baCode: code, month, targetKg: 0, salesKg: 0, lines: [] } as BaMonthTarget)
+    const grammage = parseKg(columns.has('grammage') ? cell(row, 'grammage') : '')
+    entry.lines!.push({
+      sku,
+      brand: String(columns.has('brand') ? (cell(row, 'brand') ?? '') : '').trim(),
+      qty: target,
+      sales,
+      grammage: grammage ?? undefined,
+      count: grammage ? Math.round((target / grammage) * 100) / 100 : null,
     })
+    entry.targetKg = Math.round((entry.targetKg + target) * 100) / 100
+    entry.salesKg = Math.round((entry.salesKg + (sales ?? 0)) * 100) / 100
+    grouped.set(key, entry)
   })
 
+  const rows = [...grouped.values()]
   if (rows.length === 0 && errors.length === 0) {
-    errors.push('No targets found. Enter Target Kg on each row you want to save.')
+    errors.push('No targets found. Enter Target Kg on the SKU rows you want to save.')
   }
   return { rows, errors }
+}
+
+/** Saves SKU targets per BA on the server, then reloads them. Returns what the server saved and skipped. */
+export async function saveBaTargetsToServer(rows: BaMonthTarget[]) {
+  if (!djangoToken()) throw new Error('Sign in to Head Office to save targets.')
+  const response = await djangoFetch('/api/ba-targets/', {
+    method: 'POST',
+    body: JSON.stringify({
+      rows: rows.map((row) => ({
+        baCode: row.baCode,
+        month: row.month,
+        lines: (row.lines ?? []).map(({ sku, brand, qty, sales, grammage }) => ({ sku, brand, qty, sales, grammage })),
+      })),
+    }),
+  })
+  const data = (await response.json().catch(() => ({}))) as {
+    saved?: { baCode: string; month: string }[]
+    errors?: string[]
+    detail?: string
+  }
+  if (!response.ok && !data.saved?.length) throw new Error(data.errors?.[0] || data.detail || 'The targets could not be saved.')
+  const { syncBaTargets } = await import('./djangoSync')
+  for (const month of new Set(rows.map((row) => row.month))) await syncBaTargets(month)
+  return { saved: data.saved ?? [], errors: data.errors ?? [] }
 }
 
 export function targetForBa(baId: string, month: string, list: BaMonthTarget[]) {

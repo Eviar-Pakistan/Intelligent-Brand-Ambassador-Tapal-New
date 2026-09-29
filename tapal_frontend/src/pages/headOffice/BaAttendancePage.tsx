@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Download } from 'lucide-react'
+import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
 import { Button, Card, PageHeader, SearchInput, StatusBadge, TableScroll, Tabs } from '../../components/ui'
 import { djangoFetch, djangoToken } from '../../lib/djangoApi'
 
@@ -218,6 +219,8 @@ export function BaAttendancePage() {
           </Card>
         ))}
       </div>
+
+      <EarlyCheckoutsCard />
 
       <div className="flex flex-wrap items-center gap-3">
         <SearchInput placeholder="Search BA, code or store..." value={query} onChange={(e) => setQuery(e.target.value)} />

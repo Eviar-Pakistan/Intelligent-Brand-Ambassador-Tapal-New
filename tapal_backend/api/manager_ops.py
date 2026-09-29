@@ -40,10 +40,13 @@ def _attendance_status(shift: ShiftAssignment) -> str:
     return 'Scheduled'
 
 
-def build_manager_overview() -> dict:
+def build_manager_overview(scope=None) -> dict:
+    from .city_scope import ALL
+
+    scope = scope or ALL
     today = timezone.localdate()
 
-    stores_qs = Store.objects.annotate(
+    stores_qs = scope.stores(Store.objects.all(), 'id').annotate(
         shopper_count_ann=Count('consumers', distinct=True),
         assigned_bas_ann=Count(
             'ambassadors',
@@ -66,7 +69,7 @@ def build_manager_overview() -> dict:
 
     ensure_daily_rows(today)
     shifts_today = list(
-        ShiftAssignment.objects.filter(date=today)
+        scope.stores(ShiftAssignment.objects.filter(date=today))
         .exclude(ambassador_id=None)
         .select_related('store', 'ambassador')
         .order_by('checked_in_at', 'shift_label', 'id')
@@ -102,9 +105,8 @@ def build_manager_overview() -> dict:
 
     # Also surface deployed BAs with no shift today (so manager sees gaps)
     scheduled_ids = {row['ambassador_id'] for row in live_bas if row['ambassador_id']}
-    deployed = Ambassador.objects.filter(
-        status=Ambassador.Status.DEPLOYED,
-        store_id__isnull=False,
+    deployed = scope.stores(
+        Ambassador.objects.filter(status=Ambassador.Status.DEPLOYED, store_id__isnull=False)
     ).select_related('store')
     for ba in deployed:
         if ba.id in scheduled_ids:
@@ -127,7 +129,7 @@ def build_manager_overview() -> dict:
             }
         )
 
-    shoppers_today = Consumer.objects.filter(created_at__date=today).count()
+    shoppers_today = scope.stores(Consumer.objects.filter(created_at__date=today)).count()
 
     store_rows = []
     for s in stores:

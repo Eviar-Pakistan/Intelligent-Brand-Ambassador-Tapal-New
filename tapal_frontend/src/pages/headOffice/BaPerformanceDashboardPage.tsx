@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
 import { RotateCcw, Search } from 'lucide-react'
-import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
 import { Card, CardHeader, cn, KpiCard, TableScroll } from '../../components/ui'
 import {
   aggregateBaPerformance,
@@ -666,7 +665,6 @@ export function BaPerformanceDashboardPage() {
 
   return (
     <div className="space-y-5">
-      <EarlyCheckoutsCard />
       <Card className="!p-3 sm:!p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>

@@ -28,6 +28,11 @@ class AbstractCoreUser(AbstractUser):
         help_text='1=Head Office, 2=Admin, 3=Store Manager, 4=Brand Ambassador',
     )
     phone = models.CharField(max_length=20, blank=True)
+    city = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text='Head Office only: limits this user to one city (e.g. Lahore). Blank = every city.',
+    )
     is_active_user = models.BooleanField(
         default=True,
         help_text='Soft-active flag independent of Django is_active.',

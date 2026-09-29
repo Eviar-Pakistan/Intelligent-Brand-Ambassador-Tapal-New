@@ -104,7 +104,7 @@ def _overlaps(a_start: time, a_end: time, b_start: time | None, b_end: time | No
     return a_start < b_end and b_start < a_end
 
 
-def create_month_shifts(rows: list[dict], user=None) -> dict:
+def create_month_shifts(rows: list[dict], user=None, scope=None) -> dict:
     """
     Create one monthly shift per row {ba_code, store_code, start_time, end_time, month}.
 
@@ -123,7 +123,10 @@ def create_month_shifts(rows: list[dict], user=None) -> dict:
     codes = {str(r.get('ba_code') or '').strip().upper() for r in rows}
     store_codes = {str(r.get('store_code') or '').strip().upper() for r in rows}
     ambassadors = {a.ba_code.upper(): a for a in Ambassador.objects.filter(ba_code__in=codes - {''})}
-    stores = {s.store_code.upper(): s for s in Store.objects.filter(store_code__in=store_codes - {''})}
+    store_qs = Store.objects.filter(store_code__in=store_codes - {''})
+    if scope is not None:
+        store_qs = scope.stores(store_qs, 'id')  # a city user only schedules their city's stores
+    stores = {s.store_code.upper(): s for s in store_qs}
 
     for index, row in enumerate(rows):
         label = row.get('row') or index + 1
@@ -306,7 +309,7 @@ def attendance_status(row, today: date | None = None) -> str:
 MAX_ATTENDANCE_DAYS = 62
 
 
-def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_id=None) -> dict:
+def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_id=None, scope=None) -> dict:
     """Daily attendance rows (made from monthly shifts) with a status for each, plus totals."""
     from .models import ShiftAssignment
 
@@ -325,6 +328,8 @@ def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_i
         .select_related('store', 'ambassador')
         .order_by('-date', 'ambassador__name', 'start_time', 'id')
     )
+    if scope is not None:
+        qs = scope.stores(qs)
     if ambassador_id:
         qs = qs.filter(ambassador_id=ambassador_id)
     if store_id:

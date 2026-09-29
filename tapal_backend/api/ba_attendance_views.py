@@ -144,11 +144,6 @@ def ba_today_shift(request):
     ambassador = _ambassador_from_token(request.query_params.get('token'))
     if not ambassador:
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
-    if ambassador.status not in (Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED):
-        return Response(
-            {'detail': 'Complete certification before checking in to shifts.'},
-            status=status.HTTP_403_FORBIDDEN,
-        )
     shift = _today_shift_for(ambassador)
     return Response(serialize_ba_shift(shift, ambassador))
 
@@ -160,8 +155,6 @@ def ba_submit_complaint(request):
     ambassador = _ambassador_from_token(request.data.get('token'))
     if not ambassador:
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
-    if ambassador.status not in (Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED):
-        return Response({'detail': 'Complete certification before submitting a complaint.'}, status=status.HTTP_403_FORBIDDEN)
     try:
         store_id = int(request.data.get('store_id'))
     except (TypeError, ValueError):
@@ -198,11 +191,6 @@ def ba_check_in(request):
     ambassador = _ambassador_from_token(request.data.get('token'))
     if not ambassador:
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
-    if ambassador.status not in (Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED):
-        return Response(
-            {'detail': 'Complete certification before checking in.'},
-            status=status.HTTP_403_FORBIDDEN,
-        )
 
     shift = _today_shift_for(ambassador)
     if not shift:
@@ -317,11 +305,6 @@ def ba_leaderboard(request):
     ambassador = _ambassador_from_token(request.query_params.get('token'))
     if not ambassador:
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
-    if ambassador.status not in (Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED):
-        return Response(
-            {'detail': 'Complete certification to view the leaderboard.'},
-            status=status.HTTP_403_FORBIDDEN,
-        )
     data = build_ba_leaderboard()
     data['me_id'] = ambassador.id
     return Response(data)

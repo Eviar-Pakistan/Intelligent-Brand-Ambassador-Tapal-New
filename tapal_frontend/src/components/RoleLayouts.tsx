@@ -32,16 +32,12 @@ const baTabs = [
 
 export function BaShell() {
   const navigate = useNavigate()
-  const { pathname } = useLocation()
   const { brand } = useBrand()
   const { account } = useBaSession()
 
   if (!account) return <Navigate to="/login" replace />
 
-  // A newly created BA can only use Training until they pass the assessment
-  const onboarding = account.status !== 'Certified'
-  if (onboarding && pathname !== '/ba/training') return <Navigate to="/ba/training" replace />
-  const locked = onboarding
+  // Every BA can use the whole app, certified or not. Training stays open for (re)training.
 
   return (
     <BaShiftProvider>
@@ -75,18 +71,7 @@ export function BaShell() {
 
         <nav className="safe-bottom fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 backdrop-blur">
           <div className="mx-auto flex h-[3.75rem] w-full max-w-lg items-stretch px-1 pb-[env(safe-area-inset-bottom)]">
-            {baTabs.map(({ to, label, icon: Icon, end }) =>
-              locked && to !== '/ba/training' ? (
-                <span
-                  key={to}
-                  aria-disabled
-                  title="Complete the training assessment to unlock"
-                  className="flex min-w-0 flex-1 cursor-not-allowed flex-col items-center justify-center gap-1 px-1 text-[11px] font-semibold text-slate-300"
-                >
-                  <Icon size={20} strokeWidth={2.25} />
-                  <span className="leading-none">{label}</span>
-                </span>
-              ) : (
+            {baTabs.map(({ to, label, icon: Icon, end }) => (
               <NavLink
                 key={to}
                 to={to}
@@ -101,8 +86,7 @@ export function BaShell() {
                 <Icon size={20} strokeWidth={2.25} />
                 <span className="leading-none">{label}</span>
               </NavLink>
-              ),
-            )}
+            ))}
           </div>
         </nav>
       </div>

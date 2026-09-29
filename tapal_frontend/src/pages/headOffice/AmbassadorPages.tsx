@@ -29,17 +29,26 @@ import {
   type BaAccount,
 } from '../../lib/baAccounts'
 import { AssessmentReport } from '../ba/AssessmentReport'
+import {
+  describeSkuUpload,
+  isStoreSkuSheet,
+  uploadStoreSkuTargets,
+  type StoreSkuUploadResult,
+} from '../../lib/storeSkuTargets'
 import { BaShiftsCard } from './BaShiftsCard'
 import { ShiftPlanModal } from './ShiftPlanModal'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
 import {
   currentMonthKey,
   downloadTargetTemplate,
+  formatTargetMonth,
   parseTargetFile,
+  saveBaTargetsToServer,
   setBaMonthTarget,
   setBaMonthTargets,
   targetForBa,
   useBaTargets,
+  type BaMonthTarget,
   type TargetParseResult,
   type TargetPerson,
 } from '../../lib/baTargets'
@@ -147,7 +156,8 @@ function CreateAmbassadorModal({
     e.preventDefault()
     if (busy) return
     if (!form.name.trim()) return setError('Name is required.')
-    if (!validEmail(form.email)) return setError('Enter a valid email.')
+    // Email is optional; when given it must be valid and not used by another ambassador.
+    if (form.email.trim() && !validEmail(form.email)) return setError('Enter a valid email.')
     if (baEmailInUse(form.email)) return setError('Another ambassador already uses this email.')
     setBusy(true)
     try {
@@ -177,7 +187,7 @@ function CreateAmbassadorModal({
           <input value={form.city} onChange={set('city')} className={modalFieldClass} />
         </label>
         <label className="block text-sm">
-          <span className="mb-1 block font-medium text-slate-700">Email *</span>
+          <span className="mb-1 block font-medium text-slate-700">Email</span>
           <input type="email" value={form.email} onChange={set('email')} className={modalFieldClass} />
         </label>
         <label className="block text-sm">
@@ -238,7 +248,7 @@ function BulkAmbassadorModal({
         <div className="space-y-2">
           <div className="font-semibold text-slate-900">1. Download the template</div>
           <p className="text-xs text-slate-500">
-            Fill in one ambassador per row. Name and Email are required. Each row gets its own BA code when you create them.
+            Fill in one ambassador per row. Only Name is required. Each row gets its own BA code when you create them.
           </p>
           <Button variant="secondary" onClick={() => void downloadAmbassadorTemplate()}>
             <Download size={14} /> Download ambassador template
@@ -572,8 +582,8 @@ export function AmbassadorsPage() {
   )
 }
 
-function targetPeople(accounts: { id: string; name: string }[]): TargetPerson[] {
-  return accounts.map((account) => ({ id: account.id, name: account.name }))
+function targetPeople(accounts: { id: string; name: string; baCode?: string }[]): TargetPerson[] {
+  return accounts.map((account) => ({ id: account.id, name: account.name, baCode: account.baCode }))
 }
 
 /** Download the target template, fill Target Kg, then upload it to save many months at once. */
@@ -585,11 +595,19 @@ export function BulkTargetModal({ open, onClose }: { open: boolean; onClose: () 
   const [fileName, setFileName] = useState('')
   const [result, setResult] = useState<TargetParseResult | null>(null)
   const [saved, setSaved] = useState(0)
+  // Store SKU sheet (Store name | SKU Name | KG Count …): saved on the server for the store's BA(s)
+  const [skuFile, setSkuFile] = useState<File | null>(null)
+  const [skuMonth, setSkuMonth] = useState(currentMonthKey)
+  const [skuResult, setSkuResult] = useState<StoreSkuUploadResult | null>(null)
+  const [skuError, setSkuError] = useState<string | null>(null)
 
   function close() {
     setResult(null)
     setFileName('')
     setSaved(0)
+    setSkuFile(null)
+    setSkuResult(null)
+    setSkuError(null)
     onClose()
   }
 
@@ -598,7 +616,44 @@ export function BulkTargetModal({ open, onClose }: { open: boolean; onClose: () 
     setBusy(true)
     setSaved(0)
     setFileName(file.name)
-    setResult(await parseTargetFile(file, people))
+    setSkuResult(null)
+    setSkuError(null)
+    if (await isStoreSkuSheet(file)) {
+      setResult(null)
+      setSkuFile(file)
+    } else {
+      setSkuFile(null)
+      setResult(await parseTargetFile(file, people))
+    }
+    setBusy(false)
+  }
+
+  async function saveTargetRows(rows: BaMonthTarget[]) {
+    setBusy(true)
+    setSkuError(null)
+    try {
+      const outcome = await saveBaTargetsToServer(rows)
+      setBaMonthTargets(rows.filter((row) => outcome.saved.some((s) => s.baCode === row.baCode && s.month === row.month)))
+      setSaved(outcome.saved.length)
+      setResult(outcome.errors.length ? { rows: [], errors: outcome.errors } : null)
+    } catch (err) {
+      setSkuError(err instanceof Error ? err.message : 'The targets could not be saved.')
+    }
+    setBusy(false)
+  }
+
+  async function saveSkuTargets() {
+    if (!skuFile) return
+    setBusy(true)
+    setSkuError(null)
+    try {
+      const uploaded = await uploadStoreSkuTargets(skuFile, skuMonth)
+      setSkuResult(uploaded)
+      const { syncBaTargets } = await import('../../lib/djangoSync')
+      await syncBaTargets(skuMonth)
+    } catch (err) {
+      setSkuError(err instanceof Error ? err.message : 'The targets could not be saved.')
+    }
     setBusy(false)
   }
 
@@ -608,10 +663,18 @@ export function BulkTargetModal({ open, onClose }: { open: boolean; onClose: () 
         <div className="space-y-2">
           <div className="font-semibold text-slate-900">1. Download the template</div>
           <p className="text-xs text-slate-500">
-            The file lists every ambassador for this month. Enter Target Kg, then save the file. The Instructions sheet
-            explains Month and Sales Kg.
+            One row per BA and SKU, identified by BA Code. Fill Target Kg on the SKUs each BA should sell (a BA can
+            have many SKU targets), then upload it. Sales Kg is optional. You can also upload a store SKU target sheet
+            (Store name, SKU Name, KG Count): each store's targets go to that store's BA.
           </p>
-          <Button variant="secondary" onClick={() => void downloadTargetTemplate(people)}>
+          <Button
+            variant="secondary"
+            onClick={() =>
+              void downloadTargetTemplate().catch((err) =>
+                setSkuError(err instanceof Error ? err.message : 'The template could not be downloaded.'),
+              )
+            }
+          >
             <Download size={14} /> Download target template
           </Button>
         </div>
@@ -642,6 +705,64 @@ export function BulkTargetModal({ open, onClose }: { open: boolean; onClose: () 
           </div>
         )}
 
+        {skuError && !skuFile && (
+          <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{skuError}</p>
+        )}
+
+        {skuFile && (
+          <div className="space-y-3 border-t border-slate-100 pt-4">
+            <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+              SKU target sheet for {formatTargetMonth(skuMonth)}. Each store's KG targets go to the BA in its BA Code
+              column (or every BA of the store when BA Code is empty).
+            </div>
+            <label className="block text-sm">
+              <span className="mb-1.5 block font-medium text-slate-700">Month</span>
+              <input
+                type="month"
+                value={skuMonth}
+                onChange={(e) => {
+                  setSkuMonth(e.target.value)
+                  setSkuResult(null)
+                }}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
+              />
+            </label>
+            {skuResult && skuResult.saved.length > 0 && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-800">
+                <div className="font-semibold">
+                  Saved for {skuResult.saved.length} {skuResult.saved.length === 1 ? 'BA' : 'BAs'}:
+                </div>
+                <ul className="mt-1 space-y-0.5 text-xs">
+                  {skuResult.saved.map((row) => (
+                    <li key={`${row.baCode}-${row.store}`}>
+                      {row.baName} {row.baCode && <span className="font-mono">({row.baCode})</span>} · {row.store} ·{' '}
+                      {row.targetKg.toLocaleString()} kg
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {skuResult && describeSkuUpload(skuResult).length > 0 && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs text-rose-800">
+                <div className="font-semibold">Not saved:</div>
+                <ul className="mt-1.5 list-disc space-y-0.5 pl-4">
+                  {describeSkuUpload(skuResult).slice(0, 8).map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {skuError && (
+              <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{skuError}</p>
+            )}
+            {!skuResult?.saved.length && (
+              <Button className="w-full" disabled={busy || !skuMonth} onClick={() => void saveSkuTargets()}>
+                {busy ? 'Saving…' : 'Save targets for BAs'}
+              </Button>
+            )}
+          </div>
+        )}
+
         {result && saved === 0 && (
           <div className="space-y-3 border-t border-slate-100 pt-4">
             {result.rows.length > 0 && (
@@ -667,11 +788,8 @@ export function BulkTargetModal({ open, onClose }: { open: boolean; onClose: () 
             {result.rows.length > 0 && (
               <Button
                 className="w-full"
-                onClick={() => {
-                  setBaMonthTargets(result.rows)
-                  setSaved(result.rows.length)
-                  setResult(null)
-                }}
+                disabled={busy}
+                onClick={() => void saveTargetRows(result.rows)}
               >
                 Save {result.rows.length} {result.rows.length === 1 ? 'target' : 'targets'}
               </Button>

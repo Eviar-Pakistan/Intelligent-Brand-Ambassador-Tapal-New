@@ -430,12 +430,18 @@ def shopper_update_consumer_feedback(request, pk):
 
 def shopper_qr_redirect(request, slug):
     """
-    Public QR landing URL: http://localhost:8000/shopper/<slug>
-    Redirects into the frontend shopper experience for that store.
+    A store's QR link (/shopper/<slug>?store=…&city=…) when the web server hands it to Django instead
+    of the React app. Send the shopper to the app's front page with the full path in `go`; the app
+    then opens /shopper/<slug> itself (redirecting straight to /shopper/<slug> could loop back here).
+    Also covers a refresh on /shopper/survey etc.
     """
-    store = get_object_or_404(Store, qr_slug=slug)
-    frontend = getattr(settings, 'FRONTEND_SHOPPER_URL', 'http://localhost:5173/shopper').rstrip('/')
-    return redirect(f'{frontend}?store={store.qr_slug}')
+    from urllib.parse import urlencode
+
+    frontend = (getattr(settings, 'FRONTEND_BASE_URL', '') or 'http://localhost:5173').rstrip('/')
+    target = f'/shopper/{slug}'
+    if request.GET:
+        target += f'?{request.GET.urlencode()}'
+    return redirect(f'{frontend}/?{urlencode({"go": target})}')
 
 
 def _target_payload(row):

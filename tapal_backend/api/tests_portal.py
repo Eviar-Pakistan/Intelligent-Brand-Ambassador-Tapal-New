@@ -643,3 +643,14 @@ class SupervisorAttendanceTargetsTests(PortalTestBase):
         self.assertEqual(len(self.ho.get('/api/attendance/').data['results']), 2)
         preview = self.ho.get(f'/api/attendance/?supervisor=sup-test').data['results']
         self.assertEqual([r['baName'] for r in preview], ['Ali'])
+
+
+class ShopperQrLinkTests(PortalTestBase):
+    def test_qr_link_sends_shopper_to_the_app_with_store_and_city(self):
+        from urllib.parse import parse_qs, urlparse
+
+        response = self.anon.get('/shopper/s1-abc/?store=Punjab+Super+Store&city=Sheikhupura')
+        self.assertEqual(response.status_code, 302)
+        go = parse_qs(urlparse(response['Location']).query)['go'][0]
+        self.assertEqual(go, '/shopper/s1-abc?store=Punjab+Super+Store&city=Sheikhupura')
+

@@ -28,7 +28,7 @@ import {
   SupervisorSubmissionsPage,
 } from './pages/supervisor/SupervisorPortal'
 import { SupervisorJourneyPage } from './pages/supervisor/SupervisorJourney'
-import { ShopperStoreEntry } from './pages/shopper/ShopperStoreEntry'
+import { RootEntry, ShopperStoreEntry } from './pages/shopper/ShopperStoreEntry'
 import {
   ConsumersPage,
   LeaderboardPage,
@@ -101,7 +101,7 @@ export default function App() {
           <BrowserRouter>
           <ServerSync />
           <Routes>
-            <Route path="/" element={<LoginPage />} />
+            <Route path="/" element={<RootEntry />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/supervisor/login" element={<LoginPage initialTab="supervisor" />} />
             <Route path="/portal" element={<ScreenHub />} />

@@ -14,7 +14,7 @@ import {
   TableScroll,
   Tabs,
 } from '../../components/ui'
-import { CalendarPlus, Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus } from 'lucide-react'
+import { Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus } from 'lucide-react'
 import {
   baAccessUrl,
   baEmailInUse,
@@ -422,7 +422,6 @@ export function AmbassadorsPage() {
   const [detailId, setDetailId] = useState<string | null>(null)
   const [targetOpen, setTargetOpen] = useState(false)
   const [targetBulkOpen, setTargetBulkOpen] = useState(false)
-  const [shiftsOpen, setShiftsOpen] = useState(false)
 
   useEffect(() => {
     void import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())

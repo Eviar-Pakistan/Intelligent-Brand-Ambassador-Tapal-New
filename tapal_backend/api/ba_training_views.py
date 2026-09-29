@@ -210,6 +210,27 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         ambassador = self.get_object()
+        changed = []
+        for field in ('name', 'email', 'city', 'phone'):
+            if field in request.data:
+                value = str(request.data.get(field) or '').strip()
+                if field == 'name' and not value:
+                    return Response({'detail': 'Name is required.'}, status=status.HTTP_400_BAD_REQUEST)
+                if field == 'email' and value and (
+                    '@' not in value
+                    or Ambassador.objects.filter(email__iexact=value).exclude(pk=ambassador.pk).exists()
+                ):
+                    return Response(
+                        {'detail': 'Enter a valid email that no other ambassador uses.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                setattr(ambassador, field, value)
+                changed.append(field)
+        if 'is_active' in request.data:
+            ambassador.is_active = str(request.data.get('is_active')).lower() in ('true', '1', 'yes')
+            changed.append('is_active')
+        if changed:
+            ambassador.save(update_fields=[*changed, 'updated_at'])
         new_status = request.data.get('status')
         if new_status:
             allowed = {c.value for c in Ambassador.Status}
@@ -275,7 +296,7 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def ba_invite_lookup(request, token):
-    ambassador = Ambassador.objects.filter(invite_token=token).first()
+    ambassador = Ambassador.objects.filter(invite_token=token, is_active=True).first()
     if not ambassador:
         return Response({'detail': 'Invalid or expired invite link.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -320,7 +341,7 @@ def ba_create_session(request):
     if not token:
         return Response({'detail': 'token is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-    ambassador = Ambassador.objects.filter(invite_token=token).first()
+    ambassador = Ambassador.objects.filter(invite_token=token, is_active=True).first()
     if not ambassador:
         return Response({'detail': 'Invalid invite token.'}, status=status.HTTP_404_NOT_FOUND)
 

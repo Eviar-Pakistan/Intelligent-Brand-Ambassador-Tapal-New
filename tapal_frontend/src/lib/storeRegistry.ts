@@ -92,7 +92,14 @@ export type ApiStoreRow = {
 function remember(row: ApiStoreRow) {
   if (!row?.id || !row.name) return null
   const footfall: Footfall = row.footfall === 'High' || row.footfall === 'Low' ? row.footfall : 'Medium'
-  const status: Store['status'] = row.status === 'LIVE' ? 'Covered' : row.status === 'PARTIAL' ? 'PARTIAL' : 'NEEDS BA'
+  const status: Store['status'] =
+    row.status === 'LIVE'
+      ? 'Covered'
+      : row.status === 'PARTIAL'
+        ? 'PARTIAL'
+        : row.status === 'INACTIVE'
+          ? 'Inactive'
+          : 'NEEDS BA'
   const latitude = row.latitude == null || row.latitude === '' ? null : Number(row.latitude)
   const longitude = row.longitude == null || row.longitude === '' ? null : Number(row.longitude)
   const record: CreatedStore = {

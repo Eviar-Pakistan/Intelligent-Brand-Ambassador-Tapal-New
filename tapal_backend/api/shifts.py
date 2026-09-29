@@ -122,7 +122,7 @@ def create_month_shifts(rows: list[dict], user=None, scope=None) -> dict:
 
     codes = {str(r.get('ba_code') or '').strip().upper() for r in rows}
     store_codes = {str(r.get('store_code') or '').strip().upper() for r in rows}
-    ambassadors = {a.ba_code.upper(): a for a in Ambassador.objects.filter(ba_code__in=codes - {''})}
+    ambassadors = {a.ba_code.upper(): a for a in Ambassador.objects.filter(ba_code__in=codes - {''}, is_active=True)}
     store_qs = Store.objects.filter(store_code__in=store_codes - {''})
     if scope is not None:
         store_qs = scope.stores(store_qs, 'id')  # a city user only schedules their city's stores
@@ -243,8 +243,14 @@ def build_monthly_shift(*, store, ambassador, month: str, start: time, end: time
 def ensure_daily_rows(day: date, ambassador=None) -> None:
     """Create the attendance row for `day` from every assigned monthly shift of that month."""
     from .models import MonthlyShift, ShiftAssignment
+    from .store_live import reset_stale_footfall
 
-    monthly = MonthlyShift.objects.filter(month=day.strftime('%Y-%m'), ambassador__isnull=False)
+    if day == timezone.localdate():
+        reset_stale_footfall()
+    # Deactivated BAs get no new attendance days.
+    monthly = MonthlyShift.objects.filter(
+        month=day.strftime('%Y-%m'), ambassador__isnull=False, ambassador__is_active=True
+    )
     if ambassador is not None:
         monthly = monthly.filter(ambassador=ambassador)
     for shift in monthly:
@@ -355,6 +361,13 @@ def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_i
                 'shift': r.shift_label,
                 'checkedInAt': iso(r.checked_in_at),
                 'checkedOutAt': iso(r.checked_out_at),
+                'checkInLat': r.check_in_lat,
+                'checkInLng': r.check_in_lng,
+                'checkInAccuracy': r.check_in_accuracy_m,
+                'checkInPhoto': r.check_in_photo.url if r.check_in_photo else None,
+                'checkOutLat': r.check_out_lat,
+                'checkOutLng': r.check_out_lng,
+                'checkOutAccuracy': r.check_out_accuracy_m,
                 'reportSubmittedAt': iso(r.report_submitted_at),
                 'earlyCheckoutReason': r.early_checkout_reason or None,
                 'status': attendance_status(r, today),

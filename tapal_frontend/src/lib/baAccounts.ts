@@ -34,6 +34,11 @@ export type BaAccount = {
   accessToken: string
   /** Store this ambassador is assigned to, when one has been set. */
   storeName?: string
+  storeId?: number | null
+  /** Server lifecycle status: Pending, Training, Assessed, Certified, Rejected, Deployed */
+  serverStatus?: string
+  /** False when Head Office deactivated this BA */
+  isActive?: boolean
 }
 
 function newAccessToken() {
@@ -242,7 +247,9 @@ export function adoptApiAmbassador(row: {
   invite_token?: string
   ba_code?: string
   created_at?: string
+  store?: number | null
   store_name?: string | null
+  is_active?: boolean
   report_json?: EngineReport | null
 }): BaAccount | null {
   if (!row?.id || !row.name) return null
@@ -307,7 +314,10 @@ export function replaceAmbassadorsFromApi(rows: Parameters<typeof adoptApiAmbass
       city: row.city || '',
       email: (row.email ?? '').trim(),
       phone: row.phone || '',
-      storeName: row.store_name || existing?.storeName || '',
+      storeName: row.store_name || '',
+      storeId: row.store ?? null,
+      serverStatus: row.status,
+      isActive: row.is_active !== false,
       createdAt: row.created_at || existing?.createdAt || new Date().toISOString(),
       status: saved?.result.certified ? 'Certified' : status,
       videoWatched: existing?.videoWatched || !!saved,
@@ -383,6 +393,11 @@ registerBaTokenSource(() => {
   const id = readRaw()
   return id ? (accounts.find((account) => account.id === id)?.accessToken ?? null) : null
 })
+
+/** Id of the BA signed in on this device (null when nobody is). */
+export function currentBaAccountId() {
+  return readRaw()
+}
 
 export function baSignIn(id: string) {
   try {

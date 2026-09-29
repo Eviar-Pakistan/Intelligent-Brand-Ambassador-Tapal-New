@@ -1,11 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
-import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { roleMeta, useRole } from '../context/AppContext'
 import { useBrand } from '../context/BrandContext'
 import { DesktopShell } from '../components/AppShell'
 import { Button } from '../components/ui'
-import { emailInUse, signOut } from '../lib/supervisors'
+import { authenticate, emailInUse, signIn as supervisorSignIn, signOut } from '../lib/supervisors'
+import { enableSupervisorPush } from '../lib/supervisorPush'
 import { baEmailInUse, baSignOut } from '../lib/baAccounts'
 import { djangoLogin, djangoMe } from '../lib/djangoApi'
 import { syncDjango } from '../lib/djangoSync'
@@ -34,8 +35,16 @@ export function HeadOfficeGate() {
   return <DesktopShell kind="headOffice" />
 }
 
-export function LoginPage() {
+type LoginTab = 'headOffice' | 'supervisor'
+
+const TABS: { key: LoginTab; label: string }[] = [
+  { key: 'headOffice', label: 'Head Office' },
+  { key: 'supervisor', label: 'Supervisor' },
+]
+
+export function LoginPage({ initialTab = 'headOffice' }: { initialTab?: LoginTab }) {
   const navigate = useNavigate()
+  const [tab, setTab] = useState<LoginTab>(initialTab)
   const { setRole } = useRole()
   const { brand } = useBrand()
   const [email, setEmail] = useState('')
@@ -44,12 +53,37 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  async function signInSupervisor() {
+    setBusy(true)
+    const supervisor = await authenticate(email, password)
+    if (!supervisor) {
+      setBusy(false)
+      setError('Incorrect email or password.')
+      return
+    }
+    try {
+      await enableSupervisorPush(supervisor.id)
+    } catch (err) {
+      setBusy(false)
+      setError(err instanceof Error ? err.message : 'Allow notifications to continue.')
+      return
+    }
+    baSignOut()
+    setRole('supervisor')
+    supervisorSignIn(supervisor.id)
+    navigate('/supervisor')
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     if (busy) return
+    if (tab === 'supervisor') {
+      await signInSupervisor()
+      return
+    }
 
     if (emailInUse(email)) {
-      setError('Supervisors use their own sign-in page.')
+      setError('This is a supervisor account. Choose the Supervisor tab above.')
       return
     }
 
@@ -98,8 +132,34 @@ export function LoginPage() {
           </div>
 
        
-          <h2 className="mt-4 text-xl font-bold text-slate-900 sm:text-2xl">Head Office sign in</h2>
-          <p className="mt-1 text-sm text-slate-500">{brand.productName}</p>
+          <div className="mt-2 grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist">
+            {TABS.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={tab === t.key}
+                onClick={() => {
+                  setTab(t.key)
+                  setError(null)
+                }}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
+                  tab === t.key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <h2 className="mt-6 text-xl font-bold text-slate-900 sm:text-2xl">
+            {tab === 'supervisor' ? 'Supervisor sign in' : 'Head Office sign in'}
+          </h2>
+          <p className="mt-1 text-sm text-slate-500">
+            {tab === 'supervisor'
+              ? 'Your stores only. Allow notifications so you are alerted when a BA checks in or out.'
+              : brand.productName}
+          </p>
 
           <form onSubmit={onSubmit} className="mt-8 space-y-4">
             <label className="block">
@@ -144,12 +204,9 @@ export function LoginPage() {
               <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>
             )}
             <Button type="submit" className="w-full" size="lg" disabled={busy}>
-              {busy ? 'Signing in…' : 'Sign In'}
+              {busy ? (tab === 'supervisor' ? 'Waiting for notifications…' : 'Signing in…') : 'Sign In'}
             </Button>
           </form>
-          <Link to="/supervisor/login" className="mt-4 inline-block text-sm font-semibold text-brand-700">
-            Supervisor sign in
-          </Link>
 
           
      

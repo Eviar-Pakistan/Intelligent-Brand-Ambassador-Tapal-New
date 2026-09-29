@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { CalendarDays, Eye, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
 import { Avatar, Button, Card, Modal, PageHeader, PasswordField, StatusBadge, TableScroll } from '../../components/ui'
@@ -26,6 +26,8 @@ import {
   emailInUse,
   generatePassword,
   setLogin,
+  fetchSupervisorPassword,
+  updateSupervisorDetails,
   signIn,
   supervisorOfStore,
   supervisorOverview,
@@ -605,6 +607,7 @@ export function SupervisorDetailPage() {
   const [viewVisit, setViewVisit] = useState<JourneyVisit | null>(null)
   const [credentials, setCredentials] = useState<Credentials | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const preview = usePreview()
 
   if (!supervisor) {
@@ -630,6 +633,9 @@ export function SupervisorDetailPage() {
         description={[supervisor.city, supervisor.phone, supervisor.email].filter(Boolean).join(' · ') || 'Supervisor'}
         actions={
           <>
+            <Button variant="secondary" onClick={() => setDetailsOpen(true)}>
+              <Pencil size={14} /> Edit details
+            </Button>
             <Button variant="secondary" onClick={() => setEditing(true)}>
               <Pencil size={14} /> Edit stores
             </Button>
@@ -644,6 +650,12 @@ export function SupervisorDetailPage() {
             </Button>
           </>
         }
+      />
+
+      <SupervisorAccountCard
+        key={`${supervisor.id}-${supervisor.email}-${credentials?.password ?? ''}`}
+        supervisor={supervisor}
+        onChangeLogin={() => setLoginOpen(true)}
       />
 
       <JourneyWeekPanel
@@ -673,6 +685,7 @@ export function SupervisorDetailPage() {
         onSaved={setCredentials}
       />
       <CredentialsModal credentials={credentials} onClose={() => setCredentials(null)} />
+      <EditDetailsModal supervisor={detailsOpen ? supervisor : null} onClose={() => setDetailsOpen(false)} />
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete supervisor?">
         <div className="space-y-4 text-sm">
@@ -699,3 +712,129 @@ export function SupervisorDetailPage() {
     </div>
   )
 }
+
+/** Sign-in details for Head Office: email and the current password (shown on request). */
+function SupervisorAccountCard({ supervisor, onChangeLogin }: { supervisor: Supervisor; onChangeLogin: () => void }) {
+  const [state, setState] = useState<{ password: string | null; hasLogin: boolean } | null>(null)
+  const [shown, setShown] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  async function reveal() {
+    if (shown) return setShown(false)
+    setBusy(true)
+    const data = await fetchSupervisorPassword(supervisor.id)
+    setBusy(false)
+    setState(data ?? { password: null, hasLogin: !!supervisor.passwordHash })
+    setShown(true)
+  }
+
+  async function copy() {
+    if (!state?.password) return
+    try {
+      await navigator.clipboard.writeText(`Email: ${supervisor.email}\nPassword: ${state.password}`)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // copying is optional
+    }
+  }
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1 text-sm">
+          <div className="text-xs font-semibold tracking-wide text-slate-500 uppercase">Sign-in details</div>
+          <div>
+            <span className="text-slate-500">Email: </span>
+            <span className="font-medium text-slate-900">{supervisor.email || '—'}</span>
+          </div>
+          <div>
+            <span className="text-slate-500">Password: </span>
+            {shown ? (
+              state?.password ? (
+                <span className="font-mono font-semibold text-slate-900">{state.password}</span>
+              ) : (
+                <span className="text-amber-700">
+                  {state?.hasLogin
+                    ? 'Not available — it was set before passwords could be viewed. Set a new one with Change login.'
+                    : 'No password yet — set one with Change login.'}
+                </span>
+              )
+            ) : (
+              <span className="font-mono text-slate-400">••••••••</span>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => void reveal()}>
+            {shown ? 'Hide password' : busy ? 'Loading…' : 'Show password'}
+          </Button>
+          {shown && state?.password && (
+            <Button size="sm" variant="secondary" onClick={() => void copy()}>
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+          )}
+          <Button size="sm" variant="secondary" onClick={onChangeLogin}>
+            Change login
+          </Button>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+/** Head Office edits the supervisor's name, phone and city. */
+function EditDetailsModal({ supervisor, onClose }: { supervisor: Supervisor | null; onClose: () => void }) {
+  const [form, setForm] = useState({ name: '', phone: '', city: '' })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    if (supervisor) setForm({ name: supervisor.name, phone: supervisor.phone, city: supervisor.city })
+    setError(null)
+  }, [supervisor])
+
+  async function save() {
+    if (!supervisor) return
+    setBusy(true)
+    const problem = await updateSupervisorDetails(supervisor.id, form)
+    setBusy(false)
+    if (problem) return setError(problem)
+    onClose()
+  }
+
+  const field = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500'
+  return (
+    <Modal open={!!supervisor} onClose={onClose} title="Edit supervisor">
+      <div className="space-y-3 text-sm">
+        <label className="block">
+          <span className="mb-1 block font-medium text-slate-700">Name *</span>
+          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={field} />
+        </label>
+        <label className="block">
+          <span className="mb-1 block font-medium text-slate-700">Phone</span>
+          <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className={field} />
+        </label>
+        <label className="block">
+          <span className="mb-1 block font-medium text-slate-700">City</span>
+          <select value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} className={field}>
+            {[...new Set([form.city, ...CITIES])].filter(Boolean).map((c) => (
+              <option key={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+        <p className="text-xs text-slate-500">Email and password are changed with Change login.</p>
+        {error && <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800">{error}</p>}
+        <div className="flex flex-col gap-2 pt-1 sm:flex-row-reverse">
+          <Button disabled={busy || !form.name.trim()} onClick={() => void save()}>
+            {busy ? 'Saving…' : 'Save'}
+          </Button>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+

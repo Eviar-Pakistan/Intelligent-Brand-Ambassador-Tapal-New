@@ -9,7 +9,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from .city_scope import scope_for
+from .city_scope import scope_for, viewer_scope
 from .manager_ops import build_manager_overview
 from .intelligence import (
     build_ba_leaderboard,
@@ -91,6 +91,21 @@ class StoreViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         city = scope_for(self.request.user).city
         serializer.save(**({'city': city} if city else {}))
+
+    @action(detail=True, methods=['post'], url_path='footfall')
+    def footfall(self, request, pk=None):
+        """POST {count}: today's footfall for this store."""
+        from .store_live import record_footfall
+
+        store = self.get_object()
+        try:
+            count = int(request.data.get('count'))
+            if count < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({'detail': 'Enter today\'s footfall as a whole number.'}, status=status.HTTP_400_BAD_REQUEST)
+        record_footfall(store, count, entered_by=request.user.email)
+        return Response(StoreSerializer(store, context=self.get_serializer_context()).data)
 
     @action(detail=True, methods=['post'], url_path='regenerate-qr')
     def regenerate_qr(self, request, pk=None):
@@ -259,7 +274,7 @@ class StoreRewardViewSet(viewsets.ModelViewSet):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def ba_attendance(request):
     """
     GET /api/attendance/?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&ambassador=<id>&store=<id>
@@ -272,6 +287,9 @@ def ba_attendance(request):
         except (KeyError, ValueError):
             return None
 
+    viewer = viewer_scope(request)  # Head Office, or a supervisor for their own stores
+    if viewer is None:
+        return Response({'detail': 'Sign in to continue.'}, status=status.HTTP_401_UNAUTHORIZED)
     today = timezone.localdate()
     date_to = parse('date_to') or today
     date_from = parse('date_from') or date_to
@@ -281,7 +299,7 @@ def ba_attendance(request):
             date_to,
             ambassador_id=request.query_params.get('ambassador') or None,
             store_id=request.query_params.get('store') or None,
-            scope=scope_for(request.user),
+            scope=viewer[0],
         )
     )
 
@@ -440,15 +458,21 @@ def _target_payload(row):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def ba_targets(request):
     """
     GET ?month=YYYY-MM — every BA's target for the month (SKU lines included).
     POST {rows: [{baCode, month, lines: [{sku, brand?, qty, sales?, grammage?}]}]} — save SKU targets per BA.
     """
-    scope = scope_for(request.user)
+    viewer = viewer_scope(request)  # Head Office, or a supervisor (read only, their stores)
+    if viewer is None:
+        return Response({'detail': 'Sign in to continue.'}, status=status.HTTP_401_UNAUTHORIZED)
+    scope, is_supervisor = viewer
     if request.method == 'POST':
         from .target_sheet import save_ba_sku_targets
+
+        if is_supervisor:
+            return Response({'detail': 'Only Head Office sets targets.'}, status=status.HTTP_403_FORBIDDEN)
 
         rows = request.data.get('rows')
         if not isinstance(rows, list) or not rows:
@@ -459,7 +483,11 @@ def ba_targets(request):
     month = (request.query_params.get('month') or timezone.localdate().strftime('%Y-%m')).strip()
     rows = AmbassadorMonthTarget.objects.select_related('ambassador', 'store').filter(month=month)
     if not scope.is_all:
-        rows = rows.filter(Q(store_id__in=scope.store_ids) | Q(ambassador_id__in=scope.ambassador_ids))
+        # A supervisor sees targets at their own stores (and store-less targets of their BAs).
+        by_ba = Q(store__isnull=True, ambassador_id__in=scope.ambassador_ids) if is_supervisor else Q(
+            ambassador_id__in=scope.ambassador_ids
+        )
+        rows = rows.filter(Q(store_id__in=scope.store_ids) | by_ba)
     rows = rows.order_by('ambassador__name')
     return Response({'month': month, 'results': [_target_payload(row) for row in rows]})
 

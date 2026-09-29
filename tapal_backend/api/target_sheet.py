@@ -582,10 +582,32 @@ def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
                 'grammage': grams,
                 'count': round(qty / grams, 2) if grams else None,
             })
+        existing = AmbassadorMonthTarget.objects.filter(ambassador=ba, month=month).first()
+        total_only = _num(row.get('targetKg'))
+        if not lines and total_only is not None and total_only >= 0:
+            # "Set target & sales": one total. Keep the SKU breakdown only if the total is unchanged.
+            sales_only = _num(row.get('salesKg'))
+            target = Decimal(str(total_only)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            keep_lines = bool(existing and existing.target_total == target)
+            AmbassadorMonthTarget.objects.update_or_create(
+                ambassador=ba,
+                month=month,
+                defaults={
+                    'store': ba_store_for_month(ba, month) or (existing.store if existing else None),
+                    'target_total': target,
+                    'sales_total': (
+                        Decimal(str(sales_only)).quantize(Decimal('0.01'))
+                        if sales_only is not None and sales_only >= 0
+                        else (existing.sales_total if existing else Decimal('0'))
+                    ),
+                    'lines': existing.lines if keep_lines else [],
+                },
+            )
+            saved.append({'baCode': ba.ba_code, 'baName': ba.name, 'month': month, 'skus': 0, 'targetKg': float(target)})
+            continue
         if not lines:
             errors.append(f'{code}: no SKU with a Target Kg for {month}.')
             continue
-        existing = AmbassadorMonthTarget.objects.filter(ambassador=ba, month=month).first()
         target = Decimal(str(sum(line['qty'] for line in lines))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         if any_sales:
             sales_total = Decimal(str(sum(line['sales'] or 0 for line in lines))).quantize(Decimal('0.01'))

@@ -1,3 +1,4 @@
+import { useUserInterceptions } from '../../lib/userInterceptions'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
 import { RotateCcw, Search } from 'lucide-react'
@@ -300,7 +301,8 @@ export function BaPerformanceDashboardPage() {
         .sort((a, b) => a.baName.localeCompare(b.baName)),
     [baTargets, targetMonth],
   )
-  const liveRecords = useMemo(() => recordsFromTargets(baTargets), [baTargets])
+  const interceptions = useUserInterceptions()
+  const liveRecords = useMemo(() => recordsFromTargets(baTargets, interceptions), [baTargets, interceptions])
   const townOptions = useMemo(
     () => [...new Set(liveRecords.map((record) => record.town))].sort((a, b) => a.localeCompare(b)),
     [liveRecords],

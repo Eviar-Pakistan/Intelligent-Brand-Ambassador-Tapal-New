@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { Download } from 'lucide-react'
 import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
 import { Button, Card, PageHeader, SearchInput, StatusBadge, TableScroll, Tabs } from '../../components/ui'
-import { djangoFetch, djangoToken } from '../../lib/djangoApi'
+import { portalFetch } from '../../lib/serverApi'
 
 export type AttendanceStatus = 'Present' | 'On shift' | 'Not checked in' | 'Absent'
 
@@ -21,6 +21,13 @@ export type AttendanceRow = {
   shift: string
   checkedInAt: string | null
   checkedOutAt: string | null
+  checkInLat?: number | null
+  checkInLng?: number | null
+  checkInAccuracy?: number | null
+  checkInPhoto?: string | null
+  checkOutLat?: number | null
+  checkOutLng?: number | null
+  checkOutAccuracy?: number | null
   reportSubmittedAt: string | null
   earlyCheckoutReason: string | null
   status: AttendanceStatus
@@ -52,6 +59,22 @@ function presetRange(preset: string): [string, string] {
   return [isoDay(from), isoDay(today)]
 }
 
+/** "📍 View on map" under a check-in / check-out time, when the phone sent its location. */
+function MapLink({ lat, lng, accuracy }: { lat?: number | null; lng?: number | null; accuracy?: number | null }) {
+  if (lat == null || lng == null) return null
+  return (
+    <a
+      href={`https://www.google.com/maps?q=${lat},${lng}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="mt-0.5 block text-[11px] font-semibold text-brand-600 hover:underline"
+      title={`${lat.toFixed(5)}, ${lng.toFixed(5)}${accuracy != null ? ` · ±${Math.round(accuracy)} m` : ''}`}
+    >
+      📍 View on map
+    </a>
+  )
+}
+
 export function timeOf(iso: string | null) {
   if (!iso) return '—'
   return new Date(iso).toLocaleTimeString('en-PK', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Karachi' })
@@ -72,17 +95,18 @@ export function useAttendance(dateFrom: string, dateTo: string, ambassadorId?: n
 
   useEffect(() => {
     if (ambassadorId === null) return
-    if (!djangoToken()) {
-      setError('Sign in to Head Office to see attendance.')
-      return
-    }
     let cancelled = false
     const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo })
     if (ambassadorId) params.set('ambassador', String(ambassadorId))
     const load = () => {
       setLoading(true)
-      return djangoFetch(`/api/attendance/?${params}`)
+      // Head Office (JWT) or a supervisor (their stores only) — the server scopes the rows.
+      return portalFetch(`/api/attendance/?${params}`)
         .then(async (response) => {
+          if (!response) {
+            if (!cancelled) setError('Sign in to see attendance.')
+            return
+          }
           if (!response.ok) throw new Error()
           const next = (await response.json()) as AttendanceResponse
           if (!cancelled) {
@@ -107,7 +131,12 @@ export function useAttendance(dateFrom: string, dateTo: string, ambassadorId?: n
 async function downloadAttendance(rows: AttendanceRow[], from: string, to: string) {
   const XLSX = await import('xlsx')
   const sheet = XLSX.utils.aoa_to_sheet([
-    ['Date', 'BA code', 'BA name', 'Store code', 'Store', 'City', 'Shift', 'Check-in', 'Check-out', 'Report submitted', 'Status', 'Early checkout reason'],
+    [
+      'Date', 'BA code', 'BA name', 'Store code', 'Store', 'City',
+      'Check-in', 'Check-in latitude', 'Check-in longitude',
+      'Check-out', 'Check-out latitude', 'Check-out longitude',
+      'Report submitted', 'Status', 'Early checkout reason',
+    ],
     ...rows.map((r) => [
       r.date,
       r.baCode,
@@ -115,21 +144,26 @@ async function downloadAttendance(rows: AttendanceRow[], from: string, to: strin
       r.storeCode,
       r.storeName,
       r.city,
-      r.shift,
       timeOf(r.checkedInAt),
+      r.checkInLat ?? '',
+      r.checkInLng ?? '',
       timeOf(r.checkedOutAt),
+      r.checkOutLat ?? '',
+      r.checkOutLng ?? '',
       r.reportSubmittedAt ? timeOf(r.reportSubmittedAt) : 'No',
       r.status,
       r.earlyCheckoutReason ?? '',
     ]),
   ])
-  sheet['!cols'] = [12, 12, 22, 12, 24, 12, 22, 10, 10, 14, 14, 36].map((wch) => ({ wch }))
+  sheet['!cols'] = [12, 12, 22, 12, 24, 12, 10, 12, 12, 10, 12, 12, 14, 14, 36].map((wch) => ({ wch }))
   const book = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(book, sheet, 'Attendance')
   XLSX.writeFile(book, `BA_Attendance_${from}_to_${to}.xlsx`)
 }
 
-export function BaAttendancePage() {
+/** Head Office sees every BA; a supervisor (storeIds given) sees the BAs at their own stores. */
+export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
+  const supervisorView = storeIds !== undefined
   const [preset, setPreset] = useState('Today')
   const [[dateFrom, dateTo], setRange] = useState<[string, string]>(() => presetRange('Today'))
   const [status, setStatus] = useState<string>('All')
@@ -153,21 +187,29 @@ export function BaAttendancePage() {
     { label: 'Absent', value: summary?.absent, tone: 'text-rose-600', hint: 'No completed check-out' },
   ]
 
+  const download = (
+    <Button variant="secondary" disabled={rows.length === 0} onClick={() => void downloadAttendance(rows, dateFrom, dateTo)}>
+      <Download size={15} /> Download
+    </Button>
+  )
+
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="BA Attendance"
-        description="A BA is Present only after checking in, submitting the checkout report and checking out"
-        actions={
-          <Button
-            variant="secondary"
-            disabled={rows.length === 0}
-            onClick={() => void downloadAttendance(rows, dateFrom, dateTo)}
-          >
-            <Download size={15} /> Download
-          </Button>
-        }
-      />
+      {supervisorView ? (
+        // The supervisor portal shows its own page header.
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-slate-500">
+            A BA is Present only after checking in, submitting the checkout report and checking out
+          </p>
+          {download}
+        </div>
+      ) : (
+        <PageHeader
+          title="BA Attendance"
+          description="A BA is Present only after checking in, submitting the checkout report and checking out"
+          actions={download}
+        />
+      )}
 
       <Card>
         <div className="flex flex-wrap items-end gap-3">
@@ -220,7 +262,7 @@ export function BaAttendancePage() {
         ))}
       </div>
 
-      <EarlyCheckoutsCard />
+      <EarlyCheckoutsCard storeIds={storeIds} />
 
       <div className="flex flex-wrap items-center gap-3">
         <SearchInput placeholder="Search BA, code or store..." value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -234,14 +276,13 @@ export function BaAttendancePage() {
         {error ? (
           <p className="px-4 py-6 text-sm text-rose-700">{error}</p>
         ) : (
-          <TableScroll minWidth={880}>
+          <TableScroll minWidth={780}>
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-50 text-xs tracking-wide text-slate-500 uppercase">
                 <tr>
                   <th className="px-4 py-3">Date</th>
                   <th className="px-4 py-3">Ambassador</th>
                   <th className="px-4 py-3">Store</th>
-                  <th className="px-4 py-3">Shift</th>
                   <th className="px-4 py-3">Check-in</th>
                   <th className="px-4 py-3">Check-out</th>
                   <th className="px-4 py-3">Report</th>
@@ -256,18 +297,36 @@ export function BaAttendancePage() {
                       <div className="text-xs text-slate-400">{r.day}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <Link to={`/ho/ambassadors/api-${r.baId}`} className="font-medium hover:text-brand-600">
-                        {r.baName}
-                      </Link>
+                      {supervisorView ? (
+                        <span className="font-medium">{r.baName}</span>
+                      ) : (
+                        <Link to={`/ho/ambassadors/api-${r.baId}`} className="font-medium hover:text-brand-600">
+                          {r.baName}
+                        </Link>
+                      )}
                       <div className="font-mono text-xs text-slate-400">{r.baCode}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div>{r.storeName}</div>
                       <div className="text-xs text-slate-400">{[r.storeCode, r.city].filter(Boolean).join(' · ')}</div>
                     </td>
-                    <td className="px-4 py-3 whitespace-nowrap">{r.shift}</td>
-                    <td className="px-4 py-3 tabular-nums whitespace-nowrap">{timeOf(r.checkedInAt)}</td>
-                    <td className="px-4 py-3 tabular-nums whitespace-nowrap">{timeOf(r.checkedOutAt)}</td>
+                    <td className="px-4 py-3 tabular-nums whitespace-nowrap">
+                      {timeOf(r.checkedInAt)}
+                      <MapLink lat={r.checkInLat} lng={r.checkInLng} accuracy={r.checkInAccuracy} />
+                      {r.checkInPhoto && (
+                        <a href={r.checkInPhoto} target="_blank" rel="noopener noreferrer" title="Check-in selfie">
+                          <img
+                            src={r.checkInPhoto}
+                            alt={`${r.baName} at check-in`}
+                            className="mt-1 h-10 w-10 rounded-lg object-cover ring-1 ring-slate-200"
+                          />
+                        </a>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 tabular-nums whitespace-nowrap">
+                      {timeOf(r.checkedOutAt)}
+                      <MapLink lat={r.checkOutLat} lng={r.checkOutLng} accuracy={r.checkOutAccuracy} />
+                    </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       {r.reportSubmittedAt ? (
                         <span className="text-emerald-700">Submitted</span>
@@ -287,7 +346,7 @@ export function BaAttendancePage() {
                 ))}
                 {data && rows.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-500">
+                    <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
                       {data.results.length === 0
                         ? 'No BAs have shifts in this period.'
                         : 'No attendance matches these filters.'}
@@ -296,7 +355,7 @@ export function BaAttendancePage() {
                 )}
                 {!data && (
                   <tr>
-                    <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-500">
+                    <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
                       Loading attendance…
                     </td>
                   </tr>

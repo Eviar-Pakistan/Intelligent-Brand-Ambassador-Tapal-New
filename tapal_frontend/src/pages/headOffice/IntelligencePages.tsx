@@ -1,5 +1,6 @@
+import { djangoFetch, djangoToken } from '../../lib/djangoApi'
 import { Link } from 'react-router-dom'
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CertificationRulesPanel } from './CertificationRulesPanel'
 import {
   consumerInsights,
@@ -15,10 +16,8 @@ import {
   PageHeader,
   ProgressBar,
   Select,
-  StatusBadge,
   TableScroll,
 } from '../../components/ui'
-import { useBaAccounts } from '../../lib/baAccounts'
 import { ReportPerformance } from './ReportPerformance'
 import { Plus, Trash2 } from 'lucide-react'
 
@@ -207,56 +206,128 @@ function ChartCard({ title, rows }: { title: string; rows: { name: string; value
   )
 }
 
+type LeaderRow = {
+  id: number
+  rank: number
+  name: string
+  ba_code: string
+  city: string
+  store_name: string | null
+  points: number
+  days_present: number
+  check_ins_this_week: number
+  interactions: number
+  switched: number
+  conversion: number
+  target_achievement: number | null
+  customer_rating: number | null
+}
+
 export function LeaderboardPage() {
-  const accounts = useBaAccounts()
+  const [data, setData] = useState<{ week_label: string; results: LeaderRow[] } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!djangoToken()) {
+      setError('Sign in to Head Office to see the leaderboard.')
+      return
+    }
+    let cancelled = false
+    const load = () =>
+      djangoFetch('/api/intelligence/leaderboard/')
+        .then((r) => (r.ok ? r.json() : Promise.reject()))
+        .then((next) => !cancelled && setData(next))
+        .catch(() => !cancelled && setError('The leaderboard could not be loaded.'))
+    void load()
+    const id = window.setInterval(load, 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Ambassador Leaderboard"
-        description="Ambassadors on the roster"
+        description={`This week${data ? ` · ${data.week_label}` : ''} · every active BA, ranked on field performance`}
         actions={
           <Link to="/ho/incentives">
             <Button>Manage PKR incentives</Button>
           </Link>
         }
       />
+      <p className="text-xs text-slate-500">
+        Points: 50 per day present (checked in, report submitted, checked out) · 20 per day only checked in · 10 per
+        shopper intercepted · 15 per shopper who switched to Tapal · 2 × this month&apos;s target achievement % (max 150%)
+        · 20 × shopper rating.
+      </p>
       <Card padding={false}>
-        <TableScroll minWidth={640}>
-          <table className="w-full text-left text-sm">
-          <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
-            <tr>
-              <th className="px-4 py-3">Ambassador</th>
-              <th className="px-4 py-3">BA code</th>
-              <th className="px-4 py-3">City</th>
-              <th className="px-4 py-3">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {accounts.map((account) => (
-              <tr key={account.id} className="border-t border-slate-100">
-                <td className="px-4 py-3">
-                  <Link to={`/ho/ambassadors/${account.id}`} className="font-medium hover:text-brand-600">
-                    {account.name}
-                  </Link>
-                </td>
-                <td className="px-4 py-3 font-mono font-semibold">{account.baCode || '—'}</td>
-                <td className="px-4 py-3">{account.city || '—'}</td>
-                <td className="px-4 py-3">
-                  <StatusBadge status={account.status} />
-                </td>
-              </tr>
-            ))}
-            {accounts.length === 0 && (
-              <tr className="border-t border-slate-100">
-                <td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-500">
-                  No ambassadors yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        </TableScroll>
+        {error ? (
+          <p className="px-4 py-6 text-sm text-rose-700">{error}</p>
+        ) : (
+          <TableScroll minWidth={900}>
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
+                <tr>
+                  <th className="px-4 py-3">Rank</th>
+                  <th className="px-4 py-3">Ambassador</th>
+                  <th className="px-4 py-3">Store</th>
+                  <th className="px-4 py-3">Points</th>
+                  <th className="px-4 py-3">Days present</th>
+                  <th className="px-4 py-3">Intercepted</th>
+                  <th className="px-4 py-3">Conversion</th>
+                  <th className="px-4 py-3">Target</th>
+                  <th className="px-4 py-3">Rating</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.results ?? []).map((row) => (
+                  <tr key={row.id} className="border-t border-slate-100">
+                    <td className="px-4 py-3 font-bold text-brand-600">#{row.rank}</td>
+                    <td className="px-4 py-3">
+                      <Link to={`/ho/ambassadors/api-${row.id}`} className="font-medium hover:text-brand-600">
+                        {row.name}
+                      </Link>
+                      <div className="font-mono text-xs text-slate-400">
+                        {[row.ba_code, row.city].filter(Boolean).join(' · ')}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-600">{row.store_name || '—'}</td>
+                    <td className="px-4 py-3 font-semibold">{row.points.toLocaleString()}</td>
+                    <td className="px-4 py-3">
+                      {row.days_present}
+                      {row.check_ins_this_week > row.days_present && (
+                        <span className="text-xs text-slate-400"> (+{row.check_ins_this_week - row.days_present} partial)</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">{row.interactions}</td>
+                    <td className="px-4 py-3">
+                      {row.interactions ? `${row.conversion}%` : '—'}
+                      {row.switched > 0 && <span className="text-xs text-slate-400"> ({row.switched})</span>}
+                    </td>
+                    <td className="px-4 py-3">{row.target_achievement != null ? `${row.target_achievement}%` : '—'}</td>
+                    <td className="px-4 py-3">{row.customer_rating != null ? `${row.customer_rating} ★` : '—'}</td>
+                  </tr>
+                ))}
+                {data && data.results.length === 0 && (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-6 text-center text-sm text-slate-500">
+                      No active ambassadors yet.
+                    </td>
+                  </tr>
+                )}
+                {!data && !error && (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-6 text-center text-sm text-slate-500">
+                      Loading…
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </TableScroll>
+        )}
       </Card>
     </div>
   )

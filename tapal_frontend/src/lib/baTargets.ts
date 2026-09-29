@@ -21,7 +21,7 @@ export type BaMonthTarget = {
   city?: string
   /** YYYY-MM */
   month: string
-  /** Sum of the September SKU quantities for this store. */
+  /** Sum of the SKU target quantities (kg) for the month. */
   targetKg: number
   salesKg: number
   lines?: TargetLine[]
@@ -110,11 +110,11 @@ export function setBaMonthTarget(input: BaMonthTarget) {
   commit([{ ...input, baName: input.baName.trim() }, ...next])
 }
 
-/** Replaces each ambassador-month in one save. */
-/** Replaces the saved list with the rows returned by the API. */
-export function replaceTargetsFromApi(rows: BaMonthTarget[]) {
-  commit(
-    rows
+/** Replaces that month's targets with the rows returned by the API (other months are kept). */
+export function replaceTargetsFromApi(rows: BaMonthTarget[], month?: string) {
+  const kept = month ? targets.filter((row) => row.month !== month) : []
+  commit([
+    ...rows
       .filter(
         (row) =>
           !!row &&
@@ -129,7 +129,8 @@ export function replaceTargetsFromApi(rows: BaMonthTarget[]) {
         salesKg: typeof row.salesKg === 'number' ? row.salesKg : 0,
         lines: Array.isArray(row.lines) ? row.lines : [],
       })),
-  )
+    ...kept,
+  ])
 }
 
 export function setBaMonthTargets(rows: BaMonthTarget[]) {
@@ -311,6 +312,7 @@ export async function saveBaTargetsToServer(rows: BaMonthTarget[]) {
         baCode: row.baCode,
         month: row.month,
         lines: (row.lines ?? []).map(({ sku, brand, qty, sales, grammage }) => ({ sku, brand, qty, sales, grammage })),
+        ...(row.lines?.length ? {} : { targetKg: row.targetKg, salesKg: row.salesKg }),
       })),
     }),
   })

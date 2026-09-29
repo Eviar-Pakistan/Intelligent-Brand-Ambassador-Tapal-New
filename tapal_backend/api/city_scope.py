@@ -72,3 +72,36 @@ def scope_for(user) -> CityScope:
     if not user or not getattr(user, 'is_authenticated', False):
         return ALL
     return scope_for_city(user_city(user))
+
+
+def scope_for_supervisor(supervisor) -> CityScope:
+    """A supervisor sees their own stores and the BAs working there (shifts or deployment)."""
+    from .models import Ambassador
+
+    store_ids = frozenset(supervisor.stores.values_list('id', flat=True))
+    ambassador_ids = frozenset(
+        Ambassador.objects.filter(Q(store_id__in=store_ids) | Q(monthly_shifts__store_id__in=store_ids))
+        .values_list('id', flat=True)
+        .distinct()
+    )
+    return CityScope(city='', store_ids=store_ids, ambassador_ids=ambassador_ids)
+
+
+def viewer_scope(request) -> tuple[CityScope, bool] | None:
+    """(scope, is_supervisor) for a signed-in supervisor (X-Supervisor-Token) or Head Office; None otherwise."""
+    from .portal_views import _supervisor_from_header
+
+    supervisor = _supervisor_from_header(request)
+    if supervisor:
+        return scope_for_supervisor(supervisor), True
+    user = getattr(request, 'user', None)
+    if user and user.is_authenticated:
+        preview = (request.query_params.get('supervisor') or '').strip()
+        if preview:  # Head Office previewing a supervisor's portal (only supervisors in their city)
+            from .portal_views import _visible_supervisors
+
+            found = _visible_supervisors(scope_for(user)).filter(pk=preview).first()
+            return (scope_for_supervisor(found), False) if found else None
+        return scope_for(user), False
+    return None
+

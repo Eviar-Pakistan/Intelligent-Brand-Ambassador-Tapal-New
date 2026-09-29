@@ -1,5 +1,5 @@
 import { replaceAmbassadorsFromApi, type BaAccount } from './baAccounts'
-import { replaceTargetsFromApi, type BaMonthTarget } from './baTargets'
+import { currentMonthKey, replaceTargetsFromApi, type BaMonthTarget } from './baTargets'
 import type { EngineReport } from './trainingApi'
 import { djangoFetch, djangoToken } from './djangoApi'
 import { replaceStoresFromApi, roundCoord, type StoreInput } from './storeRegistry'
@@ -38,6 +38,7 @@ type ApiAmbassador = {
   created_at?: string
   store?: number | null
   store_name?: string | null
+  is_active?: boolean
   report_json?: EngineReport | null
 }
 
@@ -70,13 +71,13 @@ export async function syncDjango() {
   }
 }
 
-export async function syncBaTargets(month = '2026-09') {
+export async function syncBaTargets(month = currentMonthKey()) {
   if (!djangoToken()) return
   try {
     const response = await djangoFetch(`/api/ba-targets/?month=${encodeURIComponent(month)}`)
     if (!response.ok) return
     const payload = (await response.json()) as { results?: BaMonthTarget[] }
-    replaceTargetsFromApi(Array.isArray(payload.results) ? payload.results : [])
+    replaceTargetsFromApi(Array.isArray(payload.results) ? payload.results : [], month)
   } catch {
     // keep the targets already on screen
   }

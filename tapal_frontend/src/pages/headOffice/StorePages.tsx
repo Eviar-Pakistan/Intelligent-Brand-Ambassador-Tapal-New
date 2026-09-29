@@ -1,5 +1,6 @@
 import { Link, useParams } from 'react-router-dom'
 import { ShiftPlanModal } from './ShiftPlanModal'
+import { StoreFootfallCard, StoreSettingsCard, StoreShopperContentCard } from './StoreAdmin'
 import { useEffect, useMemo, useState } from 'react'
 import { stores } from '../../data/mock'
 import {
@@ -186,10 +187,15 @@ export function StoreDetailPage() {
       )}
 
       <div className="grid gap-5 lg:grid-cols-2">
+        <StoreFootfallCard key={`${store.id}-${store.todayFootfall}`} storeId={store.id} today={store.todayFootfall} />
+        {record && <StoreSettingsCard key={record.id} record={record} inactive={store.status === 'Inactive'} />}
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-2">
         <Card>
           <h3 className="mb-3 font-semibold">Assigned Ambassadors</h3>
           {store.assigned.length === 0 ? (
-            <p className="text-sm text-slate-500">No BAs assigned — needs deployment.</p>
+            <p className="text-sm text-slate-500">No BA has a shift here this month or is deployed here.</p>
           ) : (
             <div className="space-y-2">
               {store.assigned.map((a) => (
@@ -202,7 +208,7 @@ export function StoreDetailPage() {
                     <Avatar name={a.name} size="sm" />
                     <span className="text-sm font-medium">{a.name}</span>
                   </div>
-                  <StatusBadge status={a.state} />
+                  <StatusBadge status={a.state === 'Active' ? 'On shift' : a.state} />
                 </Link>
               ))}
             </div>
@@ -223,6 +229,8 @@ export function StoreDetailPage() {
           </div>
         </Card>
       </div>
+
+      <StoreShopperContentCard storeId={store.id} />
     </div>
   )
 }

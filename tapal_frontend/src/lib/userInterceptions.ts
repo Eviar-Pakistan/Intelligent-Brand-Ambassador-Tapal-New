@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import { currentBaAccountId } from './baAccounts'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
@@ -80,10 +81,20 @@ async function sendInterception(entry: UserInterception) {
 export async function syncInterceptions() {
   const portal = currentPortal()
   if (portal === 'shopper' || (portal === 'office' && !djangoToken())) return
-  if (portal === 'ba') for (const entry of records.filter((r) => r.unsent)) await sendInterception(entry)
-  const rows = resultsOf(await portalGet<{ results: UserInterception[] }>('/api/interceptions/', portal))
+  let rows = resultsOf(await portalGet<{ results: UserInterception[] }>('/api/interceptions/', portal))
   if (!rows) return
-  commit([...records.filter((r) => r.unsent && !rows.some((row) => row.id === r.id)), ...rows])
+  if (portal === 'ba') {
+    // Anything this BA recorded on this phone that the server does not have yet is sent now
+    // (including records saved before the app sent them to the server).
+    const me = currentBaAccountId()
+    const onServer = new Set(rows.map((row) => row.id))
+    const missing = records.filter((r) => r.baId === me && !onServer.has(r.id))
+    for (const entry of missing) await sendInterception(entry)
+    if (missing.length) rows = resultsOf(await portalGet<{ results: UserInterception[] }>('/api/interceptions/', portal)) ?? rows
+  }
+  const onServer = new Set(rows.map((row) => row.id))
+  // Keep what the server does not have yet (never drop a record before it is saved there).
+  commit([...records.filter((r) => !onServer.has(r.id) && (portal === 'ba' || r.unsent)), ...rows])
 }
 
 export function useUserInterceptions() {
@@ -107,3 +118,10 @@ export function submitUserInterception(input: Omit<UserInterception, 'id' | 'cre
   void sendInterception(entry)
   return entry
 }
+
+/** A shopper counts as converted when they came from another brand (same rule as the server). */
+export function switchedToTapal(previousBrand: string) {
+  const brand = (previousBrand || '').trim().toLowerCase()
+  return !!brand && !brand.includes('tapal')
+}
+

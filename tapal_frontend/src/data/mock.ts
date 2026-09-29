@@ -428,7 +428,7 @@ export type Store = {
   footfall: 'High' | 'Medium' | 'Low'
   bas: number
   coverage: number
-  status: 'Covered' | 'PARTIAL' | 'NEEDS BA'
+  status: 'Covered' | 'PARTIAL' | 'NEEDS BA' | 'Inactive'
   todayFootfall: number
   engagement: number
   conversion: number

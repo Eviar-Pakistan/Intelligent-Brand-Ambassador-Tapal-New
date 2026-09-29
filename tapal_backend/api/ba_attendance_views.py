@@ -19,7 +19,7 @@ def _ambassador_from_token(token: str | None) -> Ambassador | None:
     token = (token or '').strip()
     if not token:
         return None
-    return Ambassador.objects.filter(invite_token=token).first()
+    return Ambassador.objects.filter(invite_token=token, is_active=True).first()
 
 
 def _today_shift_for(ambassador: Ambassador) -> ShiftAssignment | None:
@@ -37,10 +37,14 @@ def _today_shift_for(ambassador: Ambassador) -> ShiftAssignment | None:
         .select_related('store', 'ambassador')
         .order_by('shift_label', 'id')
     )
-    # Prefer an active (checked-in, not out) shift, else earliest not checked out, else any
+    # One check-in and one check-out per day: the shift the BA is on, else the one they already
+    # finished today (so a second shift cannot be started), else the earliest not started.
     active = qs.filter(checked_in_at__isnull=False, checked_out_at__isnull=True).first()
     if active:
         return active
+    done = qs.filter(checked_in_at__isnull=False, checked_out_at__isnull=False).first()
+    if done:
+        return done
     pending = qs.filter(checked_out_at__isnull=True).first()
     if pending:
         return pending
@@ -200,39 +204,47 @@ def ba_check_in(request):
         )
     if shift.checked_out_at:
         return Response(
-            {'detail': 'This shift was already ended.'},
+            {'detail': 'You have already checked in and out today. Check-in opens again tomorrow.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     if shift.checked_in_at:
         return Response(serialize_ba_shift(shift, ambassador))
 
-    lat = request.data.get('latitude')
-    lng = request.data.get('longitude')
-    accuracy = request.data.get('accuracy')
-
-    def _f(v):
-        if v is None or v == '':
-            return None
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
     shift.checked_in_at = timezone.now()
-    shift.check_in_lat = _f(lat)
-    shift.check_in_lng = _f(lng)
-    shift.check_in_accuracy_m = _f(accuracy)
+    shift.check_in_lat, shift.check_in_lng, shift.check_in_accuracy_m = _location(request.data)
+    from .portal_views import _image_from_data_url
+
+    selfie = _image_from_data_url(request.data.get('selfie'), f'checkin-{shift.id}-{ambassador.id}')
+    if selfie:
+        shift.check_in_photo.save(selfie.name, selfie, save=False)
     shift.save(
         update_fields=[
             'checked_in_at',
             'check_in_lat',
             'check_in_lng',
             'check_in_accuracy_m',
+            'check_in_photo',
             'updated_at',
         ]
     )
     notify_supervisor(shift, 'check-in')
     return Response(serialize_ba_shift(shift, ambassador))
+
+
+def _location(data) -> tuple[float | None, float | None, float | None]:
+    """(latitude, longitude, accuracy in metres) sent by the BA's phone; None where missing or invalid."""
+
+    def num(key, low, high):
+        try:
+            value = float(data.get(key))
+        except (TypeError, ValueError):
+            return None
+        return value if low <= value <= high else None
+
+    lat, lng = num('latitude', -90, 90), num('longitude', -180, 180)
+    if lat is None or lng is None:
+        return None, None, None
+    return lat, lng, num('accuracy', 0, 100000)
 
 
 REPORT_PARTS = ('stock', 'sales', 'otherBrands')
@@ -283,12 +295,16 @@ def ba_check_out(request):
     shift.report_submitted_at = now
     shift.checked_out_at = now
     shift.early_checkout_reason = str(request.data.get('early_reason') or '').strip()[:1000]
+    shift.check_out_lat, shift.check_out_lng, shift.check_out_accuracy_m = _location(request.data)
     shift.save(
         update_fields=[
             'checkout_report',
             'report_submitted_at',
             'checked_out_at',
             'early_checkout_reason',
+            'check_out_lat',
+            'check_out_lng',
+            'check_out_accuracy_m',
             'updated_at',
         ]
     )
@@ -308,3 +324,35 @@ def ba_leaderboard(request):
     data = build_ba_leaderboard()
     data['me_id'] = ambassador.id
     return Response(data)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def ba_footfall(request):
+    """
+    GET ?token= : today's footfall at the BA's store.  POST {token, count}: the BA enters it.
+    The store is where the BA works today (their shift), else where they are deployed.
+    """
+    from .portal_views import _ba_store
+    from .store_live import record_footfall, reset_stale_footfall
+
+    token = request.data.get('token') if request.method == 'POST' else request.query_params.get('token')
+    ambassador = _ambassador_from_token(token)
+    if not ambassador:
+        return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
+    store = _ba_store(ambassador)
+    if not store:
+        return Response({'detail': 'You have no store today.'}, status=status.HTTP_400_BAD_REQUEST)
+    if request.method == 'POST':
+        try:
+            count = int(request.data.get('count'))
+            if count < 0 or count > 100000:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({'detail': 'Enter the number of shoppers who came in today.'}, status=status.HTTP_400_BAD_REQUEST)
+        record_footfall(store, count, entered_by=f'{ambassador.name} ({ambassador.ba_code})')
+    else:
+        reset_stale_footfall()
+        store.refresh_from_db(fields=['today_footfall', 'footfall_date'])
+    return Response({'storeId': store.id, 'storeName': store.name, 'todayFootfall': store.today_footfall})
+

@@ -1,3 +1,4 @@
+import { InterceptionsPage } from './pages/headOffice/InterceptionsPage'
 import { ServerSync } from './components/ServerSync'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { DemoProvider, RoleProvider } from './context/AppContext'
@@ -8,7 +9,6 @@ import { DesktopShell } from './components/AppShell'
 import { BaShell, ShopperShell } from './components/RoleLayouts'
 import { ScreenHub } from './pages/ScreenHub'
 import { HeadOfficeGate, LoginPage } from './pages/LoginPage'
-import { SupervisorLoginPage } from './pages/supervisor/SupervisorLoginPage'
 import { BaDailyReportsPage, CommandCenterPage, OptimizationPage } from './pages/headOffice/CommandCenterPage'
 import { BaPerformanceDashboardPage } from './pages/headOffice/BaPerformanceDashboardPage'
 import { CampaignOverviewPage, CampaignsPage } from './pages/headOffice/CampaignPages'
@@ -19,8 +19,9 @@ import { DeploymentPage, StoreDetailPage, StoresPage } from './pages/headOffice/
 import { CreateStorePage } from './pages/headOffice/StoreCreation'
 import { SupervisorDetailPage, SupervisorsPage } from './pages/headOffice/SupervisorPages'
 import {
+  SupervisorAttendancePage,
   SupervisorBasPage,
-  SupervisorComplaintsPage,
+  SupervisorTargetsPage,
   SupervisorGate,
   SupervisorHomePage,
   SupervisorStoresPage,
@@ -70,6 +71,7 @@ const hoPages = (
     <Route path="ba-performance" element={<BaPerformanceDashboardPage />} />
     <Route path="daily-reports" element={<BaDailyReportsPage />} />
     <Route path="attendance" element={<BaAttendancePage />} />
+    <Route path="interceptions" element={<InterceptionsPage />} />
     <Route path="ambassadors" element={<AmbassadorsPage />} />
     <Route path="ambassadors/training" element={<TrainingManagerPage />} />
     <Route path="ambassadors/:id" element={<AmbassadorProfilePage />} />
@@ -101,7 +103,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<LoginPage />} />
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/supervisor/login" element={<SupervisorLoginPage />} />
+            <Route path="/supervisor/login" element={<LoginPage initialTab="supervisor" />} />
             <Route path="/portal" element={<ScreenHub />} />
 
             {/* Head Office — desktop command center */}
@@ -141,9 +143,10 @@ export default function App() {
               <Route index element={<SupervisorHomePage />} />
               <Route path="stores" element={<SupervisorStoresPage />} />
               <Route path="journey" element={<SupervisorJourneyPage />} />
+              <Route path="attendance" element={<SupervisorAttendancePage />} />
+              <Route path="targets" element={<SupervisorTargetsPage />} />
               <Route path="bas" element={<SupervisorBasPage />} />
               <Route path="submissions" element={<SupervisorSubmissionsPage />} />
-              <Route path="complaints" element={<SupervisorComplaintsPage />} />
             </Route>
 
             {/* Personal BA link — signs that ambassador in, then opens their app */}

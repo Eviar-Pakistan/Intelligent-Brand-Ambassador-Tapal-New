@@ -14,6 +14,7 @@ import {
   Map,
   ClipboardList,
   ClipboardCheck,
+  UserRound,
   CalendarDays,
   Sparkles,
   LogOut,
@@ -24,6 +25,8 @@ import {
   X,
   MessageSquareWarning,
   type LucideIcon,
+  Target,
+  UserCheck,
 } from 'lucide-react'
 import { roleMeta, useDemo, useRole, type Role } from '../context/AppContext'
 import { useEffect, useState } from 'react'
@@ -32,7 +35,7 @@ import { RoleSync } from './RoleLayouts'
 import { signOut, useSupervisorSession } from '../lib/supervisors'
 import {
   clearSupervisorNotifications,
-  mergeRemoteNotifications,
+  syncSupervisorNotifications,
   useSupervisorNotifications,
 } from '../lib/supervisorNotifications'
 import { enableSupervisorPush } from '../lib/supervisorPush'
@@ -56,6 +59,7 @@ const headOfficeNav: NavItem[] = [
   { to: '/ho/supervisors', label: 'Supervisors', icon: UserCog, section: 'Operations' },
   { to: '/ho/deployment', label: 'Deployment', icon: Map, section: 'Operations' },
   { to: '/ho/attendance', label: 'BA Attendance', icon: ClipboardCheck, section: 'Operations' },
+  { to: '/ho/interceptions', label: 'Interceptions', icon: UserRound, section: 'Operations' },
   { to: '/ho/complaints', label: 'Complaint Center', icon: MessageSquareWarning, section: 'Operations' },
   { to: '/ho/consumers', label: 'Consumers', icon: ShoppingBag, section: 'Intelligence' },
   { to: '/ho/optimization', label: 'AI Optimization', icon: Brain, section: 'Intelligence' },
@@ -86,9 +90,10 @@ const supervisorNav: NavItem[] = [
   { to: '/supervisor', label: 'Overview', icon: LayoutDashboard, end: true, section: 'My stores' },
   { to: '/supervisor/stores', label: 'Store Characteristics', icon: Store, section: 'My stores' },
   { to: '/supervisor/journey', label: 'Journey plan', icon: CalendarDays, section: 'My stores' },
+  { to: '/supervisor/attendance', label: 'BA Attendance', icon: UserCheck, section: 'My stores' },
+  { to: '/supervisor/targets', label: 'BA Targets', icon: Target, section: 'My stores' },
   { to: '/supervisor/bas', label: 'BA Performance', icon: Users, section: 'My stores' },
   { to: '/supervisor/submissions', label: 'BA submissions', icon: ClipboardCheck, section: 'My stores' },
-  { to: '/supervisor/complaints', label: 'Complaints', icon: MessageSquareWarning, section: 'My stores' },
 ]
 
 type ShellKind = 'headOffice' | 'admin' | 'storeManager' | 'supervisor'
@@ -136,11 +141,13 @@ const titles: Record<string, string> = {
   '/supervisor': 'Supervisor Overview',
   '/supervisor/stores': 'Store Characteristics',
   '/supervisor/journey': 'Journey plan',
+  '/supervisor/attendance': 'BA Attendance',
+  '/supervisor/targets': 'BA Targets',
   '/supervisor/bas': 'BA Performance',
   '/supervisor/submissions': 'BA submissions',
-  '/supervisor/complaints': 'Complaints',
   '/ho/deployment': 'Intelligent Deployment',
   '/ho/attendance': 'BA Attendance',
+  '/ho/interceptions': 'User Interceptions',
   '/ho/complaints': 'Complaint Center',
   '/ho/consumers': 'Consumer Intelligence',
   '/ho/optimization': 'AI Optimization',
@@ -239,23 +246,10 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
         setPushError(message)
         console.error('[push] token registration failed', error)
       })
-    let stop = false
-    async function pull() {
-      try {
-        const response = await fetch(`/api/push/inbox?supervisorId=${encodeURIComponent(supervisorId)}`)
-        if (!response.ok) return
-        const data = (await response.json()) as {
-          events: { id: string; supervisorId: string; body: string; createdAt: string }[]
-        }
-        if (!stop) mergeRemoteNotifications(data.events ?? [])
-      } catch {
-        // the dev push server is optional
-      }
-    }
-    void pull()
-    const id = window.setInterval(() => void pull(), 8000)
+    // The bell reads the server's notifications (the server also sends the push to the phone).
+    void syncSupervisorNotifications()
+    const id = window.setInterval(() => void syncSupervisorNotifications(), 15000)
     return () => {
-      stop = true
       window.clearInterval(id)
     }
   }, [kind, sv.supervisor])

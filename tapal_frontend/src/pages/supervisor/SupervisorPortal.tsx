@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Link, Navigate } from 'react-router-dom'
 import { DesktopShell } from '../../components/AppShell'
+import { BaAttendancePage } from '../headOffice/BaAttendancePage'
+import { SupervisorTargets } from './SupervisorTargets'
 import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
 import { Card, Modal, PageHeader, StatusBadge, TableScroll, Tabs } from '../../components/ui'
 import { useComplaints } from '../../context/ComplaintsContext'
@@ -362,6 +364,27 @@ function SubmissionSlice({
           ))}
         </ul>
       )}
+    </div>
+  )
+}
+
+export function SupervisorAttendancePage() {
+  const { supervisor, header } = usePortal('BA Attendance', 'present, absent and late BAs at your stores')
+  if (!supervisor) return header
+  return (
+    <div className="space-y-5">
+      {header}
+      <BaAttendancePage storeIds={supervisor.storeIds} />
+    </div>
+  )
+}
+
+export function SupervisorTargetsPage() {
+  const { supervisor, header } = usePortal('BA Targets', 'targets and sales achievement at your stores')
+  return (
+    <div className="space-y-5">
+      {header}
+      {supervisor && <SupervisorTargets />}
     </div>
   )
 }

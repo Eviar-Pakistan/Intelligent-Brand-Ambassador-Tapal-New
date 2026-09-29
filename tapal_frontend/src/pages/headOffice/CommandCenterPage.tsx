@@ -342,7 +342,7 @@ export function BaDailyReportsPage() {
           <h2 className="text-lg font-bold text-slate-900 sm:text-xl">BA daily reports</h2>
           <p className="text-sm text-slate-500">
             {reports.length
-              ? `${reports.length} received in this browser`
+              ? `${reports.length} received from BAs`
               : 'Stock, daily sales, and competitor prices appear here when a BA submits'}
           </p>
         </div>
@@ -368,6 +368,7 @@ export function BaDailyReportsPage() {
               <thead className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
                 <tr>
                   <th className="py-2 pr-3">BA</th>
+                  <th className="py-2 pr-3">Store</th>
                   <th className="py-2 pr-3">City</th>
                   <th className="py-2 pr-3">When</th>
                   <th className="py-2 pr-3">Source</th>
@@ -377,7 +378,11 @@ export function BaDailyReportsPage() {
               <tbody>
                 {reports.map((report) => (
                   <tr key={report.id} className="border-t border-slate-100">
-                    <td className="py-2.5 pr-3 font-semibold text-slate-900">{report.baName}</td>
+                    <td className="py-2.5 pr-3">
+                      <div className="font-semibold text-slate-900">{report.baName}</div>
+                      {report.baCode && <div className="font-mono text-xs text-slate-400">{report.baCode}</div>}
+                    </td>
+                    <td className="py-2.5 pr-3 text-slate-600">{report.storeName || '—'}</td>
                     <td className="py-2.5 pr-3 text-slate-600">{report.city || '—'}</td>
                     <td className="py-2.5 pr-3 text-slate-600">
                       {new Date(report.submittedAt).toLocaleString('en-PK', {

@@ -236,6 +236,7 @@ function emptyAggregate(townLabel: string): BaPerformanceAggregate {
 
 export function recordsFromTargets(
   rows: {
+    baId?: string
     city?: string
     storeName?: string
     month: string
@@ -243,7 +244,20 @@ export function recordsFromTargets(
     salesKg: number
     lines?: { sku: string; qty: number }[]
   }[],
+  /** BA interceptions (User interception form): shoppers the BA spoke with and what they bought */
+  interceptions: { baId: string; createdAt: string; currentSku: string }[] = [],
 ): BaPerformanceRecord[] {
+  // Interceptions per BA and month (YYYY-MM, Karachi time).
+  const monthOf = (iso: string) =>
+    new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' }).slice(0, 7)
+  const intercepted = new Map<string, { total: number; productive: number }>()
+  for (const item of interceptions) {
+    const key = `${item.baId}|${monthOf(item.createdAt)}`
+    const entry = intercepted.get(key) ?? { total: 0, productive: 0 }
+    entry.total += 1
+    if (item.currentSku.trim()) entry.productive += 1
+    intercepted.set(key, entry)
+  }
   return rows.map((row) => {
     const lines = row.lines ?? []
     const bucket = (kind: 'danedar' | 'family' | 'tea') =>
@@ -261,8 +275,8 @@ export function recordsFromTargets(
       town: row.city?.trim() || 'Unknown',
       month: MONTH_ORDER[monthIndex] ?? row.month,
       store: row.storeName?.trim() || 'Store',
-      customersIntercepted: 0,
-      productiveCalls: 0,
+      customersIntercepted: intercepted.get(`${row.baId}|${row.month}`)?.total ?? 0,
+      productiveCalls: intercepted.get(`${row.baId}|${row.month}`)?.productive ?? 0,
       targetKg: row.targetKg,
       salesKg: row.salesKg,
       danedarSales: bucket('danedar'),

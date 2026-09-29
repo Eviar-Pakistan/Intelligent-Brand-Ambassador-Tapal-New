@@ -199,6 +199,37 @@ export function setLogin(supervisorId: string, email: string, password: string) 
   }).then((saved) => saved && replaceOne(saved))
 }
 
+/** Head Office edits a supervisor's name, phone and city (email and password: `setLogin`). */
+export async function updateSupervisorDetails(
+  supervisorId: string,
+  fields: { name: string; phone: string; city: string },
+): Promise<string | null> {
+  const clean = { name: fields.name.trim(), phone: fields.phone.trim(), city: fields.city.trim() }
+  if (!clean.name) return 'Name is required.'
+  try {
+    const saved = await portalSend<Supervisor>(
+      `/api/supervisors/${encodeURIComponent(supervisorId)}/`,
+      'PATCH',
+      clean,
+      'office',
+    )
+    if (saved) replaceOne(saved)
+    else commit(supervisors.map((s) => (s.id === supervisorId ? { ...s, ...clean } : s)))
+    return null
+  } catch (error) {
+    return error instanceof Error ? error.message : 'The details could not be saved.'
+  }
+}
+
+/** Head Office: the supervisor's current password. Null when it was set before copies were kept. */
+export async function fetchSupervisorPassword(supervisorId: string) {
+  const data = await portalGet<{ password: string | null; hasLogin: boolean }>(
+    `/api/supervisors/${encodeURIComponent(supervisorId)}/password/`,
+    'office',
+  )
+  return data
+}
+
 export function assignStores(supervisorId: string, storeIds: number[]) {
   commit(withStoresAssigned(supervisors, supervisorId, storeIds))
   void sendToServer(`/api/supervisors/${encodeURIComponent(supervisorId)}/`, 'PATCH', { storeIds }).then(() =>

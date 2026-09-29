@@ -41,6 +41,7 @@ class Store(models.Model):
     coverage = models.PositiveSmallIntegerField(default=0)
     bas = models.PositiveSmallIntegerField(default=0)
     today_footfall = models.PositiveIntegerField(default=0)
+    footfall_date = models.DateField(null=True, blank=True, help_text='Day today_footfall was entered for')
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     qr_slug = models.SlugField(max_length=64, unique=True, blank=True)
@@ -349,6 +350,10 @@ class Ambassador(models.Model):
         default=Status.PENDING,
     )
     invite_token = models.CharField(max_length=64, unique=True, blank=True)
+    is_active = models.BooleanField(
+        default=True,
+        help_text='Deactivated BAs keep their history but cannot open the app or be scheduled.',
+    )
     overall_score = models.FloatField(null=True, blank=True)
     report_json = models.JSONField(default=dict, blank=True)
     certified_at = models.DateTimeField(null=True, blank=True)
@@ -648,6 +653,10 @@ class ShiftAssignment(models.Model):
     check_in_lat = models.FloatField(null=True, blank=True)
     check_in_lng = models.FloatField(null=True, blank=True)
     check_in_accuracy_m = models.FloatField(null=True, blank=True)
+    check_in_photo = models.ImageField(upload_to='checkins/', blank=True, null=True, help_text='Selfie from the face check')
+    check_out_lat = models.FloatField(null=True, blank=True)
+    check_out_lng = models.FloatField(null=True, blank=True)
+    check_out_accuracy_m = models.FloatField(null=True, blank=True)
     report_submitted_at = models.DateTimeField(
         null=True, blank=True, help_text='When the BA submitted the checkout report (check-out counts only after this)'
     )
@@ -704,6 +713,9 @@ class Supervisor(models.Model):
     email = models.EmailField(unique=True, help_text='Also the sign-in name')
     city = models.CharField(max_length=100, blank=True)
     password = models.CharField(max_length=128, blank=True, help_text='Django password hash; empty = no login yet')
+    password_encrypted = models.TextField(
+        blank=True, help_text='Encrypted copy so Head Office can look the password up (key derived from SECRET_KEY)'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -713,10 +725,30 @@ class Supervisor(models.Model):
     def __str__(self):
         return f'{self.name} ({self.email})'
 
+    @staticmethod
+    def _fernet():
+        import base64
+        import hashlib
+
+        from cryptography.fernet import Fernet
+
+        key = hashlib.sha256(f'supervisor-password:{settings.SECRET_KEY}'.encode()).digest()
+        return Fernet(base64.urlsafe_b64encode(key))
+
     def set_password(self, raw: str) -> None:
         from django.contrib.auth.hashers import make_password
 
         self.password = make_password(raw)
+        self.password_encrypted = self._fernet().encrypt(raw.encode()).decode()
+
+    def reveal_password(self) -> str | None:
+        """The current password for Head Office, or None when it was set before copies were kept."""
+        if not self.password_encrypted:
+            return None
+        try:
+            return self._fernet().decrypt(self.password_encrypted.encode()).decode()
+        except Exception:  # SECRET_KEY changed since it was set
+            return None
 
     def check_password(self, raw: str) -> bool:
         from django.contrib.auth.hashers import check_password
@@ -918,4 +950,36 @@ class SupervisorPushEvent(models.Model):
 
     def __str__(self):
         return f'{self.supervisor_id} · {self.title}'
+
+
+class StoreFootfall(models.Model):
+    """Shoppers who walked into a store on a day, entered by the BA or Head Office."""
+
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='footfall_days')
+    date = models.DateField()
+    count = models.PositiveIntegerField()
+    entered_by = models.CharField(max_length=120, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date']
+        constraints = [models.UniqueConstraint(fields=['store', 'date'], name='one_footfall_per_store_day')]
+
+
+class TrainingPractice(models.Model):
+    """An answer a BA gave while retraining (video questions or practice scenarios)."""
+
+    class Kind(models.TextChoices):
+        VIDEO = 'video', 'Training video question'
+        SCENARIO = 'scenario', 'Practice scenario'
+
+    ambassador = models.ForeignKey(Ambassador, on_delete=models.CASCADE, related_name='practice_answers')
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    title = models.CharField(max_length=200, blank=True, help_text='Training module or scenario name')
+    question = models.TextField()
+    answer = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
 

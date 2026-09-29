@@ -1,10 +1,13 @@
+import type { ParsedBaReport } from '../../lib/baReport'
+import { portalSend } from '../../lib/serverApi'
+import { useKpiConfig } from '../../lib/kpiConfig'
+import { baStatusLabel, useBaMe } from '../../lib/baMe'
 import { Link, useNavigate } from 'react-router-dom'
 import { useEffect, useRef, useState } from 'react'
 import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
-  ChevronRight,
   ClipboardList,
   CloudSun,
   Download,
@@ -14,13 +17,11 @@ import {
   Upload,
   UserRound,
 } from 'lucide-react'
-import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
+import { calculateIncentive, formatPkr } from '../../lib/incentives'
 import {
   achievementPct,
   currentMonthKey,
   formatTargetMonth,
-  targetForBa,
-  useBaTargets,
 } from '../../lib/baTargets'
 import { useBrand } from '../../context/BrandContext'
 import { formatDate, formatTime, useBaShift } from '../../context/BaShiftContext'
@@ -36,10 +37,8 @@ import {
 import { FaceCheckInModal } from '../../components/FaceCheckInModal'
 import { Modal } from '../../components/ui'
 import { useBaSession } from '../../lib/baAccounts'
-import { ambassadors, stores } from '../../data/mock'
 import { mirrorCheckIn } from '../../lib/djangoApi'
 import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
-import { notifyBaCheckIn, notifyBaCheckOut } from '../../lib/supervisorNotifications'
 import { useUserInterceptions } from '../../lib/userInterceptions'
 import { BaOnboarding } from './BaOnboarding'
 
@@ -69,6 +68,7 @@ function initialsOf(name: string) {
 }
 
 export function BaHomePage() {
+  const me = useBaMe()
   const { brand } = useBrand()
   const { account } = useBaSession()
   const baName = account?.name ?? 'Brand Ambassador'
@@ -76,7 +76,6 @@ export function BaHomePage() {
   const {
     city,
     storeLabel,
-    shiftStore,
     shiftLabel,
     shiftEndLabel,
     checkedIn,
@@ -88,6 +87,8 @@ export function BaHomePage() {
     checkIn,
     setEarlyCheckoutReason,
     submitCheckoutReport,
+    doneForToday,
+    reloadShift,
   } = useBaShift()
 
   const [now, setNow] = useState(() => new Date())
@@ -101,6 +102,8 @@ export function BaHomePage() {
   const [excelErrors, setExcelErrors] = useState<string[]>([])
   const [excelBusy, setExcelBusy] = useState(false)
   const excelInputRef = useRef<HTMLInputElement>(null)
+  // A report file waiting for the early check-out reason before it checks the BA out
+  const [pendingExcel, setPendingExcel] = useState<{ file: File; data: ParsedBaReport } | null>(null)
   const reports = useDailyReports()
   const interceptions = useUserInterceptions()
   const baId = account?.id ?? 'ba'
@@ -118,10 +121,23 @@ export function BaHomePage() {
       setExcelErrors(result.errors)
       return
     }
+    setExcelErrors([])
+    // Uploading checks out. Before shift end, ask for the early check-out reason first.
+    if (!reportSubmitted && isEarlyCheckout && !earlyCheckoutReason) {
+      setPendingExcel({ file, data: result.data })
+      setEarlyReason('')
+      setEarlyReasonOpen(true)
+      return
+    }
+    await finishExcelCheckout(file, result.data, earlyCheckoutReason)
+  }
+
+  async function finishExcelCheckout(file: File, data: ParsedBaReport, reason: string | null) {
+    const result = { data }
     // Checking out with the file counts only once the server has the report (that marks attendance).
     if (!reportSubmitted) {
       setExcelBusy(true)
-      const problem = await submitCheckoutReport(result.data)
+      const problem = await submitCheckoutReport(result.data, reason)
       setExcelBusy(false)
       if (problem) {
         setExcelErrors([problem])
@@ -142,25 +158,7 @@ export function BaHomePage() {
         recordEarlyCheckout({
           baId,
           baName,
-          reason: earlyCheckoutReason ?? 'Checked out before shift end',
-        })
-      }
-      const ambassador = ambassadors.find((a) => a.id === baId)
-      const store = ambassador?.storeId != null ? stores.find((s) => s.id === ambassador.storeId) : undefined
-      if (ambassador?.storeId != null && store) {
-        notifyBaCheckOut({
-          baName,
-          storeId: store.id,
-          storeName: store.name,
-          at: new Date(),
-        })
-      } else if (shiftStore) {
-        notifyBaCheckOut({
-          baName,
-          storeId: shiftStore.id,
-          storeName: shiftStore.name,
-          supervisorId: shiftStore.supervisorId,
-          at: new Date(),
+          reason: reason ?? earlyCheckoutReason ?? 'Checked out before shift end',
         })
       }
     }
@@ -180,7 +178,22 @@ export function BaHomePage() {
     if (reason.length < 8) return
     setEarlyCheckoutReason(reason)
     setEarlyReasonOpen(false)
+    if (pendingExcel) {
+      // The uploaded report file was waiting for this reason: check out with it now.
+      const { file, data } = pendingExcel
+      setPendingExcel(null)
+      void finishExcelCheckout(file, data, reason)
+      return
+    }
     setCheckoutWarningOpen(true)
+  }
+
+  function cancelEarlyReason() {
+    setEarlyReasonOpen(false)
+    if (pendingExcel) {
+      setPendingExcel(null)
+      setExcelErrors(['Upload cancelled — you have not checked out.'])
+    }
   }
 
   useEffect(() => {
@@ -268,15 +281,10 @@ export function BaHomePage() {
         <div className="mt-1 flex items-start justify-between gap-3">
           <div>
             <h2 className="text-2xl font-bold text-slate-900">{baName} 👋</h2>
-            <p className="mt-1 text-base font-semibold text-brand-600">A+ Certified</p>
+            <p className="mt-1 text-base font-semibold text-brand-600">
+              {baStatusLabel(me?.status ?? (account?.status === 'Certified' ? 'Certified' : account?.status))}
+            </p>
           </div>
-          <Link
-            to="/ba/performance"
-            className="flex shrink-0 items-center gap-0.5 pt-1.5 text-sm font-semibold text-brand-600"
-          >
-            View Profile
-            <ChevronRight size={16} />
-          </Link>
         </div>
       </div>
 
@@ -292,7 +300,7 @@ export function BaHomePage() {
             <div className="font-semibold text-slate-900">{storeLabel || city || 'No store assigned'}</div>
             <div className="text-sm text-slate-500">{shiftLabel}</div>
           </div>
-          {!checkedIn ? (
+          {!checkedIn && !doneForToday ? (
             <button
               type="button"
               onClick={() => setFaceCheckOpen(true)}
@@ -303,7 +311,7 @@ export function BaHomePage() {
           ) : (
             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-brand-50 px-3 py-1.5 text-xs font-bold text-brand-700">
               <CheckCircle2 size={14} />
-              Checked In
+              {doneForToday ? 'Done for today' : 'Checked In'}
             </span>
           )}
         </div>
@@ -347,6 +355,8 @@ export function BaHomePage() {
           </div>
         )}
       </div>
+
+      {/* Today's footfall card (BaFootfallCard) is hidden for now. */}
 
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
         <div className="flex items-center gap-2">
@@ -472,34 +482,18 @@ export function BaHomePage() {
       <FaceCheckInModal
         open={faceCheckOpen}
         onClose={() => setFaceCheckOpen(false)}
-        onConfirmed={() => {
+        onConfirmed={(selfie) => {
           checkIn()
-          const ambassador = ambassadors.find((a) => a.id === (account?.id ?? 'ayesha'))
-          const store = ambassador?.storeId != null ? stores.find((s) => s.id === ambassador.storeId) : undefined
-          mirrorCheckIn(account?.accessToken)
-          if (ambassador?.storeId != null && store) {
-            notifyBaCheckIn({
-              baName: account?.name ?? ambassador.name,
-              storeId: store.id,
-              storeName: store.name,
-              at: new Date(),
-            })
-          } else if (shiftStore) {
-            notifyBaCheckIn({
-              baName,
-              storeId: shiftStore.id,
-              storeName: shiftStore.name,
-              supervisorId: shiftStore.supervisorId,
-              at: new Date(),
-            })
-          }
+          mirrorCheckIn(account?.accessToken, selfie)
+          // Re-read today's shift so the app matches what the server recorded.
+          window.setTimeout(reloadShift, 4000)
           setFaceCheckOpen(false)
         }}
       />
 
       <Modal
         open={earlyReasonOpen}
-        onClose={() => setEarlyReasonOpen(false)}
+        onClose={cancelEarlyReason}
         title="Early check-out"
       >
         <div className="space-y-4">
@@ -531,7 +525,7 @@ export function BaHomePage() {
             </button>
             <button
               type="button"
-              onClick={() => setEarlyReasonOpen(false)}
+              onClick={cancelEarlyReason}
               className="w-full rounded-xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 sm:w-auto sm:px-5"
             >
               Cancel
@@ -600,9 +594,17 @@ export function BaHomePage() {
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
         <h3 className="text-sm font-bold text-slate-900">Today&apos;s Goals</h3>
         <div className="mt-4 grid grid-cols-3 gap-1.5 text-center sm:gap-2">
-          <BaGoalStat label="Engagement" value="25/30" />
-          <BaGoalStat label="Conversions" value="80%" />
-          <BaGoalStat label="Conversations" value="40/50" />
+          <BaGoalStat label="Engagement" value={me ? `${me.today.interceptions}/${me.today.dailyGoal}` : '—'} />
+          <BaGoalStat
+            label="Conversions"
+            value={me && me.today.interceptions ? `${Math.round((me.today.switched / me.today.interceptions) * 100)}%` : '—'}
+          />
+          <BaGoalStat
+            label="Month target"
+            value={
+              me?.monthTarget ? `${achievementPct(me.monthTarget.targetKg, me.monthTarget.salesKg)}%` : '—'
+            }
+          />
         </div>
         <div className="mt-5 flex items-end justify-around gap-3">
           {brand.baGoalProducts.map((product, index) => (
@@ -713,6 +715,13 @@ const trainingScenarios = [
 
 const TRAINING_TOTAL = trainingScenarios.length
 
+/** Retraining answers go to the server so Head Office sees them on the BA's profile. */
+function savePractice(kind: 'video' | 'scenario', title: string, question: string, answer: string) {
+  void portalSend('/api/ba/training/practice/', 'POST', { kind, title, question, answer: answer.trim() }, 'ba').catch(
+    () => undefined,
+  )
+}
+
 export function BaTrainingPage() {
   const { account } = useBaSession()
   // A BA still onboarding goes through the video + verbal assessment; once certified,
@@ -738,6 +747,7 @@ function BaTrainingLibrary() {
 
   function submitAnswer() {
     if (answer.trim().length < 8) return
+    savePractice('scenario', `Scenario ${scenarioIndex + 1}`, scenario.question, answer)
     setSubmitted(true)
   }
 
@@ -750,6 +760,7 @@ function BaTrainingLibrary() {
 
   function nextQuestion() {
     if (!module || videoAnswer.trim().length < 4) return
+    if (question) savePractice('video', module.title, question.prompt, videoAnswer)
     if (qIndex >= module.questions.length - 1) {
       if (moduleIndex < modules.length - 1) {
         setModuleIndex((i) => i + 1)
@@ -923,15 +934,16 @@ function BaTrainingLibrary() {
 }
 
 export function BaPerformancePage() {
-  const { account } = useBaSession()
-  const baId = account?.id ?? 'ayesha'
-  const monthTarget = targetForBa(baId, currentMonthKey(), useBaTargets())
-  const me = buildIncentiveRoster().find((r) => r.baId === baId) ?? buildIncentiveRoster().find((r) => r.baId === 'ayesha')
-  const rank = me?.rank ?? 2
-  const basePay = me?.base ?? 0
-  const incentive = me?.incentive ?? 0
-  const totalPkr = basePay + incentive
-  const daysWorked = 18
+  const me = useBaMe()
+  const kpi = useKpiConfig()
+  const target = me?.monthTarget ?? null
+  // Pay: base + conversion and session incentives, from the KPI settings Head Office set.
+  const pay = me
+    ? calculateIncentive(
+        { baId: '', name: me.name, city: me.city, rank: me.rank ?? 0, conversion: me.conversion, sessions: me.weekSessions },
+        kpi,
+      )
+    : null
 
   return (
     <div className="space-y-4 bg-[#f7f4ec] p-4 pb-6">
@@ -945,89 +957,79 @@ export function BaPerformancePage() {
           <div>
             <div className="text-xs font-semibold tracking-wide text-gold-400 uppercase">Your rank</div>
             <div className="mt-1 flex items-baseline gap-1">
-              <span className="text-5xl font-black text-gold-400">#{rank}</span>
-              <span className="text-sm text-white/80">Lahore</span>
+              <span className="text-5xl font-black text-gold-400">{me?.rank ? `#${me.rank}` : '—'}</span>
+              <span className="text-sm text-white/80">
+                {me?.rank ? `of ${me.rankedOutOf}` : 'Not ranked yet'}
+                {me?.city ? ` · ${me.city}` : ''}
+              </span>
             </div>
+            {me && <div className="mt-1 text-xs text-white/70">{me.points.toLocaleString()} points</div>}
           </div>
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-gold-500/20 ring-2 ring-gold-400/40">
             <Trophy className="text-gold-400" size={24} />
           </div>
         </div>
         <div className="mt-4 rounded-xl bg-white/10 px-3 py-2.5 backdrop-blur-sm">
-          <div className="text-[10px] font-medium text-white/70 uppercase">Earned</div>
-          <div className="mt-0.5 text-lg font-bold text-gold-400">{formatPkr(totalPkr)}</div>
+          <div className="text-[10px] font-medium text-white/70 uppercase">Earned this week</div>
+          <div className="mt-0.5 text-lg font-bold text-gold-400">{pay ? formatPkr(pay.totalPkr) : '—'}</div>
         </div>
       </div>
 
-      {monthTarget && (
-        <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-sm font-bold text-slate-900">Target vs achievement</h3>
-            <span className="text-[11px] font-semibold text-slate-500">{formatTargetMonth(monthTarget.month)}</span>
-          </div>
-          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-            <div>
-              <div className="text-lg font-bold text-slate-900">{monthTarget.targetKg}</div>
-              <div className="text-[10px] font-medium text-slate-500">Target Kg</div>
-            </div>
-            <div>
-              <div className="text-lg font-bold text-slate-900">{monthTarget.salesKg}</div>
-              <div className="text-[10px] font-medium text-slate-500">Sales Kg</div>
-            </div>
-            <div>
-              <div className="text-lg font-bold text-brand-600">
-                {achievementPct(monthTarget.targetKg, monthTarget.salesKg)}%
-              </div>
-              <div className="text-[10px] font-medium text-slate-500">Achievement</div>
-            </div>
-          </div>
-        </div>
-      )}
-
-
-      <div className="grid grid-cols-2 gap-2">
-        <BaStatPill label="Rating" value="4.8" />
-        <BaStatPill label="Days worked" value={String(daysWorked)} />
+      <div className="grid grid-cols-3 gap-2">
+        <BaStatPill label="Rating" value={me?.rating != null ? `${me.rating} ★` : '—'} />
+        <BaStatPill label="Days worked" value={me ? String(me.daysWorked) : '—'} />
+        <BaStatPill label="Conversion" value={me ? `${me.conversion}%` : '—'} />
       </div>
 
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
         <div className="flex items-center justify-between gap-2">
           <div className="text-sm font-bold text-slate-900">Target vs achievement</div>
           <span className="text-[11px] font-semibold text-slate-500">
-            {formatTargetMonth(monthTarget?.month ?? currentMonthKey())}
+            {formatTargetMonth(target?.month ?? currentMonthKey())}
           </span>
         </div>
-        {monthTarget ? (
+        {target ? (
           <div className="mt-3 grid grid-cols-3 gap-2 text-center">
             <div>
-              <div className="text-lg font-bold text-slate-900">{monthTarget.targetKg}</div>
+              <div className="text-lg font-bold text-slate-900">{target.targetKg}</div>
               <div className="text-[10px] font-medium text-slate-500">Target Kg</div>
             </div>
             <div>
-              <div className="text-lg font-bold text-slate-900">{monthTarget.salesKg}</div>
+              <div className="text-lg font-bold text-slate-900">{target.salesKg}</div>
               <div className="text-[10px] font-medium text-slate-500">Sales Kg</div>
             </div>
             <div>
-              <div className="text-lg font-bold text-brand-600">
-                {achievementPct(monthTarget.targetKg, monthTarget.salesKg)}%
-              </div>
+              <div className="text-lg font-bold text-brand-600">{achievementPct(target.targetKg, target.salesKg)}%</div>
               <div className="text-[10px] font-medium text-slate-500">Achievement</div>
             </div>
           </div>
         ) : (
           <p className="mt-2 text-sm text-slate-500">No target has been set for this month yet.</p>
         )}
+        {target?.lines && target.lines.length > 0 && (
+          <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto border-t border-slate-100 pt-2 text-xs">
+            {target.lines
+              .filter((line) => line.qty > 0)
+              .map((line) => (
+                <li key={line.sku} className="flex justify-between gap-2">
+                  <span className="text-slate-600">{line.sku}</span>
+                  <span className="font-semibold text-slate-900">{line.qty} kg</span>
+                </li>
+              ))}
+          </ul>
+        )}
       </div>
 
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
         <div className="text-sm font-bold text-slate-900">PKR breakdown</div>
         <div className="mt-3 space-y-2.5">
-          <BaPayRow label="Base pay" value={basePay} />
-          <BaPayRow label="Incentive" value={incentive} />
+          <BaPayRow label="Base pay" value={pay?.base ?? 0} />
+          <BaPayRow label={`Conversion (${me?.conversion ?? 0}%)`} value={pay?.conversionPay ?? 0} />
+          <BaPayRow label={`Sessions (${me?.weekSessions ?? 0} this week)`} value={pay?.sessionPay ?? 0} />
         </div>
         <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
           <span className="text-sm font-bold text-slate-900">Total earned</span>
-          <span className="text-lg font-black text-brand-600">{formatPkr(totalPkr)}</span>
+          <span className="text-lg font-black text-brand-600">{formatPkr(pay?.totalPkr ?? 0)}</span>
         </div>
       </div>
     </div>

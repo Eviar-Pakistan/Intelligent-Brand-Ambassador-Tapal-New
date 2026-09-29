@@ -338,3 +338,308 @@ class UncertifiedBaCanUseAppTests(PortalTestBase):
         self.assertEqual(self.anon.get(f'/api/ba/leaderboard/?token={token}').status_code, 200)
         legacy = self.anon.post('/api/ba/complaints/', {'token': token, 'store_id': self.store.id, 'complaint': 'x'}, format='json')
         self.assertEqual(legacy.status_code, 201)
+
+
+class AmbassadorManagementTests(PortalTestBase):
+    def test_edit_details(self):
+        res = self.ho.patch(f'/api/ambassadors/{self.ba.id}/', {'name': 'Ali Raza', 'phone': '0301', 'city': 'Multan'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual((res.data['name'], res.data['phone'], res.data['city']), ('Ali Raza', '0301', 'Multan'))
+        self.assertEqual(self.ho.patch(f'/api/ambassadors/{self.ba.id}/', {'name': ' '}, format='json').status_code, 400)
+        other = Ambassador.objects.create(name='B', email='b@x.com')
+        self.assertEqual(self.ho.patch(f'/api/ambassadors/{self.ba.id}/', {'email': 'B@x.com'}, format='json').status_code, 400)
+        self.assertTrue(other.pk)
+
+    def test_deactivated_ba_is_locked_out(self):
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        res = self.ho.patch(f'/api/ambassadors/{self.ba.id}/', {'is_active': False}, format='json')
+        self.assertFalse(res.data['is_active'])
+        self.assertEqual(self.anon.get(f'/api/ba/invite/{token}/').status_code, 404)
+        self.assertEqual(self.anon.get(f'/api/ba/today-shift/?token={token}').status_code, 404)
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 404)
+        self.assertEqual(self.ho.get('/api/attendance/').data['results'], [])
+        bulk = self.ho.post('/api/shifts/bulk/', {'rows': [{
+            'ba_code': self.ba.ba_code, 'store_code': 'ST-01', 'start_time': '10:00', 'end_time': '14:00', 'month': '2026-11',
+        }]}, format='json')
+        self.assertEqual(bulk.status_code, 400)
+        self.ho.patch(f'/api/ambassadors/{self.ba.id}/', {'is_active': True}, format='json')
+        self.assertEqual(self.anon.get(f'/api/ba/today-shift/?token={token}').status_code, 200)
+
+    def test_single_target_total(self):
+        body = {'rows': [{'baCode': self.ba.ba_code, 'month': '2026-10', 'targetKg': 120, 'salesKg': 30}]}
+        res = self.ho.post('/api/ba-targets/', body, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        row = self.ho.get('/api/ba-targets/?month=2026-10').data['results'][0]
+        self.assertEqual((row['targetKg'], row['salesKg'], row['lines']), (120.0, 30.0, []))
+
+
+class LiveStoreTests(PortalTestBase):
+    def store_row(self, client=None, pk=None):
+        return (client or self.ho).get(f'/api/stores/{pk or self.store.id}/').data
+
+    def test_status_coverage_and_assigned_follow_shifts(self):
+        row = self.store_row()
+        self.assertEqual((row['status'], row['bas'], row['assigned']), ('Pending', 0, []))
+        self.schedule_ba_today()
+        row = self.store_row()
+        self.assertEqual((row['status'], row['bas'], row['coverage']), ('PARTIAL', 1, 0))
+        self.assertEqual(row['assigned'], [{'id': f'api-{self.ba.id}', 'name': 'Ali', 'state': 'Offline'}])
+        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
+        row = self.store_row()
+        self.assertEqual((row['status'], row['coverage'], row['assigned'][0]['state']), ('LIVE', 100, 'Active'))
+
+    def test_edit_deactivate_delete(self):
+        res = self.ho.patch(f'/api/stores/{self.store.id}/', {'name': 'Metro Plus', 'contact_phone': '042'}, format='json')
+        self.assertEqual((res.data['name'], res.data['contact_phone']), ('Metro Plus', '042'))
+        self.assertEqual(self.ho.patch(f'/api/stores/{self.store.id}/', {'status': 'INACTIVE'}, format='json').data['status'], 'INACTIVE')
+        self.assertEqual(self.ho.patch(f'/api/stores/{self.store.id}/', {'status': 'Pending'}, format='json').data['status'], 'Pending')
+        self.assertEqual(self.ho.delete(f'/api/stores/{self.other_store.id}/').status_code, 204)
+        self.assertFalse(Store.objects.filter(pk=self.other_store.id).exists())
+
+    def test_footfall_by_head_office_and_ba_and_daily_reset(self):
+        from datetime import timedelta
+        from .models import StoreFootfall
+
+        res = self.ho.post(f'/api/stores/{self.store.id}/footfall/', {'count': 200}, format='json')
+        self.assertEqual(res.data['today_footfall'], 200)
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        self.assertEqual(self.anon.get(f'/api/ba/footfall/?token={token}').data['todayFootfall'], 200)
+        self.assertEqual(self.anon.post('/api/ba/footfall/', {'token': token, 'count': 250}, format='json').data['todayFootfall'], 250)
+        self.assertEqual(StoreFootfall.objects.get(store=self.store).count, 250)
+        self.assertEqual(self.anon.post('/api/ba/footfall/', {'token': token, 'count': -1}, format='json').status_code, 400)
+        Store.objects.filter(pk=self.store.pk).update(footfall_date=self.today - timedelta(days=1))
+        self.assertEqual(self.anon.get(f'/api/ba/footfall/?token={token}').data['todayFootfall'], 0)
+
+    def test_conversion_and_engagement_include_interceptions(self):
+        from .models import UserInterception
+
+        for i, brand in enumerate(['Lipton', 'Supreme', 'Tapal Danedar', 'lipton']):
+            UserInterception.objects.create(
+                id=f'int-{i}', ambassador=self.ba, ba_name='Ali', store=self.store, name='S', contact='0300',
+                previous_brand=brand, current_sku='DD 90g', created_at=timezone.now(),
+            )
+        self.ho.post(f'/api/stores/{self.store.id}/footfall/', {'count': 8}, format='json')
+        row = self.store_row()
+        self.assertEqual(row['conversion'], 75.0)   # 3 of 4 switched to Tapal
+        self.assertEqual(row['engagement'], 50.0)   # 4 engaged / 8 walked in
+        metrics = self.ho.get('/api/intelligence/campaign-metrics/').data
+        self.assertEqual(metrics['kpis']['conversion_rate'], 75.0)
+        pin = [p for p in metrics['map_pins'] if p['id'] == self.store.id][0]
+        self.assertEqual(pin['conversion_rate'], 75.0)
+
+
+class StoreShopperContentTests(PortalTestBase):
+    def test_store_questions_and_rewards_reach_the_shopper(self):
+        q = self.ho.post('/api/survey-questions/', {
+            'store': self.store.id, 'order': 1, 'text': 'Your tea?', 'options': ['Tapal', 'Other'], 'is_active': True,
+        }, format='json')
+        self.assertEqual(q.status_code, 201, q.data)
+        r = self.ho.post('/api/store-rewards/', {
+            'store': self.store.id, 'label': 'Free sample', 'win_amount': 'Rs. 50 OFF', 'promo_code': 'MET50',
+            'is_active': True, 'is_featured': True,
+        }, format='json')
+        self.assertEqual(r.status_code, 201, r.data)
+        slug = self.store.qr_slug
+        questions = self.anon.get(f'/api/shopper/questions/?store={slug}').data
+        self.assertEqual([(x['text'], x['store']) for x in questions], [('Your tea?', self.store.id)])
+        rewards = self.anon.get(f'/api/shopper/store/{slug}/rewards/').data
+        self.assertEqual(rewards[0]['promo_code'], 'MET50')
+
+
+class CheckInOutLocationTests(PortalTestBase):
+    def test_location_saved_at_check_in_and_out(self):
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        self.anon.post('/api/ba/check-in/', {'token': token, 'latitude': 31.5204, 'longitude': 74.3587, 'accuracy': 12}, format='json')
+        self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT, 'latitude': 31.5210, 'longitude': 74.3590, 'accuracy': 20}, format='json')
+        row = self.ho.get('/api/attendance/').data['results'][0]
+        self.assertEqual((row['checkInLat'], row['checkInLng'], row['checkInAccuracy']), (31.5204, 74.3587, 12.0))
+        self.assertEqual((row['checkOutLat'], row['checkOutLng'], row['checkOutAccuracy']), (31.521, 74.359, 20.0))
+
+    def test_missing_or_bad_location_is_not_stored(self):
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token, 'latitude': 999, 'longitude': 74}, format='json').status_code, 200)
+        self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        row = self.ho.get('/api/attendance/').data['results'][0]
+        self.assertEqual((row['checkInLat'], row['checkOutLat'], row['status']), (None, None, 'Present'))
+
+
+class BaAppDataTests(PortalTestBase):
+    def test_me_summary(self):
+        from .models import AmbassadorMonthTarget
+
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
+        AmbassadorMonthTarget.objects.create(
+            ambassador=self.ba, store=self.store, month=self.today.strftime('%Y-%m'), target_total=100, sales_total=40
+        )
+        Consumer.objects.create(store=self.store, answers={}, feedback_rating=4)
+        Consumer.objects.create(store=self.store, answers={}, feedback_rating=5)
+        UserInterception.objects.create(
+            id='int-me', ambassador=self.ba, ba_name='Ali', store=self.store, name='S', contact='0300',
+            previous_brand='Lipton', current_sku='DD', created_at=timezone.now(),
+        )
+        me = self.anon.get(f'/api/ba/me/?token={token}').data
+        self.assertEqual((me['rank'], me['daysWorked'], me['rating'], me['certified']), (1, 1, 4.5, True))
+        self.assertEqual((me['monthTarget']['targetKg'], me['monthTarget']['salesKg']), (100.0, 40.0))
+        self.assertEqual((me['today']['interceptions'], me['today']['switched'], me['today']['dailyGoal']), (1, 1, 9))
+        self.assertEqual(me['storeName'], 'Metro')
+        self.assertEqual(self.anon.get('/api/ba/me/?token=nope').status_code, 404)
+
+    def test_check_in_selfie_is_saved(self):
+        self.schedule_ba_today()
+        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token, 'selfie': PIXEL}, format='json')
+        row = self.ho.get('/api/attendance/').data['results'][0]
+        self.assertIn('/media/checkins/', row['checkInPhoto'])
+
+    def test_retraining_answers_recorded(self):
+        token = self.ba.invite_token
+        res = self.anon.post('/api/ba/training/practice/', {
+            'token': token, 'kind': 'scenario', 'title': 'Price objection', 'question': 'It is expensive', 'answer': 'Cost per cup is low',
+        }, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(self.anon.post('/api/ba/training/practice/', {'token': token, 'kind': 'x', 'question': 'q', 'answer': 'a'}, format='json').status_code, 400)
+        rows = self.ho.get(f'/api/ba/training/practice/?ambassador={self.ba.id}').data['results']
+        self.assertEqual((rows[0]['baName'], rows[0]['answer']), ('Ali', 'Cost per cup is low'))
+        self.assertEqual(len(self.anon.get(f'/api/ba/training/practice/?token={token}').data['results']), 1)
+
+    def test_ba_sees_own_complaints_with_status(self):
+        other = Ambassador.objects.create(name='Zara')
+        body = {'kind': 'ba', 'storeId': self.store.id, 'category': 'Other', 'subject': 'Shelf', 'details': 'Empty shelf'}
+        self.anon.post('/api/complaints/', {**body, 'token': self.ba.invite_token, 'id': 'cmp-mine'}, format='json')
+        self.anon.post('/api/complaints/', {**body, 'token': other.invite_token, 'id': 'cmp-other'}, format='json')
+        self.ho.patch('/api/complaints/cmp-mine/', {'status': 'Resolved', 'hoNote': 'Restocked'}, format='json')
+        mine = self.anon.get(f'/api/complaints/?token={self.ba.invite_token}').data['results']
+        self.assertEqual([(c['id'], c['status'], c['hoNote']) for c in mine], [('cmp-mine', 'Resolved', 'Restocked')])
+
+    def test_interception_date_filter(self):
+        from datetime import timedelta
+
+        for i, days in enumerate([0, 10]):
+            UserInterception.objects.create(
+                id=f'int-d{i}', ambassador=self.ba, ba_name='Ali', store=self.store, name='S', contact='0300',
+                created_at=timezone.now() - timedelta(days=days),
+            )
+        rows = self.ho.get(f'/api/interceptions/?date_from={self.today.isoformat()}').data['results']
+        self.assertEqual([r['id'] for r in rows], ['int-d0'])
+
+
+class OncePerDayTests(PortalTestBase):
+    def test_only_one_check_in_and_out_per_day_even_with_two_shifts(self):
+        month = self.today.strftime('%Y-%m')
+        for store, (start, end) in ((self.store, ('00:00', '11:00')), (self.other_store, ('12:00', '23:59'))):
+            build_monthly_shift(store=store, ambassador=self.ba, month=month, start=parse_hhmm(start), end=parse_hhmm(end)).save()
+        token = self.ba.invite_token
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 200)
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 200)  # same shift
+        self.assertEqual(self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json').status_code, 200)
+        again = self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
+        self.assertEqual(again.status_code, 400)
+        self.assertIn('already checked in and out today', again.data['detail'])
+        self.assertEqual(ShiftAssignment.objects.filter(checked_in_at__isnull=False).count(), 1)
+        shift = self.anon.get(f'/api/ba/today-shift/?token={token}').data['shift']
+        self.assertEqual((shift['checkedIn'], shift['checkedOut'], shift['reportSubmitted']), (True, True, True))
+
+
+class LeaderboardTests(PortalTestBase):
+    def test_every_active_ba_ranked_on_field_work(self):
+        pending = Ambassador.objects.create(name='Pending BA', status=Ambassador.Status.PENDING)
+        gone = Ambassador.objects.create(name='Gone', status=Ambassador.Status.CERTIFIED, is_active=False)
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
+        self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        UserInterception.objects.create(
+            id='int-lb', ambassador=pending, ba_name='Pending BA', store=self.store, name='S', contact='0300',
+            previous_brand='Lipton', current_sku='DD', created_at=timezone.now(),
+        )
+        rows = self.ho.get('/api/intelligence/leaderboard/').data['results']
+        names = [r['name'] for r in rows]
+        self.assertNotIn('Gone', names)
+        ali = next(r for r in rows if r['name'] == 'Ali')
+        p = next(r for r in rows if r['name'] == 'Pending BA')
+        self.assertEqual((ali['rank'], ali['days_present'], ali['points']), (1, 1, 50))
+        self.assertEqual((p['interactions'], p['conversion'], p['points'], p['rank']), (1, 100.0, 25, 2))
+        self.assertIsNone(p['customer_rating'])
+        self.assertTrue(gone.pk)
+
+
+class SupervisorPasswordTests(PortalTestBase):
+    def test_head_office_can_see_and_edit(self):
+        self.make_supervisor()
+        self.assertEqual(self.ho.get('/api/supervisors/sup-test/password/').data['password'], 'Secret@123')
+        self.ho.patch('/api/supervisors/sup-test/', {'password': 'New@12345', 'name': 'Imran K', 'phone': '0301', 'city': 'Multan'}, format='json')
+        self.assertEqual(self.ho.get('/api/supervisors/sup-test/password/').data['password'], 'New@12345')
+        row = self.ho.get('/api/supervisors/').data['results'][0]
+        self.assertEqual((row['name'], row['phone'], row['city']), ('Imran K', '0301', 'Multan'))
+        self.assertNotIn('New@12345', str(row))
+        self.assertEqual(self.anon.get('/api/supervisors/sup-test/password/').status_code, 401)
+        self.assertEqual(self.supervisor_client(password='New@12345').get('/api/supervisors/sup-test/password/').status_code, 401)
+
+    def test_old_supervisor_without_copy(self):
+        Supervisor.objects.create(id='sup-old', name='Old', email='old@x.com', password='pbkdf2_sha256$x')
+        data = self.ho.get('/api/supervisors/sup-old/password/').data
+        self.assertEqual((data['password'], data['hasLogin']), (None, True))
+
+
+class ServerPushTests(PortalTestBase):
+    def test_check_in_and_out_push_from_the_server(self):
+        from unittest import mock
+
+        self.make_supervisor()
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        with mock.patch('api.push_views.send_push_later') as push:
+            self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
+            self.anon.post('/api/ba/check-in/', {'token': token}, format='json')  # repeat: no second alert
+            self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        titles = [c.args[1] for c in push.call_args_list]
+        self.assertEqual(titles, ['BA checked in', 'BA checked out'])
+        self.assertEqual(push.call_args_list[0].args[0], 'sup-test')
+        self.assertIn('Ali checked in at Metro', push.call_args_list[0].args[2])
+
+    def test_register_needs_supervisor_sign_in_and_send_is_head_office_only(self):
+        from .models import SupervisorPushToken
+
+        self.make_supervisor()
+        self.assertEqual(self.anon.post('/api/push/register', {'supervisorId': 'sup-test', 'token': 't1'}, format='json').status_code, 401)
+        sup = self.supervisor_client()
+        self.assertEqual(sup.post('/api/push/register', {'token': 't1'}, format='json').status_code, 200)
+        self.assertEqual(SupervisorPushToken.objects.get().supervisor_id, 'sup-test')
+        self.assertEqual(self.anon.post('/api/push/send', {'supervisorId': 'sup-test', 'title': 'x'}, format='json').status_code, 401)
+        self.assertEqual(self.anon.get('/api/push/inbox').status_code, 401)
+
+    def test_firebase_config_served(self):
+        self.assertIn('vapidKey', self.anon.get('/firebase-config.json').data)
+        self.assertEqual(self.anon.get('/firebase-messaging-sw.js')['Content-Type'], 'application/javascript')
+
+
+class SupervisorAttendanceTargetsTests(PortalTestBase):
+    def test_supervisor_sees_own_stores_only(self):
+        from .models import AmbassadorMonthTarget
+
+        self.make_supervisor()
+        self.schedule_ba_today()
+        other = Ambassador.objects.create(name='Zara', status=Ambassador.Status.CERTIFIED)
+        build_monthly_shift(store=self.other_store, ambassador=other, month=self.today.strftime('%Y-%m'),
+                            start=parse_hhmm('00:00'), end=parse_hhmm('23:59')).save()
+        month = self.today.strftime('%Y-%m')
+        AmbassadorMonthTarget.objects.create(ambassador=self.ba, store=self.store, month=month, target_total=100, sales_total=30)
+        AmbassadorMonthTarget.objects.create(ambassador=other, store=self.other_store, month=month, target_total=50)
+        sup = self.supervisor_client()
+        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token, 'selfie': PIXEL, 'latitude': 31.5, 'longitude': 74.3}, format='json')
+        rows = sup.get('/api/attendance/').data['results']
+        self.assertEqual([r['baName'] for r in rows], ['Ali'])
+        self.assertTrue(rows[0]['checkInPhoto'])
+        self.assertEqual(rows[0]['checkInLat'], 31.5)
+        targets = sup.get(f'/api/ba-targets/?month={month}').data['results']
+        self.assertEqual([(t['baName'], t['targetKg'], t['salesKg']) for t in targets], [('Ali', 100.0, 30.0)])
+        self.assertEqual(sup.post('/api/ba-targets/', {'rows': [{'baCode': 'x'}]}, format='json').status_code, 403)
+        self.assertEqual(self.anon.get('/api/attendance/').status_code, 401)
+        self.assertEqual(len(self.ho.get('/api/attendance/').data['results']), 2)
+        preview = self.ho.get(f'/api/attendance/?supervisor=sup-test').data['results']
+        self.assertEqual([r['baName'] for r in preview], ['Ali'])

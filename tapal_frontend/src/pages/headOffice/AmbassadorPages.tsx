@@ -36,6 +36,10 @@ import {
   type StoreSkuUploadResult,
 } from '../../lib/storeSkuTargets'
 import { BaShiftsCard } from './BaShiftsCard'
+import { serverAmbassadorId } from '../../context/ScheduleContext'
+import { AmbassadorProfile } from './AmbassadorProfile'
+import { timeOf, useAttendance } from './BaAttendancePage'
+import { useDailyReports } from '../../lib/baReport'
 import { ShiftPlanModal } from './ShiftPlanModal'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
 import {
@@ -54,6 +58,11 @@ import {
 } from '../../lib/baTargets'
 
 const validEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+
+/** YYYY-MM-DD in the device's local time. */
+function localDay(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
 
 const allLifecycle: LifecycleStage[] = [
   'Recruited',
@@ -364,6 +373,12 @@ function AmbassadorDetailModal({
             <div className="mb-4 font-mono text-lg font-semibold text-slate-900">{account.baCode || '—'}</div>
             <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">Account link</div>
             <AccountLinkPanel account={account} />
+            <Link
+              to={`/ho/ambassadors/${account.id}`}
+              className="mt-4 inline-block text-sm font-semibold text-brand-600 hover:text-brand-700"
+            >
+              Open profile — scores, deploy, edit, deactivate →
+            </Link>
           </div>
         </div>
       )}
@@ -377,6 +392,29 @@ export function AmbassadorsPage() {
   const accounts = useBaAccounts()
   const monthTargets = useBaTargets()
   const targetMonth = currentMonthKey()
+  const today = localDay(new Date())
+  const { data: todayAttendance } = useAttendance(today, today)
+  const reports = useDailyReports()
+  // Today's attendance per BA (a BA with two shifts: the one they checked in to first).
+  const attendanceByBa = useMemo(() => {
+    const map = new Map<string, { checkedInAt: string | null; checkedOutAt: string | null; reported: boolean }>()
+    for (const row of todayAttendance?.results ?? []) {
+      const key = `api-${row.baId}`
+      const prev = map.get(key)
+      if (!prev || (!prev.checkedInAt && row.checkedInAt)) {
+        map.set(key, {
+          checkedInAt: row.checkedInAt,
+          checkedOutAt: row.checkedOutAt,
+          reported: !!row.reportSubmittedAt || !!prev?.reported,
+        })
+      }
+    }
+    return map
+  }, [todayAttendance])
+  const reportedToday = useMemo(
+    () => new Set(reports.filter((r) => localDay(new Date(r.submittedAt)) === today).map((r) => r.baId)),
+    [reports, today],
+  )
   const [createOpen, setCreateOpen] = useState(false)
   const [linkPrompt, setLinkPrompt] = useState<{ account: BaAccount; title: string } | null>(null)
   const [bulkOpen, setBulkOpen] = useState(false)
@@ -416,9 +454,7 @@ export function AmbassadorsPage() {
             <Button variant="secondary" onClick={() => setBulkOpen(true)}>
               <FileSpreadsheet size={15} /> Bulk upload (Excel)
             </Button>
-            <Button variant="secondary" onClick={() => setShiftsOpen(true)}>
-              <CalendarPlus size={15} /> Create shifts
-            </Button>
+          
             <Link to="/ho/ambassadors/training">
               <Button variant="secondary">Training videos</Button>
             </Link>
@@ -440,7 +476,7 @@ export function AmbassadorsPage() {
               <th className="px-4 py-3">Score</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Store</th>
-              <th className="px-4 py-3">September target</th>
+              <th className="px-4 py-3">{formatTargetMonth(targetMonth).split(' ')[0]} target</th>
               <th className="px-4 py-3">Check-in</th>
               <th className="px-4 py-3">Check-out</th>
               <th className="px-4 py-3">Data filled</th>
@@ -455,6 +491,7 @@ export function AmbassadorsPage() {
                   <button type="button" onClick={() => setDetailId(a.id)} className="flex items-center gap-3 text-left">
                     <Avatar name={a.name} />
                     <span className="font-medium text-slate-900 hover:text-brand-600">{a.name}</span>
+                    {a.isActive === false && <StatusBadge status="Inactive" />}
                   </button>
                 </td>
                 <td className="px-4 py-3 text-slate-600">{a.city || '—'}</td>
@@ -468,10 +505,22 @@ export function AmbassadorsPage() {
                 <td className="px-4 py-3 tabular-nums text-slate-700">
                   {targetForBa(a.id, targetMonth, monthTargets)?.targetKg.toLocaleString() ?? '—'}
                 </td>
-                <td className="px-4 py-3 tabular-nums text-slate-700">—</td>
-                <td className="px-4 py-3 tabular-nums text-slate-700">—</td>
+                <td className="px-4 py-3 tabular-nums text-slate-700">
+                  {timeOf(attendanceByBa.get(a.id)?.checkedInAt ?? null)}
+                </td>
+                <td className="px-4 py-3 tabular-nums text-slate-700">
+                  {timeOf(attendanceByBa.get(a.id)?.checkedOutAt ?? null)}
+                </td>
                 <td className="px-4 py-3">
-                  <StatusBadge status="Pending" />
+                  {reportedToday.has(a.id) || attendanceByBa.get(a.id)?.reported ? (
+                    <StatusBadge status="Submitted" />
+                  ) : attendanceByBa.has(a.id) ? (
+                    <StatusBadge status="Pending" />
+                  ) : (
+                    <span className="text-slate-400" title="No shift today">
+                      —
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <Button
@@ -577,7 +626,6 @@ export function AmbassadorsPage() {
 
       <SetTargetModal open={targetOpen} onClose={() => setTargetOpen(false)} />
       <BulkTargetModal open={targetBulkOpen} onClose={() => setTargetBulkOpen(false)} />
-      <ShiftPlanModal open={shiftsOpen} onClose={() => setShiftsOpen(false)} />
     </div>
   )
 }
@@ -810,6 +858,8 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
   const [targetKg, setTargetKg] = useState('')
   const [salesKg, setSalesKg] = useState('')
   const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -818,19 +868,29 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
     setSalesKg(row ? String(row.salesKg) : '')
   }, [open, baId, month, targets])
 
-  function save() {
+  async function save() {
     const person = people.find((item) => item.id === baId)
     const target = Number(targetKg)
     const sales = Number(salesKg)
     if (!person || !Number.isFinite(target) || target < 0 || !Number.isFinite(sales) || sales < 0) return
-    setBaMonthTarget({
-      baId: person.id,
-      baName: person.name,
-      month,
-      targetKg: target,
-      salesKg: sales,
-    })
-    setSaved(true)
+    const row: BaMonthTarget = { baId: person.id, baName: person.name, baCode: person.baCode, month, targetKg: target, salesKg: sales }
+    setError(null)
+    if (!person.baCode) {
+      // sample accounts have no server record
+      setBaMonthTarget(row)
+      setSaved(true)
+      return
+    }
+    setBusy(true)
+    try {
+      const outcome = await saveBaTargetsToServer([row])
+      if (outcome.errors.length) throw new Error(outcome.errors[0])
+      setBaMonthTarget(row)
+      setSaved(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The target could not be saved.')
+    }
+    setBusy(false)
   }
 
   return (
@@ -890,9 +950,12 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
             Saved for this ambassador and month.
           </p>
         )}
+        {error && (
+          <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p>
+        )}
         <div className="flex flex-col gap-2 pt-1 sm:flex-row-reverse">
-          <Button onClick={save} disabled={targetKg === '' || salesKg === ''}>
-            Save
+          <Button onClick={() => void save()} disabled={busy || targetKg === '' || salesKg === ''}>
+            {busy ? 'Saving…' : 'Save'}
           </Button>
           <Button variant="secondary" onClick={onClose}>
             Close
@@ -910,6 +973,9 @@ export function AmbassadorProfilePage() {
   const ba = ambassadors.find((a) => a.id === id)
   const [shiftOpen, setShiftOpen] = useState(false)
   const incentive = buildIncentiveRoster().find((r) => r.baId === ba?.id)
+  const today = localDay(new Date())
+  const { data: todayAttendance } = useAttendance(today, today, account ? serverAmbassadorId(account.id) : null)
+  const onShiftToday = (todayAttendance?.results ?? []).some((r) => r.checkedInAt && !r.checkedOutAt)
 
   if (!ba) {
     return (
@@ -918,17 +984,13 @@ export function AmbassadorProfilePage() {
           ← Back to ambassadors
         </Link>
         {account ? (
-          <Card>
-            <h2 className="text-2xl font-bold">{account.name}</h2>
-            <p className="mt-1 text-sm text-slate-500">{[account.city, account.email].filter(Boolean).join(' · ')}</p>
-            <div className="mt-4 rounded-xl bg-slate-50 px-4 py-3">
-              <div className="text-xs font-semibold tracking-wide text-slate-500 uppercase">BA code</div>
-              <div className="mt-1 font-mono text-lg font-semibold">{account.baCode || '—'}</div>
-            </div>
-            <div className="mt-4">
+          <>
+            <AmbassadorProfile account={account} onShiftToday={onShiftToday} />
+            <Card>
+              <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">Account link</div>
               <AccountLinkPanel account={account} />
-            </div>
-          </Card>
+            </Card>
+          </>
         ) : (
           <Card>
             <p className="text-sm text-slate-600">This ambassador is not on the roster.</p>

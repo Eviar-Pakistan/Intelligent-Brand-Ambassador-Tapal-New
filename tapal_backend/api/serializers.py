@@ -147,13 +147,50 @@ class StoreSerializer(serializers.ModelSerializer):
         ).count()
 
     def get_engagement(self, obj):
-        shoppers = self.get_shopper_count(obj)
+        # engaged = shopper survey sessions + shoppers the BA intercepted
+        shoppers = self.get_shopper_count(obj) + self._interceptions().get(obj.pk, [0, 0])[1]
         footfall = obj.today_footfall or 0
         if footfall > 0:
             return min(100.0, _pct(shoppers, footfall))
         return 100.0 if shoppers else 0.0
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Status, coverage and BAs come from this month's shifts and today's check-ins.
+        live = self.context.get('_store_live')
+        if live is None or instance.pk not in live:
+            from .store_live import live_store_stats
+
+            ids = list(Store.objects.values_list('id', flat=True)) if live is None else [instance.pk]
+            live = {**(live or {}), **live_store_stats(ids)}
+            self.context['_store_live'] = live
+        stats = live.get(instance.pk)
+        if stats:
+            data.update(
+                {
+                    'status': stats['status'],
+                    'coverage': stats['coverage'],
+                    'bas': stats['bas'],
+                    'assigned_bas': stats['bas'],
+                    'assigned': stats['assigned'],
+                    'scheduled_today': stats['scheduled_today'],
+                    'checked_in_today': stats['checked_in_today'],
+                }
+            )
+        data['footfall_date'] = instance.footfall_date.isoformat() if instance.footfall_date else None
+        return data
+
+    def _interceptions(self):
+        cache = self.context.setdefault('_store_conversion_cache', {})
+        if 'interceptions' not in cache:
+            from .store_live import interception_counts
+
+            cache['interceptions'] = interception_counts()[0]
+        return cache['interceptions']
+
     def get_conversion(self, obj):
+        # Shoppers who switched to Tapal / shoppers engaged (BA interceptions + survey 'Yes').
+        switched, intercepted = self._interceptions().get(obj.pk, [0, 0])
         cache = self.context.setdefault('_store_conversion_cache', {})
         if 'switch_id' not in cache:
             q = SurveyQuestion.objects.filter(is_active=True, order=5).first()
@@ -161,10 +198,10 @@ class StoreSerializer(serializers.ModelSerializer):
         switch_id = cache['switch_id']
         consumers = list(obj.consumers.only('answers', 'feedback_rating'))
         if not consumers:
-            return 0.0
+            return _pct(switched, intercepted) if intercepted else 0.0
         if switch_id:
-            answered = 0
-            yes = 0
+            answered = intercepted
+            yes = switched
             for c in consumers:
                 ans = c.answers if isinstance(c.answers, dict) else {}
                 val = str(ans.get(switch_id, ''))
@@ -175,6 +212,8 @@ class StoreSerializer(serializers.ModelSerializer):
                     yes += 1
             if answered:
                 return _pct(yes, answered)
+        if intercepted:
+            return _pct(switched, intercepted)
         with_feedback = sum(1 for c in consumers if c.feedback_rating is not None)
         return _pct(with_feedback, len(consumers))
 
@@ -446,6 +485,7 @@ class AmbassadorSerializer(serializers.ModelSerializer):
             'phone',
             'status',
             'invite_token',
+            'is_active',
             'training_url',
             'overall_score',
             'report_json',

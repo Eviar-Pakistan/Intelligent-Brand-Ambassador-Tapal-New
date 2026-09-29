@@ -3,6 +3,7 @@
  * template, and the dashboard inbox.
  */
 import { useSyncExternalStore } from 'react'
+import { currentBaAccountId } from './baAccounts'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
@@ -268,6 +269,10 @@ export type StoredDailyReport = {
   id: string
   baId: string
   baName: string
+  /** Filled by the server */
+  baCode?: string
+  storeId?: number | null
+  storeName?: string
   city: string
   submittedAt: string
   source: ReportSource
@@ -336,11 +341,18 @@ async function sendReport(entry: StoredDailyReport) {
 export async function syncDailyReports() {
   const portal = currentPortal()
   if (portal === 'shopper' || (portal === 'office' && !djangoToken())) return
-  if (portal === 'ba') for (const entry of reports.filter((r) => r.unsent)) await sendReport(entry)
-  const rows = resultsOf(await portalGet<{ results: StoredDailyReport[] }>('/api/daily-reports/', portal))
+  let rows = resultsOf(await portalGet<{ results: StoredDailyReport[] }>('/api/daily-reports/', portal))
   if (!rows) return
-  const pending = reports.filter((r) => r.unsent && !rows.some((row) => row.id === r.id))
-  commitReports([...pending, ...rows])
+  if (portal === 'ba') {
+    // Send every report this BA made on this phone that the server does not have yet.
+    const me = currentBaAccountId()
+    const onServer = new Set(rows.map((row) => row.id))
+    const missing = reports.filter((r) => r.baId === me && !onServer.has(r.id))
+    for (const entry of missing) await sendReport(entry)
+    if (missing.length) rows = resultsOf(await portalGet<{ results: StoredDailyReport[] }>('/api/daily-reports/', portal)) ?? rows
+  }
+  const onServer = new Set(rows.map((row) => row.id))
+  commitReports([...reports.filter((r) => !onServer.has(r.id) && (portal === 'ba' || r.unsent)), ...rows])
 }
 
 /** Sends a completed daily report to the head-office dashboard inbox. */

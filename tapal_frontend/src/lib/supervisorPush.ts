@@ -1,3 +1,5 @@
+import { supervisorToken } from './serverApi'
+
 export async function enableSupervisorPush(supervisorId: string) {
   if (!('Notification' in window)) {
     throw new Error('This browser does not support notifications.')
@@ -22,9 +24,10 @@ export async function enableSupervisorPush(supervisorId: string) {
   const messaging = getMessaging(app)
   const token = await getToken(messaging, { vapidKey, serviceWorkerRegistration: registration })
   if (!token) throw new Error('This browser did not receive a notification token.')
+  // The server knows who this is from the supervisor's sign-in token.
   const saved = await fetch('/api/push/register', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Supervisor-Token': supervisorToken() ?? '' },
     body: JSON.stringify({ supervisorId, token }),
   })
   if (!saved.ok) throw new Error('The server did not save this browser for notifications.')

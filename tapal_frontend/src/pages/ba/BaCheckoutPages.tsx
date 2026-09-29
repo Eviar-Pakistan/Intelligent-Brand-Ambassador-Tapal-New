@@ -2,9 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2 } from 'lucide-react'
 import { useBaShift } from '../../context/BaShiftContext'
-import { ambassadors, stores } from '../../data/mock'
 import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
-import { notifyBaCheckOut } from '../../lib/supervisorNotifications'
 import { useBaSession } from '../../lib/baAccounts'
 import {
   competitiveFields,
@@ -383,7 +381,7 @@ export function BaOtherBrandsPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
-  const { submitCheckoutReport, earlyCheckoutReason, city, shiftStore } = useBaShift()
+  const { submitCheckoutReport, earlyCheckoutReason, city } = useBaShift()
   const { account } = useBaSession()
   const [rows, setRows] = useState<OtherBrandRow[]>(DEFAULT_OTHER_BRANDS)
   const [submitted, setSubmitted] = useState(false)
@@ -429,24 +427,6 @@ export function BaOtherBrandsPage() {
       },
     )
     if (!anytime) {
-      const ambassador = ambassadors.find((item) => item.id === (account?.id ?? 'ayesha'))
-      const store = ambassador?.storeId != null ? stores.find((item) => item.id === ambassador.storeId) : undefined
-      if (ambassador?.storeId != null && store) {
-        notifyBaCheckOut({
-          baName: account?.name ?? ambassador.name,
-          storeId: store.id,
-          storeName: store.name,
-          at: new Date(),
-        })
-      } else if (shiftStore) {
-        notifyBaCheckOut({
-          baName: account?.name ?? 'Brand Ambassador',
-          storeId: shiftStore.id,
-          storeName: shiftStore.name,
-          supervisorId: shiftStore.supervisorId,
-          at: new Date(),
-        })
-      }
     }
     setSubmitted(true)
   }

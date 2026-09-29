@@ -1,5 +1,4 @@
 import {
-  createContext,
   useCallback,
   useContext,
   useEffect,
@@ -10,6 +9,8 @@ import {
 import { useBaSession } from '../lib/baAccounts'
 import type { ParsedBaReport } from '../lib/baReport'
 import { formatTime12 } from './ScheduleContext'
+import { BaShiftContext } from './baShiftContextObject'
+import { getBaLocation } from '../lib/baLocation'
 
 /** Demo unlock: Check Out becomes available this many ms after check-in */
 const CHECKOUT_UNLOCK_AFTER_MS = 10_000
@@ -25,6 +26,11 @@ type TodayShift = {
   storeId: number
   storeName: string
   supervisorId: string | null
+  checkedIn: boolean
+  checkedOut: boolean
+  checkedInAt: string | null
+  checkedOutAt: string | null
+  reportSubmitted?: boolean
 }
 
 /** Where today's shift is, and who supervises that store (for check-in / check-out notices). */
@@ -59,11 +65,14 @@ export type BaShiftState = {
    * Check-out counts only once the report is submitted. Sends it to the server, which marks the BA Present,
    * then checks out here. Returns an error message when the server refuses (nothing changes then).
    */
-  submitCheckoutReport: (report: ParsedBaReport) => Promise<string | null>
+  submitCheckoutReport: (report: ParsedBaReport, earlyReason?: string | null) => Promise<string | null>
   resetShift: () => void
+  /** Checked in and out already today: no second check-in until tomorrow. */
+  doneForToday: boolean
+  /** Ask the server for today's shift again (e.g. right after check-in). */
+  reloadShift: () => void
 }
 
-const BaShiftContext = createContext<BaShiftState | null>(null)
 
 /** Checkout is on time when the clock reaches (or passes) shift end time. With no shift today nothing is early. */
 export function isAtOrPastShiftEnd(now: Date) {
@@ -95,6 +104,9 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(id)
   }, [])
 
+  const [reloadKey, setReloadKey] = useState(0)
+  const reloadShift = useCallback(() => setReloadKey((k) => k + 1), [])
+
   useEffect(() => {
     if (!token || token.startsWith('demo-')) {
       setTodayShift(null)
@@ -106,7 +118,20 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
         .then(async (response) => {
           if (!response.ok) throw new Error()
           const data = (await response.json()) as { shift: TodayShift | null }
-          if (!cancelled) setTodayShift(data.shift)
+          if (cancelled) return
+          setTodayShift(data.shift)
+          // The server is the record: once checked in (or out) today, the app shows that,
+          // also after a reload or on another phone. One check-in and one check-out per day.
+          const s = data.shift
+          if (s?.checkedIn) {
+            setCheckedIn(true)
+            if (s.checkedInAt) setCheckInAt(new Date(s.checkedInAt))
+          }
+          if (s?.checkedOut) {
+            setCheckedOut(true)
+            if (s.checkedOutAt) setCheckOutAt(new Date(s.checkedOutAt))
+            setReportSubmitted(true)
+          }
         })
         .catch(() => {
           // keep the last shift we had
@@ -117,7 +142,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       cancelled = true
       window.clearInterval(id)
     }
-  }, [token])
+  }, [token, reloadKey])
 
   shiftEndMinutes = minutesOf(todayShift?.endTime ?? null)
 
@@ -131,7 +156,10 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     now.getTime() - checkInAt.getTime() >= CHECKOUT_UNLOCK_AFTER_MS
   const shiftEnded = atShiftEnd || assistShiftEnded || canCheckOut
 
+  const doneForToday = checkedOut || !!todayShift?.checkedOut
+
   const checkIn = useCallback(() => {
+    if (doneForToday) return
     const t = new Date()
     setCheckedIn(true)
     setCheckInAt(t)
@@ -139,7 +167,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     setCheckOutAt(null)
     setReportSubmitted(false)
     setEarlyCheckoutReason(null)
-  }, [])
+  }, [doneForToday])
 
   const endShift = useCallback(() => {
     setAssistShiftEnded(true)
@@ -155,13 +183,15 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const submitCheckoutReport = useCallback(
-    async (report: ParsedBaReport) => {
+    async (report: ParsedBaReport, earlyReason?: string | null) => {
       if (token && !token.startsWith('demo-')) {
         try {
+          // The BA's GPS position goes with the check-out (sent without it if location is unavailable).
+          const location = await getBaLocation()
           const response = await fetch('/api/ba/check-out/', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token, report, early_reason: earlyCheckoutReason ?? '' }),
+            body: JSON.stringify({ token, report, early_reason: earlyReason ?? earlyCheckoutReason ?? '', ...(location ?? {}) }),
           })
           if (!response.ok) {
             const data = (await response.json().catch(() => ({}))) as { detail?: string }
@@ -217,6 +247,8 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       markReportSubmitted,
       submitCheckoutReport,
       resetShift,
+      doneForToday,
+      reloadShift,
     }),
     [
       todayShift,
@@ -237,6 +269,8 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       markReportSubmitted,
       submitCheckoutReport,
       resetShift,
+      doneForToday,
+      reloadShift,
     ],
   )
 

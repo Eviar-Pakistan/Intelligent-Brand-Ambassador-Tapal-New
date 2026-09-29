@@ -1,3 +1,5 @@
+import { StatusBadge } from '../../components/ui'
+import { portalGet } from '../../lib/serverApi'
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, MessageSquareWarning, UserRound } from 'lucide-react'
@@ -6,6 +8,8 @@ import { useBaSession } from '../../lib/baAccounts'
 import {
   complaintBrands,
   complaintCategories,
+  formatComplaintDate,
+  type Complaint,
   type ComplaintCategory,
   type ComplaintKind,
 } from '../../data/complaints'
@@ -139,6 +143,7 @@ export function BaComplaintPage() {
   }
 
   return (
+    <>
     <form onSubmit={handleSubmit} className="space-y-4 bg-[#f7f4ec] p-4 pb-8">
       <div className="mb-4 flex items-start gap-3">
         <button
@@ -379,6 +384,8 @@ export function BaComplaintPage() {
         Submit to Head Office
       </button>
     </form>
+    <MyComplaints />
+    </>
   )
 }
 
@@ -438,3 +445,46 @@ function TypeButton({
     </button>
   )
 }
+
+/** The BA's own complaints with Head Office's status and note. */
+function MyComplaints() {
+  const [rows, setRows] = useState<Complaint[] | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void portalGet<{ results: Complaint[] }>('/api/complaints/', 'ba').then((data) => {
+      if (!cancelled && data) setRows(data.results)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  if (!rows) return null
+  return (
+    <section className="space-y-2 bg-[#f7f4ec] px-4 pb-8">
+      <h2 className="text-sm font-bold text-slate-900">My complaints</h2>
+      {rows.length === 0 && <p className="text-xs text-slate-500">You have not filed any complaints yet.</p>}
+      {rows.map((c) => (
+        <div key={c.id} className="rounded-2xl bg-white p-3 shadow-sm ring-1 ring-black/5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-slate-900">
+                {c.kind === 'ba' ? c.subject : `${c.brand} · ${c.sku}`}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {c.storeName} · {formatComplaintDate(c.createdAt)} · {c.id}
+              </div>
+            </div>
+            <StatusBadge status={c.status} />
+          </div>
+          {c.hoNote && (
+            <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-700">
+              <span className="font-semibold">Head Office: </span>
+              {c.hoNote}
+            </p>
+          )}
+        </div>
+      ))}
+    </section>
+  )
+}
+

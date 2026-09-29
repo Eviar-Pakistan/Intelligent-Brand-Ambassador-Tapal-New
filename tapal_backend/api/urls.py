@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from .ba_attendance_views import ba_check_in, ba_check_out, ba_leaderboard, ba_submit_complaint, ba_today_shift
+from .ba_attendance_views import ba_check_in, ba_footfall, ba_check_out, ba_leaderboard, ba_submit_complaint, ba_today_shift
 from .ba_training_views import (
     AmbassadorViewSet,
     TrainingVideoViewSet,
@@ -79,6 +79,7 @@ urlpatterns = [
     path('ba/today-shift/', ba_today_shift, name='ba-today-shift'),
     path('ba/check-in/', ba_check_in, name='ba-check-in'),
     path('ba/check-out/', ba_check_out, name='ba-check-out'),
+    path('ba/footfall/', ba_footfall, name='ba-footfall'),
     path('ba/complaints/', ba_submit_complaint, name='ba-submit-complaint'),
     path('ba/leaderboard/', ba_leaderboard, name='ba-leaderboard'),
     path('ba/training/video/', ba_training_video, name='ba-training-video'),
@@ -91,6 +92,7 @@ urlpatterns = [
     path('supervisors/', portal.supervisors, name='supervisors'),
     path('supervisors/overviews/', portal.supervisor_overviews, name='supervisor-overviews'),
     path('supervisors/<str:pk>/', portal.supervisor_detail, name='supervisor-detail'),
+    path('supervisors/<str:pk>/password/', portal.supervisor_password, name='supervisor-password'),
     path('supervisor/login/', portal.supervisor_login, name='supervisor-login'),
     path('supervisor/logout/', portal.supervisor_logout, name='supervisor-logout'),
     path('supervisor/me/', portal.supervisor_me, name='supervisor-me'),
@@ -106,6 +108,8 @@ urlpatterns = [
     path('early-checkouts/', portal.early_checkouts, name='early-checkouts'),
     path('kpi-config/', portal.kpi_config, name='kpi-config'),
     path('ba/stores/', portal.ba_stores, name='ba-stores'),
+    path('ba/me/', portal.ba_me, name='ba-me'),
+    path('ba/training/practice/', portal.training_practice, name='ba-training-practice'),
     path('shopper/sessions/', portal.shopper_session, name='shopper-session'),
     path('ba/training/modules/', portal.training_modules, name='ba-training-modules'),
     path('push/register', push_views.push_register, name='push-register'),

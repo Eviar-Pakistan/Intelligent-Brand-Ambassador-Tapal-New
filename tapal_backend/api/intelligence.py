@@ -56,6 +56,11 @@ def build_intelligence_overview(scope: CityScope = ALL) -> dict:
     # Engagement: shoppers reached vs store footfall (fallback to answered share)
     engagement_den = footfall_total if footfall_total > 0 else max(shoppers, 1)
     engagement_rate = _pct(shoppers, engagement_den) if footfall_total > 0 else _pct(with_answers, max(shoppers, 1))
+    if footfall_total > 0:
+        from .models import UserInterception
+
+        intercepted = scope.stores(UserInterception.objects.all()).count()
+        engagement_rate = _pct(shoppers + intercepted, footfall_total)
     if engagement_rate > 100:
         engagement_rate = 100.0
 
@@ -78,11 +83,22 @@ def build_intelligence_overview(scope: CityScope = ALL) -> dict:
         switch_answers = answers_by_qid.get(str(switch_q.id), [])
     yes = sum(1 for a in switch_answers if a.lower().startswith('yes'))
     maybe = sum(1 for a in switch_answers if 'maybe' in a.lower())
-    conversion_rate = _pct(yes, max(len(switch_answers), shoppers if not switch_answers else len(switch_answers)))
-    if not switch_answers and shoppers:
+    # Shoppers the BAs intercepted count too: converted = switched from another brand to Tapal.
+    from .store_live import interception_counts
+
+    _i_store, _i_ba, i_by_day, (i_switched, i_total) = interception_counts(
+        None if scope.is_all else scope.store_ids
+    )
+    if switch_answers or i_total:
+        conversion_rate = _pct(yes + i_switched, len(switch_answers) + i_total)
+    elif shoppers:
         # Fallback: feedback given implies completed journey / soft conversion
         conversion_rate = _pct(with_feedback, shoppers)
-    purchase_intent = _pct(yes + maybe, max(len(switch_answers), 1)) if switch_answers else conversion_rate
+    else:
+        conversion_rate = 0.0
+    purchase_intent = (
+        _pct(yes + maybe + i_switched, len(switch_answers) + i_total) if (switch_answers or i_total) else conversion_rate
+    )
 
     # 7-day engagement trend (consumer sessions per day)
     today = timezone.localdate()
@@ -124,7 +140,7 @@ def build_intelligence_overview(scope: CityScope = ALL) -> dict:
         from datetime import date as date_cls
 
         d = date_cls.fromisoformat(row['date'])
-        row['conversion'] = conv_by_day.get(d, 0)
+        row['conversion'] = conv_by_day.get(d, 0) + i_by_day.get(d, 0)
 
     # Insights keyed for UI (map survey orders → chart slots)
     preferred_tea = _distribution(
@@ -230,6 +246,13 @@ def build_store_map_pins(scope: CityScope = ALL) -> list[dict]:
             if val.lower().startswith('yes'):
                 yes_by_store[c.store_id] += 1
 
+    from .store_live import interception_counts
+
+    i_by_store = interception_counts(None if scope.is_all else scope.store_ids)[0]
+    for store_id, (switched, total) in i_by_store.items():
+        yes_by_store[store_id] += switched
+        answered_by_store[store_id] += total
+
     pins = []
     for store in stores:
         if store.latitude is None or store.longitude is None:
@@ -239,7 +262,7 @@ def build_store_map_pins(scope: CityScope = ALL) -> list[dict]:
                 longitude=store.longitude,
             )
 
-        shoppers = consumer_counts.get(store.id, 0)
+        shoppers = consumer_counts.get(store.id, 0) + i_by_store.get(store.id, [0, 0])[1]
         answered = answered_by_store.get(store.id, 0)
         yes = yes_by_store.get(store.id, 0)
         conversion = _pct(yes, answered) if answered else 0.0
@@ -278,113 +301,120 @@ def build_store_map_pins(scope: CityScope = ALL) -> list[dict]:
 
 def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
     """
-    Rank certified / deployed ambassadors using assessment score,
-    this week's shifts & check-ins, and deployed-store conversion.
+    Rank every active BA on what they did in the field this week (all BAs are deployed; training
+    is for retraining, so certification status does not affect the ranking):
+
+      points = 50 per day Present (checked in + report + checked out)
+             + 20 per day only checked in
+             + 10 per shopper intercepted this week
+             + 15 per shopper who switched to Tapal (conversion)
+             +  2 × this month's target achievement % (capped at 150%)
+             + 20 × average shopper rating at their store(s) this month (when there is one)
     """
+    from .models import AmbassadorMonthTarget, MonthlyShift, UserInterception
+    from .store_live import switched_to_tapal
+
     today = timezone.localdate()
     week_start = today - timedelta(days=today.weekday())  # Monday
     week_end = week_start + timedelta(days=6)
-
-    switch_q = SurveyQuestion.objects.filter(is_active=True, order=5).first()
-    switch_id = str(switch_q.id) if switch_q else None
-
-    yes_by_store: dict[int, int] = defaultdict(int)
-    answered_by_store: dict[int, int] = defaultdict(int)
-    rating_sum_by_store: dict[int, float] = defaultdict(float)
-    rating_n_by_store: dict[int, int] = defaultdict(int)
-
-    for c in Consumer.objects.only('store_id', 'answers', 'feedback_rating'):
-        if c.feedback_rating is not None:
-            rating_sum_by_store[c.store_id] += float(c.feedback_rating)
-            rating_n_by_store[c.store_id] += 1
-        if not switch_id:
-            continue
-        ans = c.answers if isinstance(c.answers, dict) else {}
-        val = str(ans.get(switch_id, ''))
-        if not val:
-            continue
-        answered_by_store[c.store_id] += 1
-        if val.lower().startswith('yes'):
-            yes_by_store[c.store_id] += 1
+    month = today.strftime('%Y-%m')
 
     ambassadors = list(
-        scope.ambassadors(
-            Ambassador.objects.filter(status__in=(Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED)),
-            'id',
-        )
-        .select_related('store')
-        .order_by('-overall_score', 'name')
+        scope.ambassadors(Ambassador.objects.filter(is_active=True), 'id').select_related('store').order_by('name')
     )
+    ids = [a.id for a in ambassadors]
 
-    week_shifts = list(
-        ShiftAssignment.objects.filter(
-            ambassador_id__in=[a.id for a in ambassadors],
-            date__gte=week_start,
-            date__lte=week_end,
-        ).only('ambassador_id', 'checked_in_at', 'checked_out_at')
-    )
-    shifts_by_ba: dict[int, int] = defaultdict(int)
-    checkins_by_ba: dict[int, int] = defaultdict(int)
-    for s in week_shifts:
-        if not s.ambassador_id:
-            continue
-        shifts_by_ba[s.ambassador_id] += 1
-        if s.checked_in_at:
-            checkins_by_ba[s.ambassador_id] += 1
+    # Attendance this week (up to today)
+    present: dict[int, set] = defaultdict(set)
+    checked_in: dict[int, set] = defaultdict(set)
+    for row in ShiftAssignment.objects.filter(
+        ambassador_id__in=ids, date__gte=week_start, date__lte=today, checked_in_at__isnull=False
+    ).only('ambassador_id', 'date', 'checked_out_at', 'report_submitted_at'):
+        checked_in[row.ambassador_id].add(row.date)
+        if row.checked_out_at and row.report_submitted_at:
+            present[row.ambassador_id].add(row.date)
+
+    # Shoppers intercepted this week, and how many switched to Tapal
+    sessions: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    for row in UserInterception.objects.filter(ambassador_id__in=ids, created_at__date__gte=week_start).only(
+        'ambassador_id', 'previous_brand'
+    ):
+        sessions[row.ambassador_id][0] += 1
+        sessions[row.ambassador_id][1] += switched_to_tapal(row.previous_brand)
+
+    # This month's target achievement
+    targets = {
+        t.ambassador_id: t
+        for t in AmbassadorMonthTarget.objects.filter(ambassador_id__in=ids, month=month).select_related('store')
+    }
+
+    # Their stores this month (shifts + deployment) and shopper ratings there
+    stores_of: dict[int, set[int]] = defaultdict(set)
+    for ambassador_id, store_id in MonthlyShift.objects.filter(ambassador_id__in=ids, month=month).values_list(
+        'ambassador_id', 'store_id'
+    ):
+        stores_of[ambassador_id].add(store_id)
+    for ba in ambassadors:
+        if ba.store_id:
+            stores_of[ba.id].add(ba.store_id)
+    rating_sum: dict[int, float] = defaultdict(float)
+    rating_n: dict[int, int] = defaultdict(int)
+    for store_id, rating in Consumer.objects.filter(
+        feedback_rating__isnull=False, created_at__date__gte=today.replace(day=1)
+    ).values_list('store_id', 'feedback_rating'):
+        rating_sum[store_id] += float(rating)
+        rating_n[store_id] += 1
+
+    store_names = dict(Store.objects.filter(id__in={s for v in stores_of.values() for s in v}).values_list('id', 'name'))
 
     rows: list[dict] = []
     for ba in ambassadors:
-        score = float(ba.overall_score or 0)
-        store_id = ba.store_id
-        answered = answered_by_store.get(store_id, 0) if store_id else 0
-        yes = yes_by_store.get(store_id, 0) if store_id else 0
-        if answered:
-            conversion = _pct(yes, answered)
-        else:
-            conversion = 0.0
-
-        shifts_week = shifts_by_ba.get(ba.id, 0)
-        check_ins = checkins_by_ba.get(ba.id, 0)
-        interactions = check_ins * 8 + shifts_week * 3 + max(0, int(score // 5))
+        days_present = len(present[ba.id])
+        days_in_only = len(checked_in[ba.id] - present[ba.id])
+        intercepted, switched = sessions.get(ba.id, [0, 0])
+        conversion = _pct(switched, intercepted) if intercepted else 0.0
+        target = targets.get(ba.id)
+        achievement = (
+            round(float(target.sales_total) / float(target.target_total) * 100, 1)
+            if target and target.target_total
+            else None
+        )
+        n = sum(rating_n.get(s, 0) for s in stores_of[ba.id])
+        rating = round(sum(rating_sum.get(s, 0) for s in stores_of[ba.id]) / n, 1) if n else None
 
         points = int(
             round(
-                score * 10
-                + check_ins * 40
-                + shifts_week * 25
-                + conversion * 5
-                + (50 if ba.status == Ambassador.Status.DEPLOYED else 0)
+                days_present * 50
+                + days_in_only * 20
+                + intercepted * 10
+                + switched * 15
+                + min(achievement or 0, 150) * 2
+                + (rating or 0) * 20
             )
         )
-
-        rating_n = rating_n_by_store.get(store_id, 0) if store_id else 0
-        if rating_n:
-            customer_rating = round(rating_sum_by_store[store_id] / rating_n, 1)
-        else:
-            customer_rating = round(min(5.0, max(3.5, 3.5 + score / 50)), 1)
-
-        conversation_rate = round(min(98.0, max(55.0, score * 0.95 + check_ins * 2)), 1)
-
+        store_id = next(iter(sorted(stores_of[ba.id])), None) if not ba.store_id else ba.store_id
         rows.append(
             {
                 'id': ba.id,
                 'name': ba.name,
+                'ba_code': ba.ba_code,
                 'city': ba.city or (ba.store.city if ba.store_id else ''),
                 'status': ba.status,
                 'store_id': store_id,
-                'store_name': ba.store.name if ba.store_id else None,
-                'overall_score': score,
+                'store_name': store_names.get(store_id) if store_id else None,
+                'overall_score': float(ba.overall_score or 0),
                 'points': points,
+                'days_present': days_present,
+                'check_ins_this_week': days_present + days_in_only,
+                'interactions': intercepted,
+                'switched': switched,
                 'conversion': conversion,
-                'interactions': interactions,
-                'shifts_this_week': shifts_week,
-                'check_ins_this_week': check_ins,
-                'customer_rating': customer_rating,
-                'conversation_rate': conversation_rate,
+                'target_achievement': achievement,
+                'customer_rating': rating,
             }
         )
 
-    rows.sort(key=lambda r: (-r['points'], -r['overall_score'], r['name']))
+    rows.sort(key=lambda r: (-r['points'], -r['interactions'], r['name']))
     for i, row in enumerate(rows, start=1):
         row['rank'] = i
 
@@ -448,7 +478,10 @@ def _conversion_between(start, end, switch_id: str | None, scope: CityScope = AL
         else:
             total += 1
             converted += c.feedback_rating is not None
-    return _pct(converted, total)
+    from .store_live import interception_counts
+
+    _s, _b, _d, (i_switched, i_total) = interception_counts(None if scope.is_all else scope.store_ids, start, end)
+    return _pct(converted + i_switched, total + i_total)
 
 
 def _recommendations(pins: list[dict], covered_store_ids: set[int]) -> list[dict]:

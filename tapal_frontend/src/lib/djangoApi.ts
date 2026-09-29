@@ -48,7 +48,14 @@ export function displayName(user: DjangoUser) {
 
 export function djangoToken() {
   try {
-    return sessionStorage.getItem(ACCESS_KEY)
+    // Kept for the whole browser (every tab), not just this tab. A token from before this change
+    // (tab-only storage) is moved over the first time it is read.
+    const token = localStorage.getItem(ACCESS_KEY) ?? sessionStorage.getItem(ACCESS_KEY)
+    if (token && !localStorage.getItem(ACCESS_KEY)) {
+      localStorage.setItem(ACCESS_KEY, token)
+      sessionStorage.removeItem(ACCESS_KEY)
+    }
+    return token
   } catch {
     return null
   }
@@ -56,6 +63,7 @@ export function djangoToken() {
 
 export function djangoLogout() {
   try {
+    localStorage.removeItem(ACCESS_KEY)
     sessionStorage.removeItem(ACCESS_KEY)
   } catch {
     // the sign-in page is the lock either way
@@ -92,7 +100,7 @@ export async function djangoLogin(email: string, password: string) {
     if (!response.ok) return { ok: false as const, error: 'Incorrect email or password.' }
     const data = (await response.json()) as { access?: string }
     if (!data.access) return { ok: false as const, error: 'Incorrect email or password.' }
-    sessionStorage.setItem(ACCESS_KEY, data.access)
+    localStorage.setItem(ACCESS_KEY, data.access)
     const me = await djangoMe()
     if (!me) return { ok: false as const, error: 'Could not confirm this account.' }
     if (me.user_type !== 1) {
@@ -120,13 +128,19 @@ export async function djangoFetch(path: string, init: RequestInit = {}) {
  * Check-in stays instant in the app; this also tells Django when the BA has a real invite token.
  * Check-out is not here: it is sent with the report (BaShiftContext.submitCheckoutReport).
  */
-export function mirrorCheckIn(token: string | undefined) {
+export function mirrorCheckIn(token: string | undefined, selfie?: string) {
   if (!token || token.startsWith('demo-')) return
-  void fetch('/api/ba/check-in/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
-  }).catch(() => undefined)
+  // The BA's GPS position goes with the check-in (sent without it if location is unavailable).
+  void import('./baLocation')
+    .then(({ getBaLocation }) => getBaLocation())
+    .then((location) =>
+      fetch('/api/ba/check-in/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, ...(location ?? {}), ...(selfie ? { selfie } : {}) }),
+      }),
+    )
+    .catch(() => undefined)
 }
 
 export function mirrorComplaint(token: string | undefined, storeId: number, complaint: string) {

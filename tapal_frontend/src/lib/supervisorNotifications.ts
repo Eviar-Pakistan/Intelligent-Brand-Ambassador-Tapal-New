@@ -1,11 +1,10 @@
 import { useSyncExternalStore } from 'react'
 import { currentPortal, portalFetch, portalGet, resultsOf } from './serverApi'
-import { supervisorOfStore } from './supervisors'
 
 /**
- * The supervisor's bell. The server writes a notification whenever a BA checks in or out at one
- * of the supervisor's stores (/api/supervisor/notifications/); the push message is sent from the
- * BA's app so the supervisor's phone is alerted straight away.
+ * The supervisor's bell. When a BA checks in or out at one of the supervisor's stores, the server
+ * records the notification (/api/supervisor/notifications/) and sends the push to the supervisor's
+ * phone itself. The app only reads the list.
  */
 
 export type SupervisorNotification = {
@@ -56,52 +55,6 @@ function subscribe(listener: () => void) {
   }
 }
 
-type AttendanceNotice = {
-  baName: string
-  storeId: number
-  storeName: string
-  at: Date
-  /** The store's supervisor as the server knows it (from today's shift). */
-  supervisorId?: string | null
-}
-
-function notifyAttendance(kind: 'check-in' | 'check-out', input: AttendanceNotice) {
-  const supervisor = input.supervisorId ? { id: input.supervisorId } : supervisorOfStore(input.storeId)
-  if (!supervisor) return
-  const time = input.at.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true })
-  const verb = kind === 'check-in' ? 'checked in' : 'checked out'
-  const note: SupervisorNotification = {
-    id: `${kind}-${input.storeId}-${input.at.getTime()}`,
-    supervisorId: supervisor.id,
-    message: `${input.baName} ${verb} at ${input.storeName} · ${time}`,
-    createdAt: input.at.toISOString(),
-  }
-  const existing = load()
-  if (existing.some((item) => item.id === note.id)) return
-  commit([note, ...existing].slice(0, 40))
-  const title = kind === 'check-in' ? 'BA checked in' : 'BA checked out'
-  void fetch('/api/push/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      id: note.id,
-      supervisorId: supervisor.id,
-      title,
-      body: note.message,
-    }),
-  }).catch(() => undefined)
-}
-
-/** Tell the supervisor of this store that their BA just checked in. */
-export function notifyBaCheckIn(input: AttendanceNotice) {
-  notifyAttendance('check-in', input)
-}
-
-/** Tell the supervisor of this store that their BA just checked out. */
-export function notifyBaCheckOut(input: AttendanceNotice) {
-  notifyAttendance('check-out', input)
-}
-
 /** Loads the signed-in supervisor's notifications from the server (replaces what this browser had). */
 export async function syncSupervisorNotifications() {
   if (currentPortal() !== 'supervisor') return
@@ -109,26 +62,6 @@ export async function syncSupervisorNotifications() {
   if (!rows) return
   const ids = new Set(rows.map((row) => row.supervisorId))
   commit([...rows, ...load().filter((item) => !ids.has(item.supervisorId))].slice(0, 80))
-}
-
-export function mergeRemoteNotifications(
-  events: { id: string; supervisorId: string; body: string; createdAt: string }[],
-) {
-  const current = load()
-  const known = new Set(current.map((item) => item.id))
-  const fresh = events.filter((event) => event.id && !known.has(event.id))
-  if (!fresh.length) return
-  commit(
-    [
-      ...fresh.map((event) => ({
-        id: event.id,
-        supervisorId: event.supervisorId,
-        message: event.body,
-        createdAt: event.createdAt,
-      })),
-      ...current,
-    ].slice(0, 40),
-  )
 }
 
 export function clearSupervisorNotifications(supervisorId: string) {

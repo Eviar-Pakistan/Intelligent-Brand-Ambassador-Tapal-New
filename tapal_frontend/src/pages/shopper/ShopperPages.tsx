@@ -4,8 +4,9 @@ import { Button } from '../../components/ui'
 import { useDemo } from '../../context/AppContext'
 import { useBrand } from '../../context/BrandContext'
 import { Check, Gift, Leaf, Lock, Percent, Sparkles, Ticket } from 'lucide-react'
-import { productCategories, selectionReasons, surveyOptions } from './shopperData'
+import { productCategories } from './shopperData'
 import { getShopperStore } from '../../lib/storeRegistry'
+import { useShopperContent } from '../../lib/shopperStoreContent'
 import { saveShopperFeedback, saveShopperSurvey } from '../../lib/shopperSession'
 
 export function ShopperLandingPage() {
@@ -109,7 +110,8 @@ export function ShopperLearnPage() {
 
 export function ShopperSpinPage() {
   const { brand } = useBrand()
-  const spin = brand.shopperSpin
+  const storeSpin = useShopperContent().spin
+  const spin = { ...brand.shopperSpin, ...storeSpin }
   const [spinning, setSpinning] = useState(false)
   const [won, setWon] = useState(false)
 
@@ -322,6 +324,7 @@ const SURVEY_STEPS = 3
 const genderOptions = ['Male', 'Female']
 
 export function ShopperSurveyPage() {
+  const content = useShopperContent()
   const [step, setStep] = useState(1)
   const [name, setName] = useState('')
   const [phone, setPhone] = useState('')
@@ -372,12 +375,12 @@ export function ShopperSurveyPage() {
 
       {step === 2 && (
         <>
-          <h2 className="text-xl font-bold">Which tea do you currently use?</h2>
+          <h2 className="text-xl font-bold">{content.current.text}</h2>
           <p className="mt-2 text-sm text-slate-500">
             Captures preferred tea brand, pack size, cups per day, frequency, price sensitivity & more.
           </p>
           <div className="mt-6 space-y-3">
-            {surveyOptions.map((opt) => (
+            {content.current.options.map((opt) => (
               <SurveyChoice key={opt} label={opt} selected={selected === opt} onSelect={() => setSelected(opt)} />
             ))}
           </div>
@@ -386,10 +389,10 @@ export function ShopperSurveyPage() {
 
       {step === 3 && (
         <>
-          <h2 className="text-xl font-bold">Reason for selection</h2>
+          <h2 className="text-xl font-bold">{content.reasons.text}</h2>
           <p className="mt-2 text-sm text-slate-500">Why did you choose this tea? Select all that apply.</p>
           <div className="mt-6 space-y-3">
-            {selectionReasons.map((opt) => (
+            {content.reasons.options.map((opt) => (
               <SurveyChoice
                 key={opt}
                 label={opt}
@@ -512,7 +515,8 @@ function SurveyChoice({
 
 export function ShopperRewardPage() {
   const { brand } = useBrand()
-  const spin = brand.shopperSpin
+  const storeSpin = useShopperContent().spin
+  const spin = { ...brand.shopperSpin, ...storeSpin }
 
   return (
     <div className="flex min-h-[calc(100dvh-4rem)] flex-col items-center justify-center bg-white px-6 py-10 text-center">

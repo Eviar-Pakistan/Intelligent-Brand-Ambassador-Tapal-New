@@ -126,7 +126,7 @@ def _scope(request, *, allow_ba: bool = False) -> Scope | None:
 
 def _ambassador_from_token(token) -> Ambassador | None:
     token = str(token or '').strip()
-    return Ambassador.objects.filter(invite_token=token).first() if token else None
+    return Ambassador.objects.filter(invite_token=token, is_active=True).first() if token else None
 
 
 def _denied():
@@ -476,7 +476,7 @@ def notify_supervisor(shift: ShiftAssignment, kind: str) -> None:
     at = at or timezone.now()
     verb = 'checked in' if kind == 'check-in' else 'checked out'
     time_label = timezone.localtime(at).strftime('%I:%M %p').lstrip('0')
-    SupervisorNotification.objects.get_or_create(
+    notice, created = SupervisorNotification.objects.get_or_create(
         id=f'{kind}-{store.id}-{shift.id}',
         defaults={
             'supervisor_id': store.supervisor_id,
@@ -484,6 +484,16 @@ def notify_supervisor(shift: ShiftAssignment, kind: str) -> None:
             'created_at': at,
         },
     )
+    if created:
+        # Push to the supervisor's phone from the server (not from the BA's app).
+        from .push_views import send_push_later
+
+        send_push_later(
+            store.supervisor_id,
+            'BA checked in' if kind == 'check-in' else 'BA checked out',
+            notice.message,
+            event_id=notice.id,
+        )
 
 
 @api_view(['GET', 'DELETE'])
@@ -709,11 +719,13 @@ def complaints(request):
     POST — a BA files one with their invite token: {token, id?, kind, storeId, …customer or BA fields}.
     """
     if request.method == 'GET':
-        scope = _scope(request)
+        scope = _scope(request, allow_ba=True)
         if not scope:
             return _denied()
         qs = AmbassadorComplaint.objects.select_related('store', 'ambassador')
-        if scope.store_ids is not None:
+        if scope.ambassador:
+            qs = qs.filter(ambassador=scope.ambassador)
+        elif scope.store_ids is not None:
             qs = qs.filter(store_id__in=scope.store_ids)
         return Response({'results': [complaint_payload(c, request) for c in qs]})
 
@@ -792,6 +804,9 @@ def report_payload(r: DailyReport) -> dict:
         'id': r.id,
         'baId': _ba_id(r.ambassador_id),
         'baName': r.ba_name,
+        'baCode': r.ambassador.ba_code if r.ambassador_id else '',
+        'storeId': r.store_id,
+        'storeName': r.store.name if r.store_id else '',
         'city': r.city,
         'submittedAt': _iso(r.submitted_at),
         'source': r.source,
@@ -834,7 +849,7 @@ def daily_reports(request):
     if not scope:
         return _denied()
     if request.method == 'GET':
-        qs = _ba_visible(DailyReport.objects.all(), scope)
+        qs = _ba_visible(DailyReport.objects.select_related('ambassador', 'store'), scope)
         return Response({'results': [report_payload(r) for r in qs[:500]]})
 
     if not scope.ambassador:
@@ -896,7 +911,13 @@ def interceptions(request):
         return _denied()
     if request.method == 'GET':
         qs = _ba_visible(UserInterception.objects.all(), scope)
-        return Response({'results': [interception_payload(r) for r in qs[:1000]]})
+        date_from, date_to = _date_param(request, 'date_from'), _date_param(request, 'date_to')
+        if date_from:
+            qs = qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(created_at__date__lte=date_to)
+        limit = 5000 if (date_from or date_to) else 1000
+        return Response({'results': [interception_payload(r) for r in qs[:limit]]})
 
     if not scope.ambassador:
         return _forbidden('Only a BA records an interception.')
@@ -1100,3 +1121,151 @@ def training_modules(request):
             ]
         }
     )
+
+
+# ─── The BA's own summary (Rewards page, Home goals) ────────────────────────
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def ba_me(request):
+    """GET ?token= : rank, points, target, days worked, rating, today's interceptions and goals."""
+    import math
+
+    from .intelligence import build_ba_leaderboard
+    from .models import AmbassadorMonthTarget
+    from .store_live import switched_to_tapal
+    from .views import _target_payload
+
+    ambassador = _ambassador_from_token(request.query_params.get('token'))
+    if not ambassador:
+        return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
+    today = timezone.localdate()
+    month = today.strftime('%Y-%m')
+    week_start = today - timedelta(days=today.weekday())
+    store = _ba_store(ambassador)
+
+    board = build_ba_leaderboard()['results']
+    mine = next((row for row in board if row['id'] == ambassador.id), None)
+
+    target = AmbassadorMonthTarget.objects.filter(ambassador=ambassador, month=month).select_related('store').first()
+    days_worked = (
+        ShiftAssignment.objects.filter(
+            ambassador=ambassador, date__year=today.year, date__month=today.month, checked_in_at__isnull=False
+        )
+        .values('date')
+        .distinct()
+        .count()
+    )
+
+    # Rating: shopper feedback (1-5) at the stores this BA works at, this month.
+    store_ids = set(MonthlyShift.objects.filter(ambassador=ambassador, month=month).values_list('store_id', flat=True))
+    if ambassador.store_id:
+        store_ids.add(ambassador.store_id)
+    ratings = list(
+        Consumer.objects.filter(
+            store_id__in=store_ids, feedback_rating__isnull=False, created_at__date__gte=today.replace(day=1)
+        ).values_list('feedback_rating', flat=True)
+    )
+
+    mine_qs = UserInterception.objects.filter(ambassador=ambassador)
+    today_rows = list(mine_qs.filter(created_at__date=today).only('previous_brand'))
+    week_sessions = mine_qs.filter(created_at__date__gte=week_start).count()
+    switched_today = sum(1 for r in today_rows if switched_to_tapal(r.previous_brand))
+    week_goal = KpiConfig.normalize(KpiConfig.get_solo().config)['sessionTarget']
+
+    return Response(
+        {
+            'name': ambassador.name,
+            'baCode': ambassador.ba_code,
+            'status': ambassador.status,
+            'certified': ambassador.status in (Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED),
+            'city': ambassador.city or (store.city if store else ''),
+            'storeName': store.name if store else '',
+            'rank': mine['rank'] if mine else None,
+            'rankedOutOf': len(board),
+            'points': mine['points'] if mine else 0,
+            'conversion': mine['conversion'] if mine else 0.0,
+            'weekSessions': week_sessions,
+            'monthTarget': _target_payload(target) if target else None,
+            'daysWorked': days_worked,
+            'rating': round(sum(ratings) / len(ratings), 1) if ratings else None,
+            'ratingCount': len(ratings),
+            'today': {
+                'interceptions': len(today_rows),
+                'switched': switched_today,
+                'dailyGoal': max(1, math.ceil(week_goal / 6)),
+            },
+        }
+    )
+
+
+# ─── Retraining answers ──────────────────────────────────────────────────────
+
+
+def practice_payload(p) -> dict:
+    return {
+        'id': p.id,
+        'baId': _ba_id(p.ambassador_id),
+        'baName': p.ambassador.name,
+        'kind': p.kind,
+        'title': p.title,
+        'question': p.question,
+        'answer': p.answer,
+        'createdAt': _iso(p.created_at),
+    }
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def training_practice(request):
+    """
+    POST {token, kind: video|scenario, title, question, answer}: the BA saves a retraining answer.
+    GET: Head Office (all or ?ambassador=<id>), a supervisor (their stores' BAs), or the BA (their own).
+    """
+    from .models import TrainingPractice
+
+    scope = _scope(request, allow_ba=True)
+    if not scope:
+        return _denied()
+    if request.method == 'POST':
+        if not scope.ambassador:
+            return _forbidden('Only a BA records a training answer.')
+        kind = request.data.get('kind')
+        question = str(request.data.get('question') or '').strip()
+        answer = str(request.data.get('answer') or '').strip()
+        if kind not in TrainingPractice.Kind.values or not question or not answer:
+            return Response({'detail': 'Give the question and your answer.'}, status=status.HTTP_400_BAD_REQUEST)
+        practice = TrainingPractice.objects.create(
+            ambassador=scope.ambassador,
+            kind=kind,
+            title=str(request.data.get('title') or '').strip()[:200],
+            question=question[:2000],
+            answer=answer[:5000],
+        )
+        return Response(practice_payload(practice), status=status.HTTP_201_CREATED)
+
+    qs = TrainingPractice.objects.select_related('ambassador')
+    if scope.ambassador:
+        qs = qs.filter(ambassador=scope.ambassador)
+    elif scope.supervisor is not None:
+        qs = qs.filter(
+            Q(ambassador__store_id__in=scope.store_ids) | Q(ambassador__monthly_shifts__store_id__in=scope.store_ids)
+        ).distinct()
+    elif not scope.city.is_all:
+        qs = qs.filter(ambassador_id__in=scope.city.ambassador_ids)
+    ambassador = request.query_params.get('ambassador')
+    if ambassador and not scope.ambassador:
+        qs = qs.filter(ambassador_id=ambassador)
+    return Response({'results': [practice_payload(p) for p in qs[:500]]})
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def supervisor_password(request, pk):
+    """Head Office: the supervisor's current password (null if it has to be set again)."""
+    if not _is_head_office(request):
+        return _denied()
+    sup = get_object_or_404(_visible_supervisors(scope_for(request.user)), pk=pk)
+    return Response({'password': sup.reveal_password(), 'hasLogin': bool(sup.password)})
+

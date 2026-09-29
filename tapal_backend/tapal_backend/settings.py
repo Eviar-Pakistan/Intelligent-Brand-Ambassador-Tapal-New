@@ -14,6 +14,8 @@ try:
 
     load_dotenv(BASE_DIR.parent / '.env')
     load_dotenv(BASE_DIR / '.env')
+    # Firebase web keys (VITE_FIREBASE_*) live in the frontend's .env; the push settings below read them.
+    load_dotenv(BASE_DIR.parent / 'tapal_frontend' / '.env')
 except ImportError:
     pass
 
@@ -190,7 +192,15 @@ FIREBASE_MESSAGING_SENDER_ID = os.environ.get(
 )
 FIREBASE_APP_ID = os.environ.get('FIREBASE_APP_ID', os.environ.get('VITE_FIREBASE_APP_ID', ''))
 FIREBASE_VAPID_KEY = os.environ.get('FIREBASE_VAPID_KEY', os.environ.get('VITE_FIREBASE_VAPID_KEY', ''))
-FIREBASE_SERVICE_ACCOUNT_PATH = os.environ.get(
-    'FIREBASE_SERVICE_ACCOUNT_PATH',
-    str(BASE_DIR.parent / 'firebase-service-account.json'),
+FIREBASE_SERVICE_ACCOUNT_PATH = os.environ.get('FIREBASE_SERVICE_ACCOUNT_PATH') or next(
+    (
+        str(candidate)
+        for candidate in (
+            BASE_DIR / 'firebase-service-account.json',
+            BASE_DIR.parent / 'firebase-service-account.json',
+            BASE_DIR.parent / 'tapal_frontend' / 'firebase-service-account.json',
+        )
+        if candidate.is_file()
+    ),
+    str(BASE_DIR / 'firebase-service-account.json'),
 )

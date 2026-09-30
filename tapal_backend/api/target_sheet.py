@@ -328,18 +328,16 @@ def import_store_sku_targets(file, month: str, scope=None) -> dict:
             no_ba.append(store.name)
             continue
         for ba in bas:
-            existing = AmbassadorMonthTarget.objects.filter(ambassador=ba, month=month).first()
             AmbassadorMonthTarget.objects.update_or_create(
                 ambassador=ba,
                 month=month,
                 defaults={
                     'store': store,
                     'target_total': total,
-                    # the sheet has no sales: keep what was already recorded
-                    'sales_total': existing.sales_total if existing else Decimal('0'),
                     'lines': data['lines'],
                 },
             )
+            recompute_target_sales(ba.id, month)  # sales come from the BA's Daily Sales reports
             saved.append({'baName': ba.name, 'baCode': ba.ba_code, 'store': store.name, 'targetKg': float(total)})
         stores_done.append(store.name)
     return {
@@ -356,33 +354,49 @@ def import_store_sku_targets(file, month: str, scope=None) -> dict:
 
 # ─── Downloadable SKU target template (same layout the upload reads) ────────
 
-# Brand, SKU name, grammage (kg per pack), as in the store SKU target sheet.
+# The SKUs that exist: brand, SKU name, grammage (kg per pack). BA targets can only use these.
 SKU_CATALOGUE: list[tuple[str, str, float]] = [
-    ('Danedar', 'DD 100gm Tea Bag', 0.1), ('Danedar', 'DD 100gm Tea Bag Envelope', 0.1),
-    ('Danedar', 'DD 170gm Hard Pack', 0.17), ('Danedar', 'DD 1750gm Pouch', 1.65),
-    ('Danedar', 'DD 200gm RTB', 0.2), ('Danedar', 'DD 200gm Tea Bag', 0.2),
-    ('Danedar', 'DD 200gm Tea Bag Envelope', 0.2), ('Danedar', 'DD 350gm Pouch', 0.35),
-    ('Danedar', 'DD 3IN1 Elachi Box 200gm', 0.2), ('Danedar', 'DD 40gm RTB', 0.04),
-    ('Danedar', 'DD 430gm Pouch', 0.43), ('Danedar', 'DD 440gm Jar Pack New', 0.44),
-    ('Danedar', 'DD 49gm Hard Pack', 0.2), ('Danedar', 'DD 50gm Tea Bag', 0.05),
-    ('Danedar', 'DD 85gm Hard Pack', 0.085), ('Danedar', 'DD 900gm Pouch', 0.9),
-    ('Danedar', 'DD Elaichi 100gm Tea Bag Envelope', 0.1), ('Danedar', 'DD Elaichi 170gm Hard Pack', 0.08),
-    ('Danedar', 'DD Elaichi 80gm Hard Pack', 0.17), ('Danedar', 'DD 200gm Jar Pack', 0.2),
-    ('Danedar', 'DD 170gm Pouch', 0.17),
-    ('Tezdum', 'TD 170gm Hard Pack', 0.17), ('Tezdum', 'TD 170gm Pouch Pack', 0.17),
-    ('Tezdum', 'TD 430gm Pouch', 0.43), ('Tezdum', 'TD 80gm Hard Pack', 0.08),
-    ('Tezdum', 'TD 900gm Pouch', 0.9), ('Tezdum', 'TD 1750gm Pouch', 1.65), ('Tezdum', 'TD 290gm Pouch', 0),
-    ('Familly Mixture', 'FM 170gm Hard Pack', 0.17), ('Familly Mixture', 'FM 430gm Pouch', 0.43),
-    ('Familly Mixture', 'FM 440gm Jar Pack', 0.44), ('Familly Mixture', 'FM 80gm Hard Pack', 0.08),
-    ('Familly Mixture', 'FM 900gm Pouch', 0.9), ('Familly Mixture', 'FM 1750gm Pouch', 1.65),
-    ('Green Tea', 'Elaichi 45gm', 0.045), ('Green Tea', 'Ginger Honey 45gm', 0.045),
-    ('Green Tea', 'Jasmine 100gm', 0.1), ('Green Tea', 'Jasmine 45gm', 0.045),
-    ('Green Tea', 'Lemon 135gm', 0.135), ('Green Tea', 'Lemon 45gm', 0.045),
-    ('Green Tea', 'Lemon Grass 100gm', 0.1), ('Green Tea', 'Mango 45gm', 0.045),
-    ('Green Tea', 'Mint 45gm', 0.045), ('Green Tea', 'Pure Green 45gm', 0.045),
-    ('Green Tea', 'SOG 48gm', 0.048), ('Green Tea', 'Strawberry 45gm', 0.045),
+    ('Danedar', 'DD 100gm Tea Bag', 0.1),
+    ('Danedar', 'DD 100gm Tea Bag Envelope', 0.1),
+    ('Danedar', 'DD 170gm Hard Pack', 0.17),
+    ('Danedar', 'DD 200gm RTB', 0.2),
+    ('Danedar', 'DD 200gm Tea Bag', 0.2),
+    ('Danedar', 'DD 200gm Tea Bag Envelope', 0.2),
+    ('Danedar', 'DD 350gm Pouch', 0.35),
+    ('Danedar', 'DD 3IN1 Elachi sachet 20gms', 0.02),
+    ('Danedar', 'DD 40gm RTB', 0.04),
+    ('Danedar', 'DD 400gm Pillow Pack', 0.4),
+    ('Danedar', 'DD 430gm Pouch', 0.43),
+    ('Danedar', 'DD 440gm Jar Pack New', 0.44),
+    ('Danedar', 'DD 50gm Tea Bag', 0.05),
+    ('Danedar', 'DD 85gm Hard Pack', 0.085),
+    ('Danedar', 'DD 900gm Pouch', 0.9),
+    ('Danedar', 'DD Elaichi 170gm Hard Pack', 0.17),
+    ('Danedar', 'DD Elaichi 80gm Hard Pack', 0.08),
+    ('Green Tea', 'Elaichi 45gm', 0.045),
+    ('Family Mixture', 'FM 170gm Hard Pack', 0.17),
+    ('Family Mixture', 'FM 430gm Pouch', 0.43),
+    ('Family Mixture', 'FM 440gm Jar Pack', 0.44),
+    ('Family Mixture', 'FM 80gm Hard Pack', 0.08),
+    ('Family Mixture', 'FM 900gm Pouch', 0.9),
+    ('Green Tea', 'Ginger Honey 45gm', 0.045),
+    ('Green Tea', 'Jasmine 100gm', 0.1),
+    ('Green Tea', 'Jasmine 45gm', 0.045),
+    ('Green Tea', 'Lemon 135gm', 0.135),
+    ('Green Tea', 'Lemon 45gm', 0.045),
+    ('Green Tea', 'Orange 45gm', 0.045),
+    ('Green Tea', 'Pineapple 45gm', 0.045),
+    ('Green Tea', 'Mango 45gm', 0.045),
+    ('Green Tea', 'Mint 45gm', 0.045),
+    ('Green Tea', 'Pure Green 45gm', 0.045),
+    ('Green Tea', 'SOG 48gm', 0.048),
+    ('Green Tea', 'Strawberry 45gm', 0.045),
+    ('Tezdum', 'TD 170gm Hard Pack', 0.17),
+    ('Tezdum', 'TD 170gm Pouch Pack', 0.17),
+    ('Tezdum', 'TD 430gm Pouch', 0.43),
+    ('Tezdum', 'TD 80gm Hard Pack', 0.08),
+    ('Tezdum', 'TD 900gm Pouch', 0.9),
     ('Green Tea', 'Tropical Peach 45gm', 0.045),
-    ('Gulbahar', 'Gulbahar 80gm Hard Pack', 0.08),
 ]
 
 TEMPLATE_HEADERS = ['Region', 'City', 'Store name', 'Brand', 'SKU Name', 'KG Count', 'Count', 'Grammage', 'BA']
@@ -449,15 +463,15 @@ def build_sku_target_template(month: str, scope=None) -> bytes:
 
 # ─── BA SKU target template (one row per BA per SKU, keyed by BA Code) ─────
 
-BA_TEMPLATE_HEADERS = [
-    'BA Code', 'BA Name', 'Store', 'Month', 'Brand', 'SKU Name', 'Target Kg', 'Sales Kg', 'Grammage', 'Count',
-]
-_BA_HEADER_KEYS = {
-    'ba code': 'code', 'month': 'month', 'brand': 'brand', 'sku name': 'sku', 'sku': 'sku',
-    'target kg': 'target', 'sales kg': 'sales', 'grammage': 'grammage',
-}
+BA_TEMPLATE_HEADERS = ['BA Code', 'SKU', 'Month', 'Brand', 'Target Kg', 'Grammage', 'Units']
 GRAMMAGE = {sku: grams for _brand, sku, grams in SKU_CATALOGUE}
 BRAND = {sku: brand for brand, sku, _grams in SKU_CATALOGUE}
+_CANONICAL_SKU = {sku.lower(): sku for _brand, sku, _grams in SKU_CATALOGUE}
+
+
+def canonical_sku(name) -> str | None:
+    """The SKU's name as in the list (any case / extra spaces), or None when it is not one of the SKUs."""
+    return _CANONICAL_SKU.get(' '.join(str(name or '').split()).lower())
 
 
 def ba_store_for_month(ambassador: Ambassador, month: str) -> Store | None:
@@ -474,19 +488,25 @@ def ba_store_for_month(ambassador: Ambassador, month: str) -> Store | None:
 
 
 def build_ba_sku_template(month: str, scope=None) -> bytes:
-    """Every BA (the user's city only) x every SKU. Existing targets for the month are pre-filled."""
+    """
+    One row per BA per SKU: BA Code, SKU, Month, Brand, Target Kg. The month's saved targets are
+    filled in (the user's city only); add a row for each further SKU a BA should sell. The SKU column
+    is a drop-down of the SKU list (also on the "SKU List" sheet with each SKU's brand).
+    """
     from io import BytesIO
 
     import openpyxl
     from openpyxl.styles import Font, PatternFill
+    from openpyxl.worksheet.datavalidation import DataValidation
 
-    bas = Ambassador.objects.exclude(ba_code='').order_by('name')
+    bas = Ambassador.objects.exclude(ba_code='')
     if scope is not None:
         bas = scope.ambassadors(bas, 'id')
-    saved = {
-        t.ambassador_id: {line.get('sku'): line for line in (t.lines or [])}
-        for t in AmbassadorMonthTarget.objects.filter(month=month, ambassador__in=bas)
-    }
+    saved = (
+        AmbassadorMonthTarget.objects.filter(month=month, ambassador__in=bas)
+        .select_related('ambassador')
+        .order_by('ambassador__ba_code')
+    )
 
     book = openpyxl.Workbook()
     sheet = book.active
@@ -494,37 +514,60 @@ def build_ba_sku_template(month: str, scope=None) -> bytes:
     sheet.append(BA_TEMPLATE_HEADERS)
     for cell in sheet[1]:
         cell.font = Font(bold=True)
+    for target in saved:
+        for line in target.lines or []:
+            sku = canonical_sku(line.get('sku'))
+            if sku:
+                sheet.append([target.ambassador.ba_code, sku, month, BRAND[sku], line.get('qty')])
     yellow = PatternFill('solid', fgColor='FFFF00')
-    for ba in bas:
-        store = ba_store_for_month(ba, month)
-        lines = saved.get(ba.id, {})
-        skus = [(b, s, g) for b, s, g in SKU_CATALOGUE]
-        skus += [(line.get('brand', ''), sku, line.get('grammage') or 0) for sku, line in lines.items() if sku not in GRAMMAGE]
-        for brand, sku, grams in skus:
-            line = lines.get(sku, {})
-            row = sheet.max_row + 1
-            sheet.append([
-                ba.ba_code, ba.name, store.name if store else '', month, brand, sku,
-                line.get('qty'), line.get('sales'), grams, f'=IFERROR(G{row}/I{row},0)',
-            ])
-            sheet.cell(row, 7).fill = yellow
-            sheet.cell(row, 4).number_format = '@'
-    for column, width in zip('ABCDEFGHIJ', (12, 24, 30, 10, 16, 34, 11, 10, 10, 9)):
+    last = max(sheet.max_row, 1) + 500  # room to add rows
+    list_end = len(SKU_CATALOGUE) + 1
+    for row in range(2, last + 1):
+        sheet.cell(row, 3).number_format = '@'  # Month stays text: 2026-10
+        sheet.cell(row, 5).fill = yellow
+        # Grammage (kg per unit) from the SKU list; Units = Target Kg / Grammage
+        sheet.cell(row, 6).value = f"=IF(B{row}=\"\",\"\",IFERROR(VLOOKUP(B{row},'SKU List'!$A$2:$C${list_end},3,FALSE),\"\"))"
+        sheet.cell(row, 7).value = f'=IF(OR(E{row}="",F{row}="",F{row}=0),"",ROUND(E{row}/F{row},2))'
+    for column, width in zip('ABCDEFG', (14, 30, 10, 16, 11, 10, 9)):
         sheet.column_dimensions[column].width = width
     sheet.freeze_panes = 'A2'
+
+    skus = book.create_sheet('SKU List')
+    skus.append(['SKU', 'Brand', 'Grammage (kg per unit)'])
+    for cell in skus[1]:
+        cell.font = Font(bold=True)
+    for brand, sku, grams in SKU_CATALOGUE:
+        skus.append([sku, brand, grams])
+    skus.column_dimensions['C'].width = 22
+    skus.column_dimensions['A'].width = 30
+    skus.column_dimensions['B'].width = 16
+    pick = DataValidation(
+        type='list',
+        formula1=f"='SKU List'!$A$2:$A${len(SKU_CATALOGUE) + 1}",
+        allow_blank=True,
+        showErrorMessage=True,
+        errorTitle='Unknown SKU',
+        error='Choose a SKU from the list.',
+    )
+    sheet.add_data_validation(pick)
+    pick.add(f'B2:B{last}')
 
     help_sheet = book.create_sheet('Instructions')
     for line in (
         ['How to fill the BA target template'],
         [],
-        ['1. One row = one SKU target for one BA. A BA can have as many SKU rows as needed.'],
-        ['2. BA Code identifies the ambassador (BA Name and Store are only for reference).'],
-        ['3. Fill the yellow Target Kg. Sales Kg is optional. Count (packs) = Target Kg / Grammage.'],
-        ['4. Month is YYYY-MM. Rows with no Target Kg are skipped.'],
-        ['5. Uploading replaces that BA\'s SKU targets for that month with the rows in the file.'],
+        ['1. One row = one SKU target for one BA. Add a row for every SKU a BA should sell (as many as needed).'],
+        ['2. BA Code: the ambassador\'s code, e.g. BA-4K7M2Q.'],
+        ['3. SKU: pick from the drop-down. Only the SKUs on the "SKU List" sheet can be used.'],
+        [f'4. Month: YYYY-MM, e.g. {month}.'],
+        ['5. Brand: optional — it is taken from the SKU (see the "SKU List" sheet).'],
+        ['6. Target Kg (yellow): the target for that SKU in kg. Rows with no Target Kg are skipped.'],
+        ['   Grammage and Units fill in by themselves: Units = Target Kg / Grammage (e.g. 0.6 kg / 0.1 = 6 units).'],
+        ['7. Uploading replaces that BA\'s SKU targets for that month with the rows in the file.'],
+        ['   Sales are not entered: they come from the BA\'s Daily Sales reports. Achievement = sales / target x 100.'],
     ):
         help_sheet.append(line)
-    help_sheet.column_dimensions['A'].width = 100
+    help_sheet.column_dimensions['A'].width = 110
     out = BytesIO()
     book.save(out)
     return out.getvalue()
@@ -542,8 +585,11 @@ def _num(value):
 @transaction.atomic
 def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
     """
-    rows: [{baCode, month, lines: [{sku, brand?, qty, sales?, grammage?}]}]
-    Replaces each BA's SKU targets for the month. Target = sum of qty; sales = sum of sales when given.
+    rows: [{baCode, month, lines: [{sku, qty}]}] — qty is the Target Kg; units = qty / the SKU's grammage
+    (a {sku, units} line is also accepted: kg = units x grammage). — sku must be one of SKU_CATALOGUE (brand and
+    grammage are taken from the list).
+    Replaces each BA's SKU targets for the month. Target = sum of qty (kg). Sales are never set here:
+    they are the kg the BA reports per SKU in their Daily Sales reports (recompute_target_sales).
     """
     from .shifts import parse_month
 
@@ -563,65 +609,104 @@ def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
             errors.append(f'{code}: month must be YYYY-MM.')
             continue
         month = '%04d-%02d' % parsed
-        lines, any_sales = [], False
+        lines, unknown, seen = [], [], set()
         for raw in row.get('lines') or []:
-            sku = str(raw.get('sku') or '').strip()
+            name = str(raw.get('sku') or '').strip()
+            units = _num(raw.get('units'))
             qty = _num(raw.get('qty'))
-            if not sku or qty is None or qty < 0:
+            if not name or (units is None and qty is None) or (units is not None and units < 0) or (qty is not None and qty < 0):
                 continue
-            sales = _num(raw.get('sales'))
-            any_sales = any_sales or sales is not None
-            grams = _num(raw.get('grammage'))
-            if grams is None:
-                grams = GRAMMAGE.get(sku, 0)
+            sku = canonical_sku(name)
+            if not sku:
+                unknown.append(name)
+                continue
+            if sku in seen:
+                continue
+            seen.add(sku)
+            grams = GRAMMAGE[sku]
+            if units is not None:
+                # Target Kg = Units x Grammage
+                qty = round(units * grams, 3)
             lines.append({
                 'sku': sku,
-                'brand': str(raw.get('brand') or BRAND.get(sku, '')).strip(),
+                'brand': BRAND[sku],
                 'qty': qty,
-                'sales': sales,
                 'grammage': grams,
-                'count': round(qty / grams, 2) if grams else None,
+                'count': units if units is not None else (round(qty / grams, 2) if grams else None),
             })
-        existing = AmbassadorMonthTarget.objects.filter(ambassador=ba, month=month).first()
-        total_only = _num(row.get('targetKg'))
-        if not lines and total_only is not None and total_only >= 0:
-            # "Set target & sales": one total. Keep the SKU breakdown only if the total is unchanged.
-            sales_only = _num(row.get('salesKg'))
-            target = Decimal(str(total_only)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-            keep_lines = bool(existing and existing.target_total == target)
-            AmbassadorMonthTarget.objects.update_or_create(
-                ambassador=ba,
-                month=month,
-                defaults={
-                    'store': ba_store_for_month(ba, month) or (existing.store if existing else None),
-                    'target_total': target,
-                    'sales_total': (
-                        Decimal(str(sales_only)).quantize(Decimal('0.01'))
-                        if sales_only is not None and sales_only >= 0
-                        else (existing.sales_total if existing else Decimal('0'))
-                    ),
-                    'lines': existing.lines if keep_lines else [],
-                },
-            )
-            saved.append({'baCode': ba.ba_code, 'baName': ba.name, 'month': month, 'skus': 0, 'targetKg': float(target)})
+        if unknown:
+            errors.append(f'{code}: {", ".join(unknown)} — not in the SKU list, so not saved.')
             continue
         if not lines:
             errors.append(f'{code}: no SKU with a Target Kg for {month}.')
             continue
+        existing = AmbassadorMonthTarget.objects.filter(ambassador=ba, month=month).first()
         target = Decimal(str(sum(line['qty'] for line in lines))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        if any_sales:
-            sales_total = Decimal(str(sum(line['sales'] or 0 for line in lines))).quantize(Decimal('0.01'))
-        else:
-            sales_total = existing.sales_total if existing else Decimal('0')
         AmbassadorMonthTarget.objects.update_or_create(
             ambassador=ba,
             month=month,
             defaults={
                 'store': ba_store_for_month(ba, month) or (existing.store if existing else None),
                 'target_total': target,
-                'sales_total': sales_total,
                 'lines': lines,
             },
         )
+        recompute_target_sales(ba.id, month)
         saved.append({'baCode': ba.ba_code, 'baName': ba.name, 'month': month, 'skus': len(lines), 'targetKg': float(target)})
     return {'saved': saved, 'errors': errors}
+
+
+# ─── Sales achievement from the BA's Daily Sales reports ───────────────────
+
+SALES_SKU_PREFIX = 'sku:'
+
+
+def _kg(value) -> float | None:
+    number = _num(value)
+    return number if number is not None and number >= 0 else None
+
+
+def reported_sku_sales(ambassador_id, month: str) -> dict[str, float]:
+    """
+    Kg sold per SKU (lower-case name) in a month, from the BA's Daily Sales reports (keys "sku:<SKU>").
+    A day counts once: if the BA sends several reports with SKU sales on one day, the latest one is used.
+    """
+    from django.utils import timezone
+
+    from .models import DailyReport
+
+    year, mon = (int(part) for part in month.split('-'))
+    by_day: dict = {}
+    for report in DailyReport.objects.filter(
+        ambassador_id=ambassador_id, submitted_at__year=year, submitted_at__month=mon
+    ).order_by('submitted_at'):
+        sold = {}
+        for key, value in (report.sales or {}).items():
+            kg = _kg(value)
+            if str(key).startswith(SALES_SKU_PREFIX) and kg is not None:
+                sold[str(key)[len(SALES_SKU_PREFIX):].strip().lower()] = kg
+        if sold:
+            by_day[timezone.localtime(report.submitted_at).date()] = sold
+    totals: dict[str, float] = {}
+    for sold in by_day.values():
+        for sku, kg in sold.items():
+            totals[sku] = totals.get(sku, 0.0) + kg
+    return totals
+
+
+def recompute_target_sales(ambassador_id, month: str):
+    """Set each SKU line's sales (kg) and the month's sales total from the BA's Daily Sales reports."""
+    target = AmbassadorMonthTarget.objects.filter(ambassador_id=ambassador_id, month=month).first()
+    if not target:
+        return None
+    sold = reported_sku_sales(ambassador_id, month)
+    lines, total = [], Decimal('0')
+    for line in target.lines or []:
+        kg = round(sold.get(str(line.get('sku') or '').strip().lower(), 0.0), 2)
+        lines.append({**line, 'sales': kg})
+        total += Decimal(str(kg))
+    target.lines = lines
+    target.sales_total = total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    target.save(update_fields=['lines', 'sales_total'])
+    return target
+

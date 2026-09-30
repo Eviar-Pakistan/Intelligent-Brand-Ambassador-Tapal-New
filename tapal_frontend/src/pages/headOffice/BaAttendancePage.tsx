@@ -276,7 +276,68 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
         {error ? (
           <p className="px-4 py-6 text-sm text-rose-700">{error}</p>
         ) : (
-          <TableScroll minWidth={780}>
+          <>
+          <ul className="divide-y divide-slate-100 sm:hidden">
+            {rows.map((r) => (
+              <li key={r.id} className="px-4 py-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex min-w-0 items-start gap-3">
+                    {r.checkInPhoto && (
+                      <a href={r.checkInPhoto} target="_blank" rel="noopener noreferrer" className="shrink-0">
+                        <img
+                          src={r.checkInPhoto}
+                          alt={`${r.baName} at check-in`}
+                          className="h-12 w-12 rounded-lg object-cover ring-1 ring-slate-200"
+                        />
+                      </a>
+                    )}
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-slate-900">{r.baName}</div>
+                      <div className="truncate text-xs text-slate-500">
+                        {r.storeName}
+                        {r.city ? ` · ${r.city}` : ''}
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        {dateLabel(r.date)} · {r.day}
+                      </div>
+                    </div>
+                  </div>
+                  <StatusBadge status={r.status} />
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                  <div className="rounded-lg bg-slate-50 px-2 py-1.5">
+                    <div className="text-[10px] text-slate-500">Check-in</div>
+                    <div className="font-semibold tabular-nums">{timeOf(r.checkedInAt)}</div>
+                    <MapLink lat={r.checkInLat} lng={r.checkInLng} accuracy={r.checkInAccuracy} />
+                  </div>
+                  <div className="rounded-lg bg-slate-50 px-2 py-1.5">
+                    <div className="text-[10px] text-slate-500">Check-out</div>
+                    <div className="font-semibold tabular-nums">{timeOf(r.checkedOutAt)}</div>
+                    <MapLink lat={r.checkOutLat} lng={r.checkOutLng} accuracy={r.checkOutAccuracy} />
+                  </div>
+                  <div className="rounded-lg bg-slate-50 px-2 py-1.5">
+                    <div className="text-[10px] text-slate-500">Report</div>
+                    <div className={r.reportSubmittedAt ? 'font-semibold text-emerald-700' : 'text-slate-400'}>
+                      {r.reportSubmittedAt ? 'Submitted' : 'Not yet'}
+                    </div>
+                  </div>
+                </div>
+                {r.earlyCheckoutReason && (
+                  <p className="mt-2 text-[11px] text-amber-700">Early: {r.earlyCheckoutReason}</p>
+                )}
+              </li>
+            ))}
+            {(!data || rows.length === 0) && (
+              <li className="px-4 py-8 text-center text-sm text-slate-500">
+                {!data
+                  ? 'Loading attendance…'
+                  : data.results.length === 0
+                    ? 'No BAs have shifts in this period.'
+                    : 'No attendance matches these filters.'}
+              </li>
+            )}
+          </ul>
+          <TableScroll minWidth={780} className="hidden sm:block">
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-50 text-xs tracking-wide text-slate-500 uppercase">
                 <tr>
@@ -363,6 +424,7 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
               </tbody>
             </table>
           </TableScroll>
+          </>
         )}
       </Card>
     </div>

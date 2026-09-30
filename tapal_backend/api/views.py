@@ -463,6 +463,17 @@ def _target_payload(row):
     }
 
 
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def sku_catalogue(request):
+    """Every Tapal SKU (range, name, kg per pack) — the BA app's complaint form lists these."""
+    from .target_sheet import SKU_CATALOGUE
+
+    return Response(
+        {'results': [{'range': brand, 'sku': sku, 'grammage': grams} for brand, sku, grams in SKU_CATALOGUE]}
+    )
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def ba_targets(request):

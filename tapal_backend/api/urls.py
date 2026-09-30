@@ -18,6 +18,7 @@ from . import push_views
 from .views import (
     ba_attendance,
     ba_targets,
+    sku_catalogue,
     ba_targets_template,
     ba_targets_upload,
     campaign_metrics,
@@ -60,6 +61,7 @@ urlpatterns = [
     path('attendance/', ba_attendance, name='ba-attendance'),
     path('platform-settings/', platform_settings, name='platform-settings'),
     path('ba-targets/', ba_targets, name='ba-targets'),
+    path('sku-catalogue/', sku_catalogue, name='sku-catalogue'),
     path('ba-targets/upload/', ba_targets_upload, name='ba-targets-upload'),
     path('ba-targets/template/', ba_targets_template, name='ba-targets-template'),
     path('shopper/store/<slug:slug>/', shopper_store_lookup, name='shopper-store-lookup'),

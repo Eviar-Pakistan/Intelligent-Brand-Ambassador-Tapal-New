@@ -107,9 +107,9 @@ function sendToServer(path: string, method: 'POST' | 'PATCH' | 'DELETE', body?: 
 }
 
 /**
- * Loads supervisors from the server. Head Office gets everyone (and any supervisor made in this
- * browser before the server kept them is carried over, without a password); a signed-in
- * supervisor gets themselves.
+ * Loads supervisors from the server, which is the only source: Head Office gets everyone in their
+ * city scope; a signed-in supervisor gets themselves. Nothing kept in this browser is sent back up,
+ * so a deleted supervisor cannot be re-created from another tab or device.
  */
 export async function syncSupervisors() {
   if (currentPortal() === 'supervisor') {
@@ -122,14 +122,6 @@ export async function syncSupervisors() {
   if (!djangoToken()) return
   const list = resultsOf(await portalGet<{ results: Supervisor[] }>('/api/supervisors/', 'office'))
   if (!list) return
-  const ids = new Set(list.map((s) => s.id))
-  const emails = new Set(list.map((s) => normEmail(s.email)))
-  for (const local of supervisors) {
-    if (ids.has(local.id) || !local.email || emails.has(normEmail(local.email))) continue
-    const { id, name, phone, email, city, storeIds } = local
-    const saved = await sendToServer('/api/supervisors/', 'POST', { id, name, phone, email, city, storeIds })
-    if (saved) list.push(saved)
-  }
   commit(list)
   await Promise.all(list.map((s) => syncSupervisorOverview(s.id)))
 }
@@ -237,11 +229,18 @@ export function assignStores(supervisorId: string, storeIds: number[]) {
   )
 }
 
-export function deleteSupervisor(supervisorId: string) {
+/** Deletes on the server first; the supervisor leaves the list only once the server has removed them. */
+export async function deleteSupervisor(supervisorId: string): Promise<string | null> {
+  if (!djangoToken()) return 'Sign in to Head Office to delete a supervisor.'
+  try {
+    await portalSend(`/api/supervisors/${encodeURIComponent(supervisorId)}/`, 'DELETE', undefined, 'office')
+  } catch (error) {
+    return error instanceof Error ? error.message : 'The supervisor could not be deleted.'
+  }
   commit(supervisors.filter((s) => s.id !== supervisorId))
   overviewCache.delete(supervisorId)
-  void sendToServer(`/api/supervisors/${encodeURIComponent(supervisorId)}/`, 'DELETE')
   if (readSession()?.id === supervisorId) signOut()
+  return null
 }
 
 export function supervisorOfStore(storeId: number) {

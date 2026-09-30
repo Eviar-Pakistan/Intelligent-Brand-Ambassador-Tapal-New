@@ -372,12 +372,13 @@ class AmbassadorManagementTests(PortalTestBase):
         self.ho.patch(f'/api/ambassadors/{self.ba.id}/', {'is_active': True}, format='json')
         self.assertEqual(self.anon.get(f'/api/ba/today-shift/?token={token}').status_code, 200)
 
-    def test_single_target_total(self):
+    def test_target_needs_skus_and_sales_are_not_entered(self):
+        # A total without SKUs (and typed-in sales) is no longer accepted.
         body = {'rows': [{'baCode': self.ba.ba_code, 'month': '2026-10', 'targetKg': 120, 'salesKg': 30}]}
         res = self.ho.post('/api/ba-targets/', body, format='json')
-        self.assertEqual(res.status_code, 201, res.data)
-        row = self.ho.get('/api/ba-targets/?month=2026-10').data['results'][0]
-        self.assertEqual((row['targetKg'], row['salesKg'], row['lines']), (120.0, 30.0, []))
+        self.assertEqual(len(res.data['saved']), 0)
+        self.assertIn('no SKU with a Target Kg', res.data['errors'][0])
+        self.assertEqual(self.ho.get('/api/ba-targets/?month=2026-10').data['results'], [])
 
 
 class LiveStoreTests(PortalTestBase):
@@ -662,4 +663,37 @@ class ShopperQrLinkTests(PortalTestBase):
         self.assertEqual(response.status_code, 302)
         go = parse_qs(urlparse(response['Location']).query)['go'][0]
         self.assertEqual(go, '/shopper/s1-abc?store=Punjab+Super+Store&city=Sheikhupura')
+
+
+class BaStoreFromShiftTests(PortalTestBase):
+    def test_store_follows_this_months_shift(self):
+        from .models import MonthlyShift
+        from .shifts import assign_ba_stores
+
+        month = self.today.strftime('%Y-%m')
+        Ambassador.objects.filter(pk=self.ba.pk).update(store=None)
+        shift = build_monthly_shift(store=self.store, ambassador=self.ba, month=month,
+                                    start=parse_hhmm('10:00'), end=parse_hhmm('18:00'))
+        shift.save()
+        self.ba.refresh_from_db()
+        self.assertEqual(self.ba.store_id, self.store.id)
+        self.assertIsNotNone(self.ba.deployed_at)
+
+        # moved to another store: the BA's store follows
+        shift.store = self.other_store
+        shift.save()
+        self.ba.refresh_from_db()
+        self.assertEqual(self.ba.store_id, self.other_store.id)
+
+        # a shift for another month does not change today's store
+        build_monthly_shift(store=self.store, ambassador=self.ba, month='2099-01',
+                            start=parse_hhmm('10:00'), end=parse_hhmm('18:00')).save()
+        self.ba.refresh_from_db()
+        self.assertEqual(self.ba.store_id, self.other_store.id)
+
+        # backfill: nothing to change
+        self.assertEqual(assign_ba_stores(month), 0)
+        MonthlyShift.objects.filter(pk=shift.pk).delete()  # queryset delete also fires post_delete
+        self.ba.refresh_from_db()
+        self.assertEqual(self.ba.store_id, self.other_store.id)  # no shift left this month: store kept
 

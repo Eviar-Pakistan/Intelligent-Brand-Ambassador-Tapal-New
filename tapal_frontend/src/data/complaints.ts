@@ -1,3 +1,4 @@
+import { groupByRange, loadSkuCatalogue, type SkuRange } from '../lib/skuCatalogue'
 export type ComplaintStatus = 'Open' | 'In Review' | 'Resolved' | 'Rejected'
 
 export type ComplaintKind = 'customer' | 'ba'
@@ -10,30 +11,15 @@ export type ComplaintCategory =
   | 'Schedule / deployment'
   | 'Other'
 
-export type ComplaintBrand = {
-  name: string
-  skus: string[]
-}
+/** Customer complaints are about Tapal products only. */
+export const COMPLAINT_BRAND = 'Tapal'
 
-/** Product lines and pack sizes a customer complaint can be filed against. */
-export const complaintBrands: ComplaintBrand[] = [
-  {
-    name: 'Tapal Danedar',
-    skus: ['Danedar 90g', 'Danedar 190g', 'Danedar 475g', 'Danedar 900g'],
-  },
-  {
-    name: 'Family Pack',
-    skus: ['Family Pack 900g', 'Family Carton 5x475g', 'Bulk Tea 2.5kg'],
-  },
-  {
-    name: 'Tea Bags',
-    skus: ['Tea Bags 25s', 'Tea Bags 50s', 'Tea Bags 100s', 'Tea Bags 200s'],
-  },
-  {
-    name: 'Specialty',
-    skus: ['Green Tea 100g', 'Green Tea 200g', 'Tezdum 250g', 'Flavored Tea 150g'],
-  },
-]
+export type { SkuRange }
+
+/** Every Tapal SKU grouped by range (Danedar, Tezdum…), from the server's SKU catalogue. */
+export async function loadComplaintSkus(): Promise<SkuRange[]> {
+  return groupByRange(await loadSkuCatalogue())
+}
 
 type ComplaintBase = {
   id: string

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { CalendarDays, Eye, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
+import { CalendarDays, Download, Eye, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
 import { Avatar, Button, Card, Modal, PageHeader, PasswordField, StatusBadge, TableScroll } from '../../components/ui'
 import { stores } from '../../data/mock'
 import {
@@ -488,6 +488,26 @@ function usePreview() {
   }
 }
 
+/**
+ * Excel of every listed supervisor's sign-in: name, email, current password and city.
+ * Passwords come from the server one by one (Head Office only); one set before copies were kept shows a note.
+ */
+async function downloadSupervisorLogins(list: Supervisor[]) {
+  const XLSX = await import('xlsx')
+  const rows = await Promise.all(
+    list.map(async (s) => {
+      const data = await fetchSupervisorPassword(s.id)
+      const password = data?.password ?? (data?.hasLogin ? 'Not available — set a new one' : 'No password set')
+      return [s.name, s.email, password, s.city]
+    }),
+  )
+  const sheet = XLSX.utils.aoa_to_sheet([['Supervisor Name', 'Email', 'Password', 'City'], ...rows])
+  sheet['!cols'] = [{ wch: 26 }, { wch: 32 }, { wch: 30 }, { wch: 16 }]
+  const book = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(book, sheet, 'Supervisor Logins')
+  XLSX.writeFile(book, `Tapal_Supervisor_Logins_${new Date().toISOString().slice(0, 10)}.xlsx`)
+}
+
 export function SupervisorsPage() {
   const base = useRoleBase()
   const supervisors = useSupervisors()
@@ -498,6 +518,7 @@ export function SupervisorsPage() {
   const [credentials, setCredentials] = useState<Credentials | null>(null)
   const preview = usePreview()
   const planningSupervisor = supervisors.find((s) => s.id === planning) ?? null
+  const [downloading, setDownloading] = useState(false)
 
   return (
     <div>
@@ -505,9 +526,25 @@ export function SupervisorsPage() {
         title="Supervisors"
         description="Create supervisors, assign their stores, and set each week’s journey plan"
         actions={
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus size={15} /> Add supervisor
-          </Button>
+          <>
+            <Button onClick={() => setAddOpen(true)}>
+              <Plus size={15} /> Add supervisor
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={supervisors.length === 0 || downloading}
+              onClick={async () => {
+                setDownloading(true)
+                try {
+                  await downloadSupervisorLogins(supervisors)
+                } finally {
+                  setDownloading(false)
+                }
+              }}
+            >
+              <Download size={15} /> {downloading ? 'Preparing…' : 'Download logins'}
+            </Button>
+          </>
         }
       />
       <Card padding={false}>
@@ -607,6 +644,8 @@ export function SupervisorDetailPage() {
   const [viewVisit, setViewVisit] = useState<JourneyVisit | null>(null)
   const [credentials, setCredentials] = useState<Credentials | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const preview = usePreview()
 
@@ -693,15 +732,23 @@ export function SupervisorDetailPage() {
             {supervisor.name} will be removed and can no longer sign in. Their {supervisor.storeIds.length} assigned{' '}
             {supervisor.storeIds.length === 1 ? 'store is' : 'stores are'} left without a supervisor.
           </p>
+          {deleteError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800">{deleteError}</p>
+          )}
           <div className="flex flex-col gap-2 sm:flex-row-reverse">
             <Button
               variant="danger"
-              onClick={() => {
-                deleteSupervisor(supervisor.id)
+              disabled={deleting}
+              onClick={async () => {
+                setDeleting(true)
+                setDeleteError(null)
+                const problem = await deleteSupervisor(supervisor.id)
+                setDeleting(false)
+                if (problem) return setDeleteError(problem)
                 navigate(`${base}/supervisors`)
               }}
             >
-              Delete supervisor
+              {deleting ? 'Deleting…' : 'Delete supervisor'}
             </Button>
             <Button variant="secondary" onClick={() => setConfirmDelete(false)}>
               Cancel

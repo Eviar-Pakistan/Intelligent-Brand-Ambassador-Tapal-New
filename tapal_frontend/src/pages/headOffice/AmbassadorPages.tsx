@@ -14,7 +14,7 @@ import {
   TableScroll,
   Tabs,
 } from '../../components/ui'
-import { Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus } from 'lucide-react'
+import { Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus, X } from 'lucide-react'
 import {
   baAccessUrl,
   baEmailInUse,
@@ -43,6 +43,7 @@ import { useDailyReports } from '../../lib/baReport'
 import { ShiftPlanModal } from './ShiftPlanModal'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
 import {
+  achievementPct,
   currentMonthKey,
   downloadTargetTemplate,
   formatTargetMonth,
@@ -56,6 +57,7 @@ import {
   type TargetParseResult,
   type TargetPerson,
 } from '../../lib/baTargets'
+import { groupByRange, loadSkuCatalogue, type SkuRow } from '../../lib/skuCatalogue'
 
 const validEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 
@@ -386,6 +388,19 @@ function AmbassadorDetailModal({
   )
 }
 
+/** Excel of the listed BAs: name, store, personal access link and city (to send each BA their link). */
+async function downloadBaAccessLinks(rows: BaAccount[]) {
+  const XLSX = await import('xlsx')
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ['BA Name', 'Store', 'Access Link', 'City'],
+    ...rows.map((a) => [a.name, a.storeName || '', a.accessToken ? baAccessUrl(a) : '', a.city || '']),
+  ])
+  sheet['!cols'] = [{ wch: 26 }, { wch: 34 }, { wch: 70 }, { wch: 16 }]
+  const book = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(book, sheet, 'BA Access Links')
+  XLSX.writeFile(book, `Tapal_BA_Access_Links_${localDay(new Date())}.xlsx`)
+}
+
 export function AmbassadorsPage() {
   const [tab, setTab] = useState('All')
   const [q, setQ] = useState('')
@@ -445,7 +460,7 @@ export function AmbassadorsPage() {
               <UserPlus size={15} /> Add ambassador
             </Button>
             <Button variant="secondary" onClick={() => setTargetOpen(true)}>
-              Set target & sales
+              Set SKU target
             </Button>
             <Button variant="secondary" onClick={() => setTargetBulkOpen(true)}>
               <FileSpreadsheet size={15} /> Upload targets
@@ -453,7 +468,14 @@ export function AmbassadorsPage() {
             <Button variant="secondary" onClick={() => setBulkOpen(true)}>
               <FileSpreadsheet size={15} /> Bulk upload (Excel)
             </Button>
-          
+            <Button
+              variant="secondary"
+              disabled={filteredAccounts.length === 0}
+              onClick={() => void downloadBaAccessLinks(filteredAccounts)}
+            >
+              <Download size={15} /> Download BA links
+            </Button>
+
             <Link to="/ho/ambassadors/training">
               <Button variant="secondary">Training videos</Button>
             </Link>
@@ -710,8 +732,9 @@ export function BulkTargetModal({ open, onClose }: { open: boolean; onClose: () 
         <div className="space-y-2">
           <div className="font-semibold text-slate-900">1. Download the template</div>
           <p className="text-xs text-slate-500">
-            One row per BA and SKU, identified by BA Code. Fill Target Kg on the SKUs each BA should sell (a BA can
-            have many SKU targets), then upload it. Sales Kg is optional. You can also upload a store SKU target sheet
+            Columns: BA Code, SKU, Month, Brand, Target Kg — one row per SKU, so a BA can have many SKU targets. The
+            SKU is picked from the SKU list (brand comes with it). Sales are not entered: they come from each BA's
+            Daily Sales reports, and achievement = sales ÷ target × 100. You can also upload a store SKU target sheet
             (Store name, SKU Name, KG Count): each store's targets go to that store's BA.
           </p>
           <Button
@@ -854,25 +877,64 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
   const people = useMemo(() => targetPeople(accounts), [accounts])
   const [baId, setBaId] = useState(people[0]?.id ?? '')
   const [month, setMonth] = useState(currentMonthKey)
-  const [targetKg, setTargetKg] = useState('')
-  const [salesKg, setSalesKg] = useState('')
+  // One row per SKU: which SKU and its Target Kg. Units = kg / the SKU's grammage.
+  // Sales come from the BA's reports, not from here.
+  const [lines, setLines] = useState<{ sku: string; qty: string }[]>([])
+  const [catalogue, setCatalogue] = useState<SkuRow[] | null>(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const existing = targetForBa(baId, month, targets)
+
+  useEffect(() => {
+    if (!open || catalogue) return
+    void loadSkuCatalogue().then(setCatalogue)
+  }, [open, catalogue])
 
   useEffect(() => {
     if (!open) return
     const row = targetForBa(baId, month, targets)
-    setTargetKg(row ? String(row.targetKg) : '')
-    setSalesKg(row ? String(row.salesKg) : '')
+    const current = (row?.lines ?? []).map((line) => ({ sku: line.sku, qty: String(line.qty) }))
+    setLines(current.length ? current : [{ sku: '', qty: '' }])
   }, [open, baId, month, targets])
+
+  const ranges = useMemo(() => groupByRange(catalogue ?? []), [catalogue])
+  const gramsOf = useMemo(() => new Map((catalogue ?? []).map((row) => [row.sku, row.grammage])), [catalogue])
+  const kgOf = (line: { sku: string; qty: string }) => Number(line.qty) || 0
+  const unitsOf = (line: { sku: string; qty: string }) => {
+    const grams = gramsOf.get(line.sku) ?? 0
+    return grams ? Math.round((kgOf(line) / grams) * 100) / 100 : null
+  }
+  const filled = lines.filter((line) => line.sku && line.qty !== '')
+  const totalKg = Math.round(filled.reduce((sum, line) => sum + kgOf(line), 0) * 1000) / 1000
+  const invalid = filled.some((line) => !Number.isFinite(Number(line.qty)) || Number(line.qty) < 0)
+  const duplicate = new Set(filled.map((line) => line.sku)).size !== filled.length
+
+  function updateLine(index: number, patch: Partial<{ sku: string; qty: string }>) {
+    setSaved(false)
+    setLines((prev) => prev.map((line, i) => (i === index ? { ...line, ...patch } : line)))
+  }
 
   async function save() {
     const person = people.find((item) => item.id === baId)
-    const target = Number(targetKg)
-    const sales = Number(salesKg)
-    if (!person || !Number.isFinite(target) || target < 0 || !Number.isFinite(sales) || sales < 0) return
-    const row: BaMonthTarget = { baId: person.id, baName: person.name, baCode: person.baCode, month, targetKg: target, salesKg: sales }
+    if (!person || filled.length === 0 || invalid || duplicate) return
+    const info = new Map((catalogue ?? []).map((row) => [row.sku, row]))
+    const targetLines = filled.map((line) => ({
+      sku: line.sku,
+      qty: kgOf(line),
+      count: unitsOf(line),
+      brand: info.get(line.sku)?.range,
+      grammage: info.get(line.sku)?.grammage,
+    }))
+    const row: BaMonthTarget = {
+      baId: person.id,
+      baName: person.name,
+      baCode: person.baCode,
+      month,
+      targetKg: totalKg,
+      salesKg: existing?.salesKg ?? 0,
+      lines: targetLines,
+    }
     setError(null)
     if (!person.baCode) {
       // sample accounts have no server record
@@ -893,7 +955,7 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Set target and sales">
+    <Modal open={open} onClose={onClose} title="Set SKU target">
       <div className="space-y-3">
         <label className="block text-sm">
           <span className="mb-1.5 block font-medium text-slate-700">Ambassador</span>
@@ -924,26 +986,82 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
           />
         </label>
-        <label className="block text-sm">
-          <span className="mb-1.5 block font-medium text-slate-700">Target (Kg)</span>
-          <input
-            type="number"
-            min={0}
-            value={targetKg}
-            onChange={(e) => setTargetKg(e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
-          />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1.5 block font-medium text-slate-700">Sales (Kg)</span>
-          <input
-            type="number"
-            min={0}
-            value={salesKg}
-            onChange={(e) => setSalesKg(e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-500"
-          />
-        </label>
+        <div className="text-sm">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="font-medium text-slate-700">SKU targets (kg)</span>
+            <span className="text-xs text-slate-500 tabular-nums">Total {totalKg.toLocaleString()} kg</span>
+          </div>
+          <div className="space-y-2">
+            {lines.map((line, index) => (
+              <div key={index} className="flex items-center gap-2">
+                <select
+                  value={line.sku}
+                  onChange={(e) => updateLine(index, { sku: e.target.value })}
+                  className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2.5 text-sm outline-none focus:border-brand-500"
+                >
+                  <option value="">{catalogue === null ? 'Loading SKUs…' : 'Choose SKU…'}</option>
+                  {/* A SKU saved earlier that is no longer in the SKU list is shown so it can be replaced. */}
+                  {line.sku && catalogue !== null && !catalogue.some((row) => row.sku === line.sku) && (
+                    <option value={line.sku} disabled>
+                      {line.sku} (not in SKU list — choose another)
+                    </option>
+                  )}
+                  {ranges.map((group) => (
+                    <optgroup key={group.range} label={group.range}>
+                      {group.skus.map((sku) => (
+                        <option key={sku} value={sku}>
+                          {sku}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <div className="w-28 shrink-0">
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    inputMode="decimal"
+                    placeholder="Kg"
+                    value={line.qty}
+                    onChange={(e) => updateLine(index, { qty: e.target.value })}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-2.5 py-2.5 text-sm outline-none focus:border-brand-500"
+                  />
+                  {line.sku && line.qty !== '' && (
+                    <div className="mt-0.5 text-right text-[10px] text-slate-500 tabular-nums">
+                      ÷ {gramsOf.get(line.sku) ?? '?'} = {unitsOf(line) ?? '—'} units
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  aria-label="Remove SKU"
+                  onClick={() => {
+                    setSaved(false)
+                    setLines((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : [{ sku: '', qty: '' }]))
+                  }}
+                  className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-rose-600"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setLines((prev) => [...prev, { sku: '', qty: '' }])}
+            className="mt-2 text-xs font-semibold text-brand-600 hover:underline"
+          >
+            + Add SKU
+          </button>
+          {duplicate && <p className="mt-1 text-xs text-rose-700">Each SKU can be added only once.</p>}
+          {existing && (
+            <p className="mt-2 text-xs text-slate-500">
+              Sales so far this month: {existing.salesKg.toLocaleString()} kg from the BA&apos;s Daily Sales reports ·
+              achievement {achievementPct(existing.targetKg, existing.salesKg)}%.
+            </p>
+          )}
+        </div>
         {saved && (
           <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
             Saved for this ambassador and month.
@@ -953,7 +1071,7 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
           <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p>
         )}
         <div className="flex flex-col gap-2 pt-1 sm:flex-row-reverse">
-          <Button onClick={() => void save()} disabled={busy || targetKg === '' || salesKg === ''}>
+          <Button onClick={() => void save()} disabled={busy || filled.length === 0 || invalid || duplicate}>
             {busy ? 'Saving…' : 'Save'}
           </Button>
           <Button variant="secondary" onClick={onClose}>

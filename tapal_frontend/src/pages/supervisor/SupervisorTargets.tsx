@@ -81,7 +81,7 @@ export function SupervisorTargets() {
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         {cards.map((c) => (
           <Card key={c.label}>
             <div className="text-xs text-slate-500">{c.label}</div>
@@ -97,7 +97,56 @@ export function SupervisorTargets() {
         ) : rows !== null && visible.length === 0 ? (
           <p className="p-5 text-sm text-slate-500">No targets for your stores in {formatTargetMonth(month)}.</p>
         ) : (
-          <TableScroll>
+          <>
+          <ul className="divide-y divide-slate-100 sm:hidden">
+            {visible.map((r) => {
+              const pct = achievementPct(r.targetKg, r.salesKg)
+              const lines = r.lines ?? []
+              const expanded = open === r.id
+              return (
+                <li key={r.id} className="px-4 py-3">
+                  <button
+                    type="button"
+                    className="flex w-full items-start justify-between gap-3 text-left"
+                    onClick={() => setOpen(expanded ? null : r.id)}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-slate-900">{r.baName}</div>
+                      <div className="truncate text-xs text-slate-500">{r.storeName || '—'}</div>
+                      <div className="mt-1 text-xs text-slate-600 tabular-nums">
+                        {kg(r.salesKg)} of {kg(r.targetKg)}
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className={`font-semibold tabular-nums ${pctTone(pct)}`}>{pct}%</div>
+                      <Bar pct={pct} />
+                      {lines.length > 0 && (
+                        <div className="mt-1 text-[11px] text-brand-600">{expanded ? 'Hide SKUs' : `${lines.length} SKUs`}</div>
+                      )}
+                    </div>
+                  </button>
+                  {expanded && lines.length > 0 && (
+                    <ul className="mt-2 space-y-1 rounded-xl bg-slate-50 p-2 text-xs">
+                      {lines.map((line, i) => {
+                        const sales = Number(line.sales ?? 0)
+                        const linePct = achievementPct(Number(line.qty), sales)
+                        return (
+                          <li key={`${line.sku}-${i}`} className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 break-words text-slate-700">{line.sku}</span>
+                            <span className="shrink-0 tabular-nums text-slate-500">
+                              {kg(sales)} / {kg(Number(line.qty))}{' '}
+                              <span className={`font-semibold ${pctTone(linePct)}`}>{linePct}%</span>
+                            </span>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+          <TableScroll className="hidden sm:block">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
@@ -179,6 +228,7 @@ export function SupervisorTargets() {
               </tbody>
             </table>
           </TableScroll>
+          </>
         )}
       </Card>
     </div>

@@ -2,8 +2,9 @@
  * BA daily report: field definitions shared by the manual forms, the Excel
  * template, and the dashboard inbox.
  */
-import { useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { currentBaAccountId } from './baAccounts'
+import type { BaMonthTarget } from './baTargets'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
@@ -90,20 +91,91 @@ export const DEFAULT_OTHER_BRANDS: OtherBrandRow[] = [
   { id: '6', name: 'Supreme Tea Bags 50s', price: '' },
 ]
 
-/** Sections in the same order as the checkout flow: Stock → Daily Sales → Other Brands. */
-const stockSections: ReportSection[] = [
+/** Interceptions, Competitive User and Why Not Tapal: the same for every BA. */
+export const fixedSalesSections: ReportSection[] = [
+  { title: 'Interceptions', fields: interceptionFields },
+  { title: 'Competitive User', fields: competitiveFields },
+  { title: 'Why Not Tapal', fields: whyNotFields },
+]
+
+/** The SKU lists used when a BA has no SKU target this month. */
+const defaultStockSections: ReportSection[] = [
   { title: 'Tapal Danedar', fields: stockDanedarFields },
   { title: 'Tea Bags & Specialty', fields: stockTeaBagFields },
 ]
 
-const salesSections: ReportSection[] = [
-  { title: 'Interceptions', fields: interceptionFields },
-  { title: 'Competitive User', fields: competitiveFields },
-  { title: 'Why Not Tapal', fields: whyNotFields },
+const defaultSkuSalesSections: ReportSection[] = [
   { title: 'Tapal Danedar', fields: danedarSalesFields },
   { title: 'Tea Bags', fields: teaBagSalesFields },
   { title: 'Specialty', fields: specialtySalesFields },
 ]
+
+/** The SKUs one BA reports on: stock status per SKU, and sales per SKU (after the fixed sections). */
+export type ReportSections = {
+  stock: ReportSection[]
+  skuSales: ReportSection[]
+  /** True when the SKUs come from the BA's target for the month. */
+  fromTarget: boolean
+}
+
+const STOCK_SKU_PREFIX = 'stock:'
+const SALES_SKU_PREFIX = 'sku:'
+
+const DEFAULT_SECTIONS: ReportSections = {
+  stock: defaultStockSections,
+  skuSales: defaultSkuSalesSections,
+  fromTarget: false,
+}
+
+/** Build the SKU sections from the BA's month target, grouped by brand (target order kept). */
+export function sectionsFromTarget(target: BaMonthTarget | null | undefined): ReportSections {
+  const byBrand = new Map<string, string[]>()
+  const seen = new Set<string>()
+  for (const line of target?.lines ?? []) {
+    const sku = String(line.sku ?? '').trim()
+    if (!sku || seen.has(sku.toLowerCase())) continue
+    seen.add(sku.toLowerCase())
+    const brand = String(line.brand ?? '').trim() || 'Target SKUs'
+    byBrand.set(brand, [...(byBrand.get(brand) ?? []), sku])
+  }
+  if (byBrand.size === 0) return DEFAULT_SECTIONS
+  const groups = [...byBrand.entries()]
+  return {
+    stock: groups.map(([title, skus]) => ({
+      title,
+      fields: skus.map((sku) => ({ key: `${STOCK_SKU_PREFIX}${sku}`, label: sku })),
+    })),
+    skuSales: groups.map(([title, skus]) => ({
+      title: `${title} · sales (kg)`,
+      fields: skus.map((sku) => ({ key: `${SALES_SKU_PREFIX}${sku}`, label: sku })),
+    })),
+    fromTarget: true,
+  }
+}
+
+let cachedSections: ReportSections | null = null
+
+/** The signed-in BA's report SKUs (their target this month from /api/ba/me/, else the default list). */
+export async function loadReportSections(): Promise<ReportSections> {
+  const me = await portalGet<{ monthTarget: BaMonthTarget | null }>('/api/ba/me/', 'ba')
+  if (me) cachedSections = sectionsFromTarget(me.monthTarget)
+  return cachedSections ?? DEFAULT_SECTIONS
+}
+
+/** Null while the BA's SKUs load. */
+export function useReportSections() {
+  const [sections, setSections] = useState<ReportSections | null>(cachedSections)
+  useEffect(() => {
+    let cancelled = false
+    void loadReportSections().then((next) => {
+      if (!cancelled) setSections(next)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return sections
+}
 
 export const SESSION_KEYS = {
   stock: 'ba-stock-report',
@@ -122,15 +194,16 @@ const NOTE_PRICE = 'Selling price in Rs.'
 
 const brandKey = (row: OtherBrandRow) => `brand-${row.id}`
 
-/** Builds and downloads the .xlsx template with every field of the checkout forms. */
+/** Builds and downloads the .xlsx template with every field of the checkout forms (this BA's SKUs). */
 export async function downloadBaReportTemplate() {
   const XLSX = await import('xlsx')
+  const sections = await loadReportSections()
 
   const rows: (string | number)[][] = [[...HEADERS]]
-  for (const s of stockSections) {
+  for (const s of sections.stock) {
     for (const f of s.fields) rows.push([`Stock Report – ${s.title}`, f.label, '', NOTE_STOCK, f.key])
   }
-  for (const s of salesSections) {
+  for (const s of [...fixedSalesSections, ...sections.skuSales]) {
     for (const f of s.fields) rows.push([`Daily Sales – ${s.title}`, f.label, '', NOTE_NUMBER, f.key])
   }
   for (const b of DEFAULT_OTHER_BRANDS) {
@@ -177,6 +250,7 @@ function normalizeStock(raw: string) {
 /** Reads a filled template. Returns every problem found so the BA can fix them in one go. */
 export async function parseBaReportFile(file: File): Promise<ParseResult> {
   const XLSX = await import('xlsx')
+  const sections = await loadReportSections()
 
   let table: unknown[][]
   try {
@@ -215,7 +289,7 @@ export async function parseBaReportFile(file: File): Promise<ParseResult> {
   }
 
   const stock: Record<string, string> = {}
-  for (const s of stockSections) {
+  for (const s of sections.stock) {
     for (const f of s.fields) {
       const c = at(f.key, `Stock – ${f.label}`)
       if (!c) continue
@@ -241,7 +315,7 @@ export async function parseBaReportFile(file: File): Promise<ParseResult> {
   }
 
   const sales: Record<string, string> = {}
-  for (const s of salesSections) {
+  for (const s of [...fixedSalesSections, ...sections.skuSales]) {
     for (const f of s.fields) {
       const c = at(f.key, `Daily Sales – ${f.label}`)
       if (c) sales[f.key] = parseNumber(c, `Daily Sales – ${s.title} – ${f.label}`)
@@ -400,37 +474,43 @@ export function hasAnytimeStockSubmitted(baId: string, list: StoredDailyReport[]
   )
 }
 
-const salesLabel = new Map(
-  [
-    ...interceptionFields,
-    ...competitiveFields,
-    ...whyNotFields,
-    ...danedarSalesFields,
-    ...teaBagSalesFields,
-    ...specialtySalesFields,
-  ].map((field) => [field.key, field.label]),
+const legacyStockKeys = new Set(defaultStockSections.flatMap((section) => section.fields.map((field) => field.key)))
+const legacySales = new Map(
+  defaultSkuSalesSections.flatMap((section) =>
+    section.fields.map((field) => [field.key, { section: section.title, label: field.label }] as const),
+  ),
 )
+const fixedSalesKeys = new Set(fixedSalesSections.flatMap((section) => section.fields.map((field) => field.key)))
 
 export type ExtractKind = 'stock' | 'sales' | 'competitors'
 
 function linesFor(kind: ExtractKind, report: StoredDailyReport) {
   if (kind === 'stock') {
-    return [...stockDanedarFields, ...stockTeaBagFields].map((field) => ({
-      section: stockDanedarFields.some((item) => item.key === field.key)
-        ? 'Tapal Danedar'
-        : 'Tea Bags & Specialty',
-      item: field.label,
-      value: report.stock[field.key] ?? '',
-    }))
+    const hasTargetSkus = Object.keys(report.stock).some((key) => !legacyStockKeys.has(key))
+    // Reports on the default list show every default SKU; target-SKU reports show what was sent.
+    const legacy = defaultStockSections.flatMap((section) =>
+      section.fields
+        .filter((field) => !hasTargetSkus || field.key in report.stock)
+        .map((field) => ({ section: section.title, item: field.label, value: report.stock[field.key] ?? '' })),
+    )
+    const skus = Object.entries(report.stock)
+      .filter(([key]) => !legacyStockKeys.has(key))
+      .map(([key, value]) => ({ section: 'Target SKUs', item: key.replace(STOCK_SKU_PREFIX, ''), value }))
+    return [...legacy, ...skus]
   }
   if (kind === 'sales') {
-    return [...salesSections].flatMap((section) =>
-      section.fields.map((field) => ({
-        section: section.title,
-        item: salesLabel.get(field.key) ?? field.label,
-        value: report.sales[field.key] ?? '',
-      })),
+    const fixed = fixedSalesSections.flatMap((section) =>
+      section.fields.map((field) => ({ section: section.title, item: field.label, value: report.sales[field.key] ?? '' })),
     )
+    const skus = Object.entries(report.sales)
+      .filter(([key]) => !fixedSalesKeys.has(key))
+      .map(([key, value]) => {
+        const legacy = legacySales.get(key)
+        return legacy
+          ? { section: legacy.section, item: legacy.label, value }
+          : { section: 'SKU sales (kg)', item: key.replace(SALES_SKU_PREFIX, ''), value }
+      })
+    return [...fixed, ...skus]
   }
   return report.otherBrands.map((brand) => ({
     section: 'Other Brands',

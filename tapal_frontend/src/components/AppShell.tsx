@@ -51,7 +51,7 @@ type NavItem = {
 }
 
 const headOfficeNav: NavItem[] = [
-  { to: '/ho/dashboard', label: 'Campaign Metrics', icon: LayoutDashboard, end: true, section: 'Command' },
+  // { to: '/ho/dashboard', label: 'Campaign Metrics', icon: LayoutDashboard, end: true, section: 'Command' },
   { to: '/ho/ba-performance', label: 'Dashboard', icon: BarChart3, section: 'Command' },
   { to: '/ho/daily-reports', label: 'Daily Reports', icon: ClipboardList, section: 'Command' },
   { to: '/ho/ambassadors', label: 'Ambassadors', icon: Users, section: 'Operations' },
@@ -61,7 +61,7 @@ const headOfficeNav: NavItem[] = [
   { to: '/ho/attendance', label: 'BA Attendance', icon: ClipboardCheck, section: 'Operations' },
   { to: '/ho/interceptions', label: 'Interceptions', icon: UserRound, section: 'Operations' },
   { to: '/ho/complaints', label: 'Complaint Center', icon: MessageSquareWarning, section: 'Operations' },
-  { to: '/ho/consumers', label: 'Consumers', icon: ShoppingBag, section: 'Intelligence' },
+  // { to: '/ho/consumers', label: 'Consumers', icon: ShoppingBag, section: 'Intelligence' },
   { to: '/ho/optimization', label: 'AI Optimization', icon: Brain, section: 'Intelligence' },
   { to: '/ho/leaderboard', label: 'Leaderboard', icon: Trophy, section: 'Intelligence' },
   { to: '/ho/incentives', label: 'Incentives', icon: Banknote, section: 'Intelligence' },
@@ -339,7 +339,7 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
           <div className="mt-4 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent" />
         </div>
 
-        <nav className="relative z-[1] min-h-0 flex-1 space-y-5 overflow-y-auto px-3 pb-3">
+        <nav className="relative z-[1] min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-3 pb-3">
           {navGroups.map(({ section, items }) => (
             <div key={section}>
               <div className="mb-1.5 px-3 text-[10px] font-semibold tracking-[0.18em] text-white/35 uppercase">
@@ -480,7 +480,8 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
             </div>
 
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2 rounded-xl border border-slate-200 px-2 py-1.5">
+              {/* On phones the name and sign-out are also in the menu, so the header keeps icons only. */}
+              <div className="hidden items-center gap-2 rounded-xl border border-slate-200 px-2 py-1.5 sm:flex">
                 <div className="flex h-8 w-8 items-center justify-center rounded-full bg-navy-900 text-xs font-semibold text-white">
                   {personInitials}
                 </div>
@@ -491,15 +492,17 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
               </div>
               <button
                 onClick={handleSignOut}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                aria-label={kind === 'supervisor' && sv.preview ? 'Exit preview' : 'Sign out'}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 p-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 sm:px-3"
               >
                 <LogOut size={14} />
-                <span>{kind === 'supervisor' && sv.preview ? 'Exit preview' : 'Sign out'}</span>
+                <span className="hidden sm:inline">{kind === 'supervisor' && sv.preview ? 'Exit preview' : 'Sign out'}</span>
               </button>
             </div>
           </div>
         </header>
-        <main className="flex-1 overflow-x-hidden overflow-y-auto p-3 sm:p-4 lg:p-6">
+        {/* The page itself scrolls (smooth on phones); only sideways overflow is clipped. */}
+        <main className="min-w-0 flex-1 overflow-x-clip p-3 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-6">
           {pushError && kind === 'supervisor' && (
             <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
               Notifications are off for this browser. {pushError} Allow notifications, then refresh this page.

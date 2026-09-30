@@ -880,6 +880,11 @@ def daily_reports(request):
             'submitted_at': _when(data.get('submittedAt')),
         },
     )
+    if created and report.ambassador_id:
+        # Target achievement = kg the BA reports per target SKU ÷ target kg.
+        from .target_sheet import recompute_target_sales
+
+        recompute_target_sales(report.ambassador_id, timezone.localtime(report.submitted_at).strftime('%Y-%m'))
     return Response(report_payload(report), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 

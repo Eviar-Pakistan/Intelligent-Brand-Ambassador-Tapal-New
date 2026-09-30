@@ -240,13 +240,50 @@ def build_monthly_shift(*, store, ambassador, month: str, start: time, end: time
     return shift
 
 
+def assign_ba_stores(month: str | None = None, ambassador_ids=None) -> int:
+    """
+    Deployment: set each BA's store (api_ambassador.store_id) to the store of their monthly shift
+    for `month` (default: this month). A BA with several shifts that month gets the earliest-starting
+    one. BAs with no shift that month keep their store. Returns how many BAs changed.
+    """
+    from .models import Ambassador, MonthlyShift
+
+    month = month or timezone.localdate().strftime('%Y-%m')
+    shifts = MonthlyShift.objects.filter(month=month, ambassador__isnull=False).order_by('start_time', 'id')
+    if ambassador_ids is not None:
+        shifts = shifts.filter(ambassador_id__in=list(ambassador_ids))
+    store_of: dict[int, int] = {}
+    for ambassador_id, store_id in shifts.values_list('ambassador_id', 'store_id'):
+        store_of.setdefault(ambassador_id, store_id)
+    changed = 0
+    now = timezone.now()
+    for ba in Ambassador.objects.filter(id__in=store_of):
+        store_id = store_of[ba.id]
+        if ba.store_id == store_id:
+            continue
+        ba.store_id = store_id
+        ba.deployed_at = ba.deployed_at or now
+        ba.save(update_fields=['store', 'deployed_at', 'updated_at'])
+        changed += 1
+    return changed
+
+
+_stores_assigned_for_month = ''
+
+
 def ensure_daily_rows(day: date, ambassador=None) -> None:
     """Create the attendance row for `day` from every assigned monthly shift of that month."""
+    global _stores_assigned_for_month
     from .models import MonthlyShift, ShiftAssignment
     from .store_live import reset_stale_footfall
 
     if day == timezone.localdate():
         reset_stale_footfall()
+        # A new month: BAs move to the stores of their new monthly shifts.
+        month = day.strftime('%Y-%m')
+        if _stores_assigned_for_month != month:
+            assign_ba_stores(month)
+            _stores_assigned_for_month = month
     # Deactivated BAs get no new attendance days.
     monthly = MonthlyShift.objects.filter(
         month=day.strftime('%Y-%m'), ambassador__isnull=False, ambassador__is_active=True

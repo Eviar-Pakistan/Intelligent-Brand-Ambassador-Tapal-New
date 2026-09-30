@@ -268,7 +268,30 @@ export function SupervisorSubmissionsPage() {
     <div className="space-y-5">
       {header}
       <Card padding={false}>
-        <TableScroll minWidth={860}>
+        <ul className="divide-y divide-slate-100 sm:hidden">
+          {rows.map((report) => (
+            <li key={report.id}>
+              <button
+                type="button"
+                onClick={() => setOpenId(report.id)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left active:bg-slate-50"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-slate-900">{report.baName}</div>
+                  <div className="truncate text-xs text-slate-500">
+                    {storeByBa.get(report.baId) ?? (report.city || '—')} · {SOURCE_LABEL[report.source]}
+                  </div>
+                  <div className="text-[11px] text-slate-400">{formatComplaintDate(report.submittedAt)}</div>
+                </div>
+                <span className="shrink-0 text-xs font-semibold text-brand-600">View</span>
+              </button>
+            </li>
+          ))}
+          {rows.length === 0 && (
+            <li className="px-4 py-8 text-center text-sm text-slate-500">No BA reports for your stores yet.</li>
+          )}
+        </ul>
+        <TableScroll minWidth={640} className="hidden sm:block">
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
               <tr>
@@ -358,8 +381,8 @@ function SubmissionSlice({
         <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs">
           {filled.map((row) => (
             <li key={`${row.section}-${row.item}`} className="flex justify-between gap-3">
-              <span className="text-slate-600">{row.item}</span>
-              <span className="font-semibold text-slate-900">{row.value}</span>
+              <span className="min-w-0 break-words text-slate-600">{row.item}</span>
+              <span className="shrink-0 font-semibold text-slate-900">{row.value}</span>
             </li>
           ))}
         </ul>

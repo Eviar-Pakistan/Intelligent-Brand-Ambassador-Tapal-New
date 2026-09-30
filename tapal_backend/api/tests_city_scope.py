@@ -76,6 +76,7 @@ class CityScopeTests(TestCase):
         self.assertEqual(self.lhr.patch('/api/supervisors/sup-m/', {'name': 'x'}, format='json').status_code, 404)
         res = self.lhr.post('/api/supervisors/', {'name': 'S', 'email': 's@x.com', 'storeIds': [self.multan.id]}, format='json')
         self.assertEqual(res.status_code, 403)
+        before = MonthlyShift.objects.filter(month='2026-10').count()
         shift = self.lhr.post(
             '/api/shifts/', {'store_id': self.multan.id, 'month': '2026-10', 'startTime': '10:00', 'endTime': '18:00'},
             format='json',
@@ -85,7 +86,7 @@ class CityScopeTests(TestCase):
             'ba_code': self.ba_m.ba_code, 'store_code': 'M-1', 'start_time': '10:00', 'end_time': '14:00', 'month': '2026-10',
         }]}, format='json')
         self.assertEqual(bulk.status_code, 400)
-        self.assertEqual(MonthlyShift.objects.filter(month='2026-10').count(), 0)
+        self.assertEqual(MonthlyShift.objects.filter(month='2026-10').count(), before)  # nothing added
 
     def test_global_settings_are_for_all_city_head_office(self):
         self.assertEqual(self.lhr.put('/api/kpi-config/', {'basePay': 5}, format='json').status_code, 403)

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { djangoFetch, djangoToken } from './djangoApi'
+import { loadSkuCatalogue } from './skuCatalogue'
 
 /** One SKU of a store target. qty is kg; from the store SKU sheet also brand, grammage (kg per pack) and packs. */
 export type TargetLine = {
@@ -98,6 +99,16 @@ export function formatTargetMonth(month: string) {
     'December',
   ][index]
   return name ? `${name} ${year}` : month
+}
+
+/** A SKU target's real kg, cleaned to 2 decimals (Excel formulas give 0.6000000000000001). */
+export function kg2(value: number) {
+  return Math.round(value * 100) / 100
+}
+
+/** How a target is shown: whole kg, the way Excel shows the cell (0.6 -> 1, 23.8 -> 24). */
+export function shownKg(value: number) {
+  return Math.round(Number(value.toPrecision(12)))
 }
 
 export function achievementPct(targetKg: number, salesKg: number) {
@@ -215,8 +226,10 @@ function parseKg(value: unknown) {
 
 
 /**
- * Reads a filled target template: one row per BA per SKU (BA Code, Month, Brand, SKU Name, Target Kg,
- * Sales Kg, Grammage). Rows are grouped so each BA gets all their SKU targets for the month.
+ * Reads a filled target template: one row per BA per SKU (BA Code, SKU, Month, Brand, Target Kg).
+ * Rows are grouped so each BA gets all their SKU targets for the month. The SKU must be one from the
+ * SKU list (brand and grammage come from the list). Older templates (SKU Name, Sales, Grammage…) are
+ * still read; sales are never taken from the file.
  * Valid BAs are returned even when other rows have problems.
  */
 export async function parseTargetFile(file: File, people: TargetPerson[]): Promise<TargetParseResult> {
@@ -237,11 +250,18 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
   const columns = new Map<string, number>()
   table[headerAt].forEach((header, index) => columns.set(targetHeaderKey(header), index))
   const skuColumn = columns.has('sku name') ? 'sku name' : 'sku'
-  if (!columns.has('target kg') || !columns.has('month') || !columns.has(skuColumn)) {
-    return { rows: [], errors: ['The template needs BA Code, Month, SKU Name and Target Kg columns. Download a fresh template.'] }
+  // Target Kg is what Head Office fills (Units = Kg / Grammage). A file with only Units: kg = units x grammage.
+  const byUnits = !columns.has('target kg') && columns.has('units')
+  if ((!byUnits && !columns.has('target kg')) || !columns.has('month') || !columns.has(skuColumn)) {
+    return { rows: [], errors: ['The template needs BA Code, SKU, Month and Target Kg columns. Download a fresh template.'] }
   }
 
   const cell = (row: unknown[], header: string) => row[columns.get(header) ?? -1]
+  const catalogue = await loadSkuCatalogue()
+  if (catalogue.length === 0) {
+    return { rows: [], errors: ['The SKU list could not be loaded from the server. Try again.'] }
+  }
+  const skuByName = new Map(catalogue.map((item) => [item.sku.replace(/\s+/g, ' ').trim().toLowerCase(), item]))
   const byCode = new Map(
     people.filter((p) => p.baCode).map((person) => [person.baCode!.trim().toUpperCase(), person] as const),
   )
@@ -254,18 +274,26 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
     const rowNo = headerAt + index + 2
     if (row.every((value) => String(value ?? '').trim() === '')) return
     const code = String(cell(row, 'ba code') ?? '').trim().toUpperCase()
-    const sku = String(cell(row, skuColumn) ?? '').trim()
+    const skuText = String(cell(row, skuColumn) ?? '').replace(/\s+/g, ' ').trim()
+    const listed = skuByName.get(skuText.toLowerCase())
+    const sku = listed?.sku ?? skuText
     const month = parseMonthCell(cell(row, 'month'), (value) => XLSX.SSF.parse_date_code(value))
-    const target = parseKg(cell(row, 'target kg'))
-    const sales = parseKg(columns.has('sales kg') ? cell(row, 'sales kg') : '')
-    if (target === null) return // no target on this SKU: skipped
+    const units = byUnits ? parseKg(cell(row, 'units')) : null
+    const grammage = listed?.grammage || null
+    const rawTarget = byUnits
+      ? units === null
+        ? null
+        : units * (grammage ?? 0)
+      : parseKg(cell(row, 'target kg'))
+    if (rawTarget === null) return // nothing entered on this SKU: skipped
+    const target = Math.round(rawTarget * 1000) / 1000
 
     const problems: string[] = []
     if (!code) problems.push('BA Code is required')
-    if (!sku) problems.push('SKU Name is required')
+    if (!sku) problems.push('SKU is required')
+    else if (!listed) problems.push(`SKU "${sku}" is not in the SKU list`)
     if (!month) problems.push('Month must be YYYY-MM, for example 2026-09')
-    if (target < 0) problems.push('Target Kg cannot be negative')
-    if (sales !== null && sales < 0) problems.push('Sales Kg cannot be negative')
+    if (units !== null ? units < 0 : target < 0) problems.push(byUnits ? 'Units cannot be negative' : 'Target Kg cannot be negative')
     const person = code ? byCode.get(code) : undefined
     if (code && !person) problems.push(`No ambassador with BA code ${code}`)
     const skuKey = `${code}:${month}:${sku.toLowerCase()}`
@@ -281,21 +309,19 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
     const entry =
       grouped.get(key) ??
       ({ baId: person.id, baName: person.name, baCode: code, month, targetKg: 0, salesKg: 0, lines: [] } as BaMonthTarget)
-    const grammage = parseKg(columns.has('grammage') ? cell(row, 'grammage') : '')
     entry.lines!.push({
       sku,
-      brand: String(columns.has('brand') ? (cell(row, 'brand') ?? '') : '').trim(),
+      brand: listed?.range ?? '',
       qty: target,
-      sales,
       grammage: grammage ?? undefined,
-      count: grammage ? Math.round((target / grammage) * 100) / 100 : null,
+      count: units ?? (grammage ? Math.round((target / grammage) * 100) / 100 : null),
     })
-    entry.targetKg = Math.round((entry.targetKg + target) * 100) / 100
-    entry.salesKg = Math.round((entry.salesKg + (sales ?? 0)) * 100) / 100
+    entry.targetKg = Math.round((entry.targetKg + target) * 1000) / 1000
     grouped.set(key, entry)
   })
 
-  const rows = [...grouped.values()]
+  // The month total is whole kg (334.44 -> 334); each SKU keeps its exact kg.
+  const rows = [...grouped.values()].map((row) => ({ ...row, targetKg: Math.round(row.targetKg) }))
   if (rows.length === 0 && errors.length === 0) {
     errors.push('No targets found. Enter Target Kg on the SKU rows you want to save.')
   }
@@ -311,13 +337,14 @@ export async function saveBaTargetsToServer(rows: BaMonthTarget[]) {
       rows: rows.map((row) => ({
         baCode: row.baCode,
         month: row.month,
-        lines: (row.lines ?? []).map(({ sku, brand, qty, sales, grammage }) => ({ sku, brand, qty, sales, grammage })),
-        ...(row.lines?.length ? {} : { targetKg: row.targetKg, salesKg: row.salesKg }),
+        // Targets only: sales come from the BA's Daily Sales reports.
+        // Target Kg per SKU; the server works out units = kg / grammage.
+        lines: (row.lines ?? []).map(({ sku, brand, qty }) => ({ sku, brand, qty })),
       })),
     }),
   })
   const data = (await response.json().catch(() => ({}))) as {
-    saved?: { baCode: string; month: string }[]
+    saved?: { baCode: string; month: string; updated?: boolean }[]
     errors?: string[]
     detail?: string
   }

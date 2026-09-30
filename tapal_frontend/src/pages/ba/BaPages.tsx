@@ -386,8 +386,8 @@ export function BaHomePage() {
         </div>
         <p className="mt-1 text-xs text-slate-500">
           {stockAlreadySubmitted
-            ? 'Today’s stock report is already submitted. Checkout will start with daily sales.'
-            : 'Submit stock at any time. Daily sales and competitor data are collected at checkout.'}
+            ? 'Today’s stock report is submitted. Checkout will ask for your closing stock again.'
+            : 'Submit stock at any time. Checkout also asks for stock, daily sales and competitor data.'}
         </p>
         {stockAlreadySubmitted ? (
           <div className="mt-3 flex items-center gap-2 rounded-xl bg-brand-50 px-3 py-2.5 text-sm font-semibold text-brand-700">
@@ -546,19 +546,9 @@ export function BaHomePage() {
           <div className="flex gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3">
             <AlertTriangle className="mt-0.5 shrink-0 text-amber-600" size={22} />
             <p className="text-sm leading-relaxed text-slate-800">
-              {stockAlreadySubmitted ? (
-                <>
-                  Stock is already submitted. Checkout continues with{' '}
-                  <span className="font-semibold">Daily Sales</span> and{' '}
-                  <span className="font-semibold">Competitor data</span>. Competitor prices are optional.
-                </>
-              ) : (
-                <>
-                  Checkout includes the <span className="font-semibold">Stock Report</span>,{' '}
-                  <span className="font-semibold">Daily Sales</span>, and{' '}
-                  <span className="font-semibold">Competitor data</span>. Competitor prices are optional.
-                </>
-              )}
+              Checkout includes the <span className="font-semibold">Stock Report</span>,{' '}
+              <span className="font-semibold">Daily Sales</span>, and{' '}
+              <span className="font-semibold">Competitor data</span>. Competitor prices are optional.
             </p>
           </div>
           <p className="text-sm leading-relaxed text-slate-600">
@@ -571,7 +561,7 @@ export function BaHomePage() {
               onClick={() => {
                 // Check-out happens when the last report is submitted, not here.
                 setCheckoutWarningOpen(false)
-                navigate(stockAlreadySubmitted ? '/ba/daily-sales' : '/ba/stock-report')
+                navigate('/ba/stock-report')
               }}
               className="w-full rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition hover:bg-brand-600 sm:w-auto sm:px-5"
             >
@@ -991,11 +981,11 @@ export function BaPerformancePage() {
         {target ? (
           <div className="mt-3 grid grid-cols-3 gap-2 text-center">
             <div>
-              <div className="text-lg font-bold text-slate-900">{target.targetKg}</div>
+              <div className="text-lg font-bold text-slate-900">{fmtNum(target.targetKg)}</div>
               <div className="text-[10px] font-medium text-slate-500">Target Kg</div>
             </div>
             <div>
-              <div className="text-lg font-bold text-slate-900">{target.salesKg}</div>
+              <div className="text-lg font-bold text-slate-900">{fmtNum(target.salesKg)}</div>
               <div className="text-[10px] font-medium text-slate-500">Sales Kg</div>
             </div>
             <div>
@@ -1007,16 +997,45 @@ export function BaPerformancePage() {
           <p className="mt-2 text-sm text-slate-500">No target has been set for this month yet.</p>
         )}
         {target?.lines && target.lines.length > 0 && (
-          <ul className="mt-3 max-h-48 space-y-1 overflow-y-auto border-t border-slate-100 pt-2 text-xs">
+          <div className="mt-3 max-h-64 overflow-y-auto border-t border-slate-100 pt-2 text-xs">
+            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 pb-1 text-[10px] font-semibold text-slate-500 uppercase">
+              <span>SKU</span>
+              <span className="text-right">Target</span>
+              <span className="text-right">Sold</span>
+              <span className="text-right">%</span>
+            </div>
             {target.lines
               .filter((line) => line.qty > 0)
-              .map((line) => (
-                <li key={line.sku} className="flex justify-between gap-2">
-                  <span className="text-slate-600">{line.sku}</span>
-                  <span className="font-semibold text-slate-900">{line.qty} kg</span>
-                </li>
-              ))}
-          </ul>
+              .map((line) => {
+                const grams = line.grammage ?? 0
+                const units = line.count ?? (grams ? line.qty / grams : null)
+                const soldKg = Number(line.sales ?? 0)
+                const soldUnits = grams ? soldKg / grams : null
+                return (
+                  <div
+                    key={line.sku}
+                    className="grid grid-cols-[1fr_auto_auto_auto] items-start gap-x-2 border-t border-slate-50 py-1.5"
+                  >
+                    <span className="min-w-0 break-words text-slate-700">{line.sku}</span>
+                    <span className="text-right tabular-nums">
+                      <span className="font-semibold text-slate-900">{fmtNum(line.qty)} kg</span>
+                      <span className="block text-[10px] text-slate-500">
+                        {units != null ? `${fmtNum(units)} units` : ''}
+                      </span>
+                    </span>
+                    <span className="text-right tabular-nums">
+                      <span className="font-semibold text-slate-900">{fmtNum(soldKg)} kg</span>
+                      <span className="block text-[10px] text-slate-500">
+                        {soldUnits != null ? `${fmtNum(soldUnits)} units` : ''}
+                      </span>
+                    </span>
+                    <span className="text-right font-semibold text-brand-600 tabular-nums">
+                      {achievementPct(line.qty, soldKg)}%
+                    </span>
+                  </div>
+                )
+              })}
+          </div>
         )}
       </div>
 
@@ -1052,4 +1071,9 @@ function BaPayRow({ label, value }: { label: string; value: number }) {
       <span className="font-semibold text-slate-900">{formatPkr(value)}</span>
     </div>
   )
+}
+
+/** Up to 3 decimals, no trailing zeros: 0.6, 9.6, 22.22. */
+function fmtNum(value: number) {
+  return (Math.round(value * 1000) / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 })
 }

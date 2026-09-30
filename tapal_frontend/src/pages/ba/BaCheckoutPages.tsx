@@ -1,26 +1,19 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2 } from 'lucide-react'
 import { useBaShift } from '../../context/BaShiftContext'
 import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
 import { useBaSession } from '../../lib/baAccounts'
 import {
-  competitiveFields,
-  danedarSalesFields,
   DEFAULT_OTHER_BRANDS,
-  interceptionFields,
-  hasAnytimeStockSubmitted,
+  fixedSalesSections,
   recordDailyReport,
   SESSION_KEYS,
-  useDailyReports,
-  specialtySalesFields,
   STOCK_OPTIONS,
-  stockDanedarFields,
-  stockTeaBagFields,
-  teaBagSalesFields,
-  whyNotFields,
+  useReportSections,
   type FieldDef,
   type OtherBrandRow,
+  type ReportSections,
 } from '../../lib/baReport'
 
 function emptyNumeric(fields: FieldDef[]) {
@@ -101,6 +94,11 @@ function reportPath(path: string, anytime: boolean) {
   return anytime ? `${path}?mode=anytime` : path
 }
 
+/** Checkout needs this checkout's stock report first (an anytime stock report does not count). */
+function hasCheckoutStock() {
+  return Object.keys(readSession<Record<string, string>>(SESSION_KEYS.stock, {})).length > 0
+}
+
 function readSession<T>(key: string, fallback: T): T {
   try {
     const raw = sessionStorage.getItem(key)
@@ -139,28 +137,29 @@ function PageChrome({
   )
 }
 
+function LoadingSkus() {
+  return <p className="bg-[#f7f4ec] p-6 text-center text-sm text-slate-500">Loading your SKUs…</p>
+}
+
 export function BaDailySalesPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
+
+  useEffect(() => {
+    if (!anytime && !hasCheckoutStock()) navigate('/ba/stock-report', { replace: true })
+  }, [anytime, navigate])
+
+  const sections = useReportSections()
+  if (!sections) return <LoadingSkus />
+  return <DailySalesForm sections={sections} anytime={anytime} />
+}
+
+function DailySalesForm({ sections, anytime }: { sections: ReportSections; anytime: boolean }) {
+  const navigate = useNavigate()
   const { city } = useBaShift()
-  const { account } = useBaSession()
-  const reports = useDailyReports()
-  const stockAlreadySubmitted = hasAnytimeStockSubmitted(account?.id ?? 'ba', reports)
-
-  const allFields = useMemo(
-    () => [
-      ...interceptionFields,
-      ...competitiveFields,
-      ...whyNotFields,
-      ...danedarSalesFields,
-      ...teaBagSalesFields,
-      ...specialtySalesFields,
-    ],
-    [],
-  )
-
-  const [values, setValues] = useState(() => emptyNumeric(allFields))
+  const all = [...fixedSalesSections, ...sections.skuSales]
+  const [values, setValues] = useState(() => emptyNumeric(all.flatMap((section) => section.fields)))
 
   function setField(key: string, value: string) {
     setValues((prev) => ({ ...prev, [key]: value }))
@@ -181,78 +180,16 @@ export function BaDailySalesPage() {
             ? `${city} · submit today's sales anytime`
             : `${city} · enter today's interceptions & SKU sales`
         }
-        onBack={() =>
-          navigate(
-            !anytime && stockAlreadySubmitted ? '/ba/home' : reportPath('/ba/stock-report', anytime),
-          )
-        }
+        onBack={() => navigate(reportPath('/ba/stock-report', anytime))}
       />
 
-      <Section title="Interceptions">
-        {interceptionFields.map((f) => (
-          <NumberField
-            key={f.key}
-            label={f.label}
-            value={values[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
-
-      <Section title="Competitive User">
-        {competitiveFields.map((f) => (
-          <NumberField
-            key={f.key}
-            label={f.label}
-            value={values[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
-
-      <Section title="Why Not Tapal">
-        {whyNotFields.map((f) => (
-          <NumberField
-            key={f.key}
-            label={f.label}
-            value={values[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
-
-      <Section title="Tapal Danedar">
-        {danedarSalesFields.map((f) => (
-          <NumberField
-            key={f.key}
-            label={f.label}
-            value={values[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
-
-      <Section title="Tea Bags">
-        {teaBagSalesFields.map((f) => (
-          <NumberField
-            key={f.key}
-            label={f.label}
-            value={values[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
-
-      <Section title="Specialty">
-        {specialtySalesFields.map((f) => (
-          <NumberField
-            key={f.key}
-            label={f.label}
-            value={values[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
+      {all.map((section) => (
+        <Section key={section.title} title={section.title}>
+          {section.fields.map((f) => (
+            <NumberField key={f.key} label={f.label} value={values[f.key]} onChange={(v) => setField(f.key, v)} />
+          ))}
+        </Section>
+      ))}
 
       <button
         type="submit"
@@ -265,34 +202,31 @@ export function BaDailySalesPage() {
 }
 
 export function BaStockReportPage() {
-  const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
+  const sections = useReportSections()
+  if (!sections) return <LoadingSkus />
+  return <StockReportForm sections={sections} anytime={anytime} />
+}
+
+function StockReportForm({ sections, anytime }: { sections: ReportSections; anytime: boolean }) {
+  const navigate = useNavigate()
   const { city } = useBaShift()
   const { account } = useBaSession()
-  const reports = useDailyReports()
-  const stockAlreadySubmitted = hasAnytimeStockSubmitted(account?.id ?? 'ba', reports)
   const [submitted, setSubmitted] = useState(false)
 
-  useEffect(() => {
-    if (anytime || !stockAlreadySubmitted) return
-    navigate('/ba/daily-sales', { replace: true })
-  }, [anytime, stockAlreadySubmitted, navigate])
-
-  const [stock, setStock] = useState(() =>
-    emptyStock([...stockDanedarFields, ...stockTeaBagFields]),
-  )
+  const stockFields = sections.stock.flatMap((section) => section.fields)
+  const [stock, setStock] = useState(() => emptyStock(stockFields))
 
   function setField(key: string, value: string) {
     setStock((prev) => ({ ...prev, [key]: value }))
   }
 
-  const allFilled = [...stockDanedarFields, ...stockTeaBagFields].every((f) => stock[f.key])
+  const allFilled = stockFields.every((f) => stock[f.key])
 
   function handleContinue(e: FormEvent) {
     e.preventDefault()
     if (!allFilled) return
-    sessionStorage.setItem(SESSION_KEYS.stock, JSON.stringify(stock))
     if (anytime) {
       recordDailyReport(
         { stock, sales: {}, otherBrands: [] },
@@ -306,10 +240,9 @@ export function BaStockReportPage() {
       setSubmitted(true)
       return
     }
+    sessionStorage.setItem(SESSION_KEYS.stock, JSON.stringify(stock))
     navigate('/ba/daily-sales')
   }
-
-  if (!anytime && stockAlreadySubmitted) return null
 
   if (submitted) {
     return (
@@ -339,32 +272,18 @@ export function BaStockReportPage() {
         subtitle={
           anytime
             ? 'Anytime submission is stock only'
-            : 'Then daily sales and competitor data'
+            : 'Checkout step 1 of 3 · closing stock, then daily sales and competitor data'
         }
         onBack={() => navigate('/ba/home')}
       />
 
-      <Section title="Tapal Danedar">
-        {stockDanedarFields.map((f) => (
-          <StockCheckboxes
-            key={f.key}
-            label={f.label}
-            value={stock[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
-
-      <Section title="Tea Bags & Specialty">
-        {stockTeaBagFields.map((f) => (
-          <StockCheckboxes
-            key={f.key}
-            label={f.label}
-            value={stock[f.key]}
-            onChange={(v) => setField(f.key, v)}
-          />
-        ))}
-      </Section>
+      {sections.stock.map((section) => (
+        <Section key={section.title} title={section.title}>
+          {section.fields.map((f) => (
+            <StockCheckboxes key={f.key} label={f.label} value={stock[f.key]} onChange={(v) => setField(f.key, v)} />
+          ))}
+        </Section>
+      ))}
 
       <button
         type="submit"
@@ -400,6 +319,10 @@ export function BaOtherBrandsPage() {
     const stock = readSession<Record<string, string>>(SESSION_KEYS.stock, {})
     const sales = readSession<Record<string, string>>(SESSION_KEYS.sales, {})
     if (!anytime) {
+      if (!hasCheckoutStock()) {
+        navigate('/ba/stock-report')
+        return
+      }
       // This submission is the check-out: attendance is marked only when the server accepts it.
       setSending(true)
       setSendError(null)
@@ -426,8 +349,7 @@ export function BaOtherBrandsPage() {
         source: anytime ? 'anytime' : 'checkout',
       },
     )
-    if (!anytime) {
-    }
+    if (!anytime) sessionStorage.removeItem(SESSION_KEYS.stock)
     setSubmitted(true)
   }
 

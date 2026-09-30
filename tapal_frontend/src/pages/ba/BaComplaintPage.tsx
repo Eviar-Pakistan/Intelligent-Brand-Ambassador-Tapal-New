@@ -6,8 +6,10 @@ import { ArrowLeft, CheckCircle2, MessageSquareWarning, UserRound } from 'lucide
 import { ambassadors, stores } from '../../data/mock'
 import { useBaSession } from '../../lib/baAccounts'
 import {
-  complaintBrands,
+  COMPLAINT_BRAND,
   complaintCategories,
+  loadComplaintSkus,
+  type SkuRange,
   formatComplaintDate,
   type Complaint,
   type ComplaintCategory,
@@ -58,8 +60,18 @@ export function BaComplaintPage() {
     setStoreId((prev) => (prev && storeOptions.some((s) => String(s.id) === prev) ? prev : pick))
   }, [storeOptions])
 
-  const [brand, setBrand] = useState('')
+  const brand = COMPLAINT_BRAND
   const [sku, setSku] = useState('')
+  const [skuRanges, setSkuRanges] = useState<SkuRange[] | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void loadComplaintSkus().then((ranges) => {
+      if (!cancelled) setSkuRanges(ranges)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [customerName, setCustomerName] = useState('')
   const [customerNumber, setCustomerNumber] = useState('')
   const [complaint, setComplaint] = useState('')
@@ -71,12 +83,10 @@ export function BaComplaintPage() {
   const [details, setDetails] = useState('')
   const [submittedId, setSubmittedId] = useState<string | null>(null)
 
-  const skuOptions = complaintBrands.find((b) => b.name === brand)?.skus ?? []
   const phoneDigits = customerNumber.replace(/\D/g, '')
 
   const canSubmitCustomer =
     customerStoreId !== '' &&
-    brand !== '' &&
     sku !== '' &&
     customerName.trim().length >= 2 &&
     phoneDigits.length >= 10 &&
@@ -87,11 +97,6 @@ export function BaComplaintPage() {
     storeId !== '' && category !== '' && subject.trim().length >= 4 && details.trim().length >= 12
 
   const canSubmit = kind === 'customer' ? canSubmitCustomer : canSubmitBa
-
-  function handleBrandChange(next: string) {
-    setBrand(next)
-    setSku('')
-  }
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -215,18 +220,8 @@ export function BaComplaintPage() {
 
           <label className="mt-3 block">
             <span className="mb-1 block text-xs font-semibold text-slate-600">Brand</span>
-            <select
-              value={brand}
-              onChange={(e) => handleBrandChange(e.target.value)}
-              className={fieldClass}
-              required
-            >
-              <option value="">Select brand…</option>
-              {complaintBrands.map((b) => (
-                <option key={b.name} value={b.name}>
-                  {b.name}
-                </option>
-              ))}
+            <select value={brand} className={fieldClass} disabled>
+              <option value={brand}>{brand}</option>
             </select>
           </label>
 
@@ -237,13 +232,19 @@ export function BaComplaintPage() {
               onChange={(e) => setSku(e.target.value)}
               className={fieldClass}
               required
-              disabled={!brand}
+              disabled={!skuRanges?.length}
             >
-              <option value="">{brand ? 'Select SKU…' : 'Select a brand first'}</option>
-              {skuOptions.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
+              <option value="">
+                {skuRanges === null ? 'Loading SKUs…' : skuRanges.length ? 'Select SKU…' : 'SKUs could not be loaded'}
+              </option>
+              {skuRanges?.map((group) => (
+                <optgroup key={group.range} label={group.range}>
+                  {group.skus.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </label>

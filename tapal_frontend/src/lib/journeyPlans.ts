@@ -32,8 +32,9 @@ export type JourneyVisit = {
   weekStart: string
   day: Weekday
   storeId: number
-  latitude: number
-  longitude: number
+  /** Null when the phone could not give a location (the visit is still recorded). */
+  latitude: number | null
+  longitude: number | null
   accuracy: number | null
   selfie: string
   baPhoto: string
@@ -125,8 +126,8 @@ function isVisit(value: unknown): value is JourneyVisit {
     typeof row.weekStart === 'string' &&
     weekdaySet.has(row.day) &&
     typeof row.storeId === 'number' &&
-    typeof row.latitude === 'number' &&
-    typeof row.longitude === 'number' &&
+    (typeof row.latitude === 'number' || row.latitude === null) &&
+    (typeof row.longitude === 'number' || row.longitude === null) &&
     typeof row.selfie === 'string' &&
     typeof row.baPhoto === 'string' &&
     typeof row.stockPhoto === 'string'

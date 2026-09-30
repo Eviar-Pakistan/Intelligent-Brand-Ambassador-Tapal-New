@@ -53,8 +53,10 @@ def service_worker_source(config: dict) -> str:
 
 
 def _fcm_messaging():
+    # Only a successful start is remembered: if the service account is added later, the next send
+    # picks it up without restarting the server.
     global _messaging, _messaging_tried
-    if _messaging_tried:
+    if _messaging is not None:
         return _messaging
     _messaging_tried = True
     path = Path(getattr(settings, 'FIREBASE_SERVICE_ACCOUNT_PATH', '') or '')

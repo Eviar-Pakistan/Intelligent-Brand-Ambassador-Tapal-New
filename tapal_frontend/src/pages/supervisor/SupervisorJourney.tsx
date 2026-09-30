@@ -54,6 +54,16 @@ function formatWhen(iso: string) {
   })
 }
 
+/** Why the phone gave no location, in words the supervisor can act on. */
+function locationProblem(error: GeolocationPositionError) {
+  if (!window.isSecureContext) return 'Location only works on the https:// site. Open the app from its https link.'
+  if (error.code === error.PERMISSION_DENIED) {
+    return 'Location is blocked for this site. Tap the lock icon in the address bar → Location → Allow (and turn on phone Location), then try again.'
+  }
+  if (error.code === error.TIMEOUT) return 'The phone took too long to find your location. Move near a window or outside and try again.'
+  return 'Your location could not be found. Turn on Location (GPS) on the phone and try again.'
+}
+
 function mapsUrl(latitude: number, longitude: number) {
   return `https://maps.google.com/?q=${latitude},${longitude}`
 }
@@ -180,16 +190,22 @@ export function VisitDetailModal({ visit, onClose }: { visit: JourneyVisit | nul
           <p className="text-slate-600">
             {visit.day} · {storeCity(visit.storeId)} · {formatWhen(visit.completedAt)}
           </p>
-          <a
-            href={mapsUrl(visit.latitude, visit.longitude)}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:underline"
-          >
-            <MapPin size={14} />
-            {visit.latitude.toFixed(5)}, {visit.longitude.toFixed(5)}
-            {visit.accuracy != null ? ` · ±${Math.round(visit.accuracy)} m` : ''}
-          </a>
+          {visit.latitude != null && visit.longitude != null ? (
+            <a
+              href={mapsUrl(visit.latitude, visit.longitude)}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-600 hover:underline"
+            >
+              <MapPin size={14} />
+              {visit.latitude.toFixed(5)}, {visit.longitude.toFixed(5)}
+              {visit.accuracy != null ? ` · ±${Math.round(visit.accuracy)} m` : ''}
+            </a>
+          ) : (
+            <p className="inline-flex items-center gap-1.5 text-xs text-slate-500">
+              <MapPin size={14} /> Location not captured
+            </p>
+          )}
           <div className="grid gap-3 sm:grid-cols-3">
             <EvidenceShot label="Selfie" src={visit.selfie} />
             <EvidenceShot label="BA" src={visit.baPhoto} />
@@ -250,8 +266,7 @@ export function SupervisorJourneyPage() {
       )
       return
     }
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
+    const found = (position: GeolocationPosition) => {
         if (cancelled) return
         setDraft((current) =>
           current && {
@@ -263,18 +278,24 @@ export function SupervisorJourneyPage() {
             accuracy: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
           },
         )
-      },
-      () => {
+    }
+    const failed = (error: GeolocationPositionError) => {
+      if (cancelled) return
+      setDraft((current) => current && { ...current, locating: false, locationError: locationProblem(error) })
+    }
+    // GPS first; if it cannot get a fix (indoors, laptop), take the network location instead.
+    navigator.geolocation.getCurrentPosition(
+      found,
+      (error) => {
         if (cancelled) return
-        setDraft((current) =>
-          current && {
-            ...current,
-            locating: false,
-            locationError: 'Allow location access, then try again. The visit needs the store location.',
-          },
-        )
+        if (error.code === error.PERMISSION_DENIED) return failed(error)
+        navigator.geolocation.getCurrentPosition(found, failed, {
+          enableHighAccuracy: false,
+          timeout: 15000,
+          maximumAge: 5 * 60 * 1000,
+        })
       },
-      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60 * 1000 },
     )
     return () => {
       cancelled = true
@@ -299,7 +320,7 @@ export function SupervisorJourneyPage() {
   }
 
   function finishVisit() {
-    if (!draft || !supervisor || draft.latitude == null || draft.longitude == null) return
+    if (!draft || !supervisor) return
     if (!draft.selfie || !draft.baPhoto || !draft.stockPhoto) return
     completeVisit({
       supervisorId: supervisor.id,
@@ -370,6 +391,15 @@ export function SupervisorJourneyPage() {
                   onClick={() => setDraft((current) => current && { ...current, locating: true, locationError: null })}
                 >
                   <MapPin size={14} /> Try location again
+                </Button>
+              )}
+              {draft.latitude == null && !draft.locating && (
+                // The store location is not checked yet, so the visit can go ahead without it.
+                <Button
+                  variant="secondary"
+                  onClick={() => setDraft((current) => current && { ...current, step: 'selfie', locationError: null })}
+                >
+                  <Camera size={14} /> Continue without location
                 </Button>
               )}
               <Button variant="secondary" onClick={() => setDraft(null)}>

@@ -9,7 +9,6 @@ import {
   Brain,
   FileBarChart,
   Settings,
-  ShoppingBag,
   Trophy,
   Map,
   ClipboardList,

@@ -34,3 +34,4 @@ tapal_backend/staticfiles/
 tapal_backend/.venv/
 tapal_backend/db.sqlite3
 tapal_backend/db_backups/
+tapal_backend/media/

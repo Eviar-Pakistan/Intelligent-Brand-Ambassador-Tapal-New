@@ -290,7 +290,12 @@ def ensure_daily_rows(day: date, ambassador=None) -> None:
     )
     if ambassador is not None:
         monthly = monthly.filter(ambassador=ambassador)
+    have = set(
+        ShiftAssignment.objects.filter(date=day, monthly_shift__in=monthly).values_list('monthly_shift_id', flat=True)
+    )
     for shift in monthly:
+        if shift.id in have:
+            continue
         ShiftAssignment.objects.get_or_create(
             monthly_shift=shift,
             date=day,

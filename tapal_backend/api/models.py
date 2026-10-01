@@ -677,7 +677,7 @@ class ShiftAssignment(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['monthly_shift', 'date'],
-                condition=models.Q(monthly_shift__isnull=False),
+                # no condition: MySQL ignores conditional constraints, and NULLs never collide anyway
                 name='one_day_per_monthly_shift',
             )
         ]

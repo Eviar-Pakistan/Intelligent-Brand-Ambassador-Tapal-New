@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Camera, CheckCircle2, ScanFace } from 'lucide-react'
+import { Camera, CheckCircle2, Loader2, ScanFace } from 'lucide-react'
 import { Modal } from './ui'
 
 const FACE_SCRIPT = 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js'
@@ -37,7 +37,10 @@ function loadScript(src: string) {
     script.async = true
     script.crossOrigin = 'anonymous'
     script.onload = () => resolve()
-    script.onerror = () => reject(new Error('Could not load face detection'))
+    script.onerror = () => {
+      script.remove()
+      reject(new Error('Could not load face detection'))
+    }
     document.head.appendChild(script)
   })
 }
@@ -49,7 +52,10 @@ async function createDetector(): Promise<Detector> {
       FaceDetection?: new (config: { locateFile: (file: string) => string }) => MpFaceDetection
     }
   ).FaceDetection
-  if (!FaceDetection) throw new Error('Face detection is unavailable')
+  if (!FaceDetection) {
+    document.querySelector(`script[src="${FACE_SCRIPT}"]`)?.remove()
+    throw new Error('Face detection is unavailable')
+  }
 
   const faceDetection = new FaceDetection({
     locateFile: (file) => `${FACE_ASSET}/${file}`,
@@ -99,6 +105,8 @@ export function captureVideoFrame(video: HTMLVideoElement) {
   }
 }
 
+const LOADING_MESSAGE = 'Please wait — face detection is loading…'
+
 export function FaceCheckInModal({
   open,
   onClose,
@@ -117,7 +125,9 @@ export function FaceCheckInModal({
   readyMessage?: string
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
-  const [status, setStatus] = useState<'starting' | 'scanning' | 'ready' | 'error'>('starting')
+  // 'loading': camera is on, face detection is still downloading (script + model on the first check)
+  const [status, setStatus] = useState<'starting' | 'loading' | 'scanning' | 'ready' | 'error'>('starting')
+  const [slow, setSlow] = useState(false)
   const [message, setMessage] = useState('Opening the front camera…')
   const faceReady = status === 'ready'
 
@@ -131,8 +141,11 @@ export function FaceCheckInModal({
     let stream: MediaStream | null = null
     let timer = 0
     let hits = 0
+    let firstResult = false
+    let slowTimer = 0
 
     setStatus('starting')
+    setSlow(false)
     setMessage('Opening the front camera…')
 
     async function start() {
@@ -161,21 +174,22 @@ export function FaceCheckInModal({
 
       video!.srcObject = stream
       await video!.play()
-      setMessage('Loading face detection…')
+      setStatus('loading')
+      setMessage(LOADING_MESSAGE)
+      slowTimer = window.setTimeout(() => setSlow(true), 10000)
 
       let detector: Detector
       try {
         detector = await loadDetector()
       } catch {
         if (stopped) return
+        window.clearTimeout(slowTimer)
         setStatus('error')
-        setMessage('Face detection could not start. Check-in is blocked.')
+        setMessage('Face detection could not load. Check your internet, then close this and try again.')
         return
       }
 
       if (stopped) return
-      setStatus('scanning')
-      setMessage(scanningMessage)
 
       const tick = async () => {
         if (stopped) return
@@ -183,6 +197,12 @@ export function FaceCheckInModal({
         if (el && el.readyState >= 2 && el.videoWidth > 0) {
           try {
             const seen = await detector.detect(el, performance.now())
+            if (!firstResult) {
+              // The model has finished downloading: scanning starts now.
+              firstResult = true
+              window.clearTimeout(slowTimer)
+              setSlow(false)
+            }
             hits = seen ? Math.min(hits + 1, 4) : 0
             if (hits >= 3) {
               setStatus('ready')
@@ -193,8 +213,9 @@ export function FaceCheckInModal({
             }
           } catch {
             hits = 0
-            setStatus('scanning')
-            setMessage(scanningMessage)
+            // Until the first result the model may still be downloading: keep showing "please wait".
+            setStatus(firstResult ? 'scanning' : 'loading')
+            setMessage(firstResult ? scanningMessage : LOADING_MESSAGE)
           }
         }
         if (!stopped) timer = window.setTimeout(() => void tick(), 280)
@@ -208,6 +229,7 @@ export function FaceCheckInModal({
     return () => {
       stopped = true
       window.clearTimeout(timer)
+      window.clearTimeout(slowTimer)
       stream?.getTracks().forEach((track) => track.stop())
       if (video) {
         video.pause()
@@ -227,13 +249,35 @@ export function FaceCheckInModal({
             muted
             className="aspect-[4/3] w-full -scale-x-100 bg-slate-900 object-cover"
           />
+          {(status === 'starting' || status === 'loading') && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-950/70 px-6 text-center text-white">
+              <Loader2 size={30} className="animate-spin text-gold-400" />
+              <div className="text-sm font-semibold">Please wait</div>
+              <div className="text-xs text-white/80">
+                {status === 'starting'
+                  ? 'Opening the front camera…'
+                  : 'Face detection is loading. Keep this screen open — it can take a few seconds.'}
+              </div>
+              {slow && (
+                <div className="mt-1 rounded-lg bg-amber-500/90 px-2.5 py-1 text-[11px] font-semibold text-slate-950">
+                  Still loading — slow internet. Keep waiting or move to a better signal.
+                </div>
+              )}
+            </div>
+          )}
           <div
             className={`pointer-events-none absolute inset-6 rounded-3xl border-2 ${
               faceReady ? 'border-emerald-400' : 'border-white/70'
             }`}
           />
           <div className="absolute bottom-3 left-3 right-3 flex items-center gap-2 rounded-xl bg-black/55 px-3 py-2 text-xs font-semibold text-white">
-            {faceReady ? <CheckCircle2 size={16} className="text-emerald-300" /> : <ScanFace size={16} />}
+            {faceReady ? (
+              <CheckCircle2 size={16} className="text-emerald-300" />
+            ) : status === 'starting' || status === 'loading' ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <ScanFace size={16} />
+            )}
             <span>{message}</span>
           </div>
         </div>

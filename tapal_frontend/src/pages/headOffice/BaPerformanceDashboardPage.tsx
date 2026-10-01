@@ -27,6 +27,10 @@ import {
   useBaTargets,
 } from '../../lib/baTargets'
 import { syncBaTargets } from '../../lib/djangoSync'
+import { isDemoBa, useBaAccounts } from '../../lib/baAccounts'
+import { useDjangoUser } from '../../lib/djangoApi'
+import { useCreatedStores } from '../../lib/storeRegistry'
+import { stores as allStores } from '../../data/mock'
 
 function EmptyRow({ cols }: { cols: number }) {
   return (
@@ -286,7 +290,22 @@ export function BaPerformanceDashboardPage() {
   const baTargets = useBaTargets()
   useEffect(() => {
     void syncBaTargets()
+    void import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())
   }, [])
+  // Totals for the signed-in user: the server only sends their city's BAs and stores (all cities
+  // for an all-cities login). The Town filter narrows them further.
+  const accounts = useBaAccounts()
+  const knownStores = useCreatedStores()
+  const officeUser = useDjangoUser()
+  const inTowns = (city: string | undefined) =>
+    towns.length === 0 || towns.some((town) => town.toLowerCase() === (city ?? '').trim().toLowerCase())
+  const totalAmbassadors = accounts.filter((a) => !isDemoBa(a.id) && a.isActive !== false && inTowns(a.city)).length
+  const totalStores = useMemo(
+    () => allStores.filter((store) => inTowns(store.city)).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [knownStores, towns],
+  )
+  const countScope = towns.length ? towns.join(', ') : officeUser?.city || 'All cities'
   const targetMonths = useMemo(() => {
     const keys = new Set(baTargets.map((row) => row.month))
     keys.add(currentMonthKey())
@@ -721,8 +740,8 @@ export function BaPerformanceDashboardPage() {
       </Card>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <KpiCard label="Ambassadors" value={scopedRecords.length.toLocaleString()} hint="September targets" />
-        <KpiCard label="Stores" value={new Set(scopedRecords.map((record) => record.store)).size.toLocaleString()} />
+        <KpiCard label="Ambassadors" value={totalAmbassadors.toLocaleString()} hint={countScope} />
+        <KpiCard label="Stores" value={totalStores.toLocaleString()} hint={countScope} />
         <KpiCard label="Target (units)" value={data.targetUnits.toLocaleString()} />
         <KpiCard label="Sales (units)" value={data.unitsSold.toLocaleString()} />
         <KpiCard label="Achievement" value={`${data.achievementPct}%`} />

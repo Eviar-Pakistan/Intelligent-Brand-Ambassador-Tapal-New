@@ -226,6 +226,16 @@ class CityReportSkuTests(TestCase):
         lahore, multan = report_skus_for_city('Lahore'), report_skus_for_city(' multan ')
         self.assertEqual((len(lahore), len(multan)), (41, 22))
         self.assertIsNone(report_skus_for_city('Faisalabad'))
+        # rows in the City SKU table replace the built-in list for that city
+        from .models import CitySku
+
+        for name in ('dd 170gm hard pack', 'Danedar 900gm X 12 Pouch', 'New Pack 1kg'):
+            CitySku.objects.create(sku=name, city='Faisalabad')
+        self.assertEqual(report_skus_for_city('faisalabad'), [
+            {'brand': 'Danedar', 'label': 'DD 170gm Hard Pack', 'sku': 'DD 170gm Hard Pack'},
+            {'brand': 'Danedar', 'label': 'Danedar 900gm X 12 Pouch', 'sku': 'DD 900gm Pouch'},
+            {'brand': 'Other', 'label': 'New Pack 1kg', 'sku': 'New Pack 1kg'},
+        ])
         self.assertEqual(lahore[1], {'brand': 'Danedar', 'label': 'Danedar 170gm X 60 Hard Pack', 'sku': 'DD 170gm Hard Pack'})
         # every Multan SKU is on the Lahore list, and mapped SKUs are real target SKUs
         self.assertTrue({s['label'] for s in multan} <= {s['label'] for s in lahore})

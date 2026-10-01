@@ -793,8 +793,8 @@ class JourneyVisit(models.Model):
     week_start = models.DateField()
     day = models.CharField(max_length=3)
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='journey_visits')
-    latitude = models.FloatField()
-    longitude = models.FloatField()
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
     accuracy = models.FloatField(null=True, blank=True)
     selfie = models.ImageField(upload_to='journey/')
     ba_photo = models.ImageField(upload_to='journey/')
@@ -919,7 +919,7 @@ class SupervisorPushToken(models.Model):
     """FCM web-push token for a supervisor browser (was data/supervisor-push.json)."""
 
     supervisor_id = models.CharField(max_length=64, db_index=True)
-    token = models.TextField()
+    token = models.CharField(max_length=512)  # MySQL cannot put a unique key on a TEXT column
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -983,3 +983,16 @@ class TrainingPractice(models.Model):
     class Meta:
         ordering = ['-created_at']
 
+
+class CitySku(models.Model):
+    """A SKU the BAs of a city report on (Stock Report and Daily Sales)."""
+
+    sku = models.CharField(max_length=200)
+    city = models.CharField(max_length=100)
+
+    class Meta:
+        ordering = ['city', 'id']
+        verbose_name = 'City SKU'
+
+    def __str__(self):
+        return f'{self.city} · {self.sku}'

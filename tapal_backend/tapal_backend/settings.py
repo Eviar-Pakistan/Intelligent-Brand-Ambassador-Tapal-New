@@ -94,13 +94,43 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'tapal_backend.wsgi.application'
 
+# MySQL (AWS RDS) when DB_HOST is set in .env; otherwise the local SQLite file.
+
+# DATABASES = {
+#         'default': {
+#             'ENGINE': 'django.db.backends.sqlite3',
+#             'NAME': os.environ.get('DJANGO_SQLITE_PATH', str(BASE_DIR / 'db.sqlite3')),
+#             'OPTIONS': {'timeout': 20},  # several server workers share one SQLite file
+#         }
+#     }
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.environ.get('DJANGO_SQLITE_PATH', str(BASE_DIR / 'db.sqlite3')),
-        'OPTIONS': {'timeout': 20},  # several server workers share one SQLite file
+        'default': {
+            'ENGINE': 'django.db.backends.mysql',
+            'NAME': os.environ.get('DB_NAME', ''),
+            'USER': os.environ.get('DB_USER', ''),
+            'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+            'HOST': os.environ['DB_HOST'],
+            'PORT': os.environ.get('DB_PORT', '3306'),
+   
+        }
     }
-}
+
+
+
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.mysql',
+#         'NAME': os.environ.get('DB_NAME'),
+#         'USER': os.environ.get('DB_USER'),
+#         'PASSWORD': os.environ.get('DB_PASSWORD'),
+#         'HOST': os.environ.get('DB_HOST'),
+#         'PORT': os.environ.get('DB_PORT', '3306'),
+#         'OPTIONS': {
+#             'connect_timeout': 10,
+#         },
+#     }
+# }
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},

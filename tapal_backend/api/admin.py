@@ -7,6 +7,7 @@ from .models import (
     AssessmentAnswer,
     AssessmentQuestion,
     AssessmentSession,
+    CitySku,
     Consumer,
     PlatformSettings,
     MonthlyShift,
@@ -253,3 +254,9 @@ class SupervisorPushEventAdmin(admin.ModelAdmin):
     search_fields = ('event_id', 'supervisor_id', 'title')
     list_filter = ('supervisor_id',)
 
+
+@admin.register(CitySku)
+class CitySkuAdmin(admin.ModelAdmin):
+    list_display = ('sku', 'city')
+    list_filter = ('city',)
+    search_fields = ('sku', 'city')

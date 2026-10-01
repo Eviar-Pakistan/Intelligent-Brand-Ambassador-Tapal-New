@@ -34,3 +34,6 @@ soundfile==0.14.0
 imageio-ffmpeg==0.6.0
 openai-whisper==20250625
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+# MySQL (AWS RDS) driver; needs the system package default-libmysqlclient-dev (or mariadb-devel) to build
+mysqlclient==2.2.8

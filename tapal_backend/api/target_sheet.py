@@ -770,6 +770,7 @@ _MULTAN_NAMES = [
     'Tezdum 900gm X 12 Pouch', 'Ginger Honey 45gm x 40 Green Tea Bag',
 ]
 _BY_NAME = {name: (brand, name, sku) for brand, name, sku in _LAHORE_SKUS}
+_BY_SQUASHED_NAME = {' '.join(name.lower().split()): row for name, row in _BY_NAME.items()}
 
 CITY_REPORT_SKUS: dict[str, list[tuple[str, str, str | None]]] = {
     'lahore': _LAHORE_SKUS,
@@ -777,9 +778,25 @@ CITY_REPORT_SKUS: dict[str, list[tuple[str, str, str | None]]] = {
 }
 
 
+def _city_sku_row(name: str) -> tuple[str, str, str | None]:
+    """(brand, name shown to the BA, target SKU) for a SKU typed into the City SKU table."""
+    known = _BY_SQUASHED_NAME.get(' '.join(name.lower().split()))  # any case, extra spaces
+    if known:
+        return known
+    sku = canonical_sku(name)
+    return (BRAND[sku], sku, sku) if sku else ('Other', name, None)
+
+
 def report_skus_for_city(city: str) -> list[dict] | None:
-    """The SKUs a BA of this city reports on, or None when the city has no list of its own."""
-    rows = CITY_REPORT_SKUS.get((city or '').strip().lower())
+    """The SKUs a BA of this city reports on, or None when the city has no list of its own.
+
+    The City SKU table (Django admin) wins; a city with no rows there uses the built-in list.
+    """
+    from .models import CitySku
+
+    city = (city or '').strip()
+    names = [name.strip() for name in CitySku.objects.filter(city__iexact=city).values_list('sku', flat=True)]
+    rows = [_city_sku_row(name) for name in names if name] or CITY_REPORT_SKUS.get(city.lower())
     if not rows:
         return None
     return [{'brand': brand, 'label': name, 'sku': sku or name} for brand, name, sku in rows]

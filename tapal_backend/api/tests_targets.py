@@ -217,3 +217,26 @@ class SkuTemplateTests(StoreSkuTargetUploadTests):
         lahore.force_authenticate(get_user_model().objects.create_user(username='l2', email='l2@x.com', password='pw', user_type=1, city='Lahore'))
         res = lahore.post('/api/ba-targets/', {'rows': [{'baCode': self.ba.ba_code, 'month': '2026-10', 'lines': [{'sku': 'TD 80gm Hard Pack', 'qty': 2}]}]}, format='json')
         self.assertEqual(res.status_code, 400)
+
+
+class CityReportSkuTests(TestCase):
+    def test_city_lists(self):
+        from .target_sheet import canonical_sku, report_skus_for_city
+
+        lahore, multan = report_skus_for_city('Lahore'), report_skus_for_city(' multan ')
+        self.assertEqual((len(lahore), len(multan)), (41, 22))
+        self.assertIsNone(report_skus_for_city('Faisalabad'))
+        self.assertEqual(lahore[1], {'brand': 'Danedar', 'label': 'Danedar 170gm X 60 Hard Pack', 'sku': 'DD 170gm Hard Pack'})
+        # every Multan SKU is on the Lahore list, and mapped SKUs are real target SKUs
+        self.assertTrue({s['label'] for s in multan} <= {s['label'] for s in lahore})
+        for item in lahore:
+            if item['sku'] != item['label']:
+                self.assertEqual(canonical_sku(item['sku']), item['sku'])
+        self.assertEqual(len({s['sku'] for s in lahore}), 41)
+
+    def test_ba_me_sends_the_city_list(self):
+        ba = Ambassador.objects.create(name='Lahore BA', city='Lahore')
+        other = Ambassador.objects.create(name='Fsd BA', city='Faisalabad')
+        client = APIClient()
+        self.assertEqual(len(client.get(f'/api/ba/me/?token={ba.invite_token}').data['reportSkus']), 41)
+        self.assertIsNone(client.get(f'/api/ba/me/?token={other.invite_token}').data['reportSkus'])

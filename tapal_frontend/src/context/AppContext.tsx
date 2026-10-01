@@ -16,7 +16,7 @@ export const roleMeta: Record<
   headOffice: {
     label: 'Head Office',
     short: 'HO',
-    home: '/ho/dashboard',
+    home: '/ho/ba-performance',
     tone: 'Command Center',
   },
   admin: {

@@ -9,10 +9,11 @@ import { DesktopShell } from './components/AppShell'
 import { BaShell, ShopperShell } from './components/RoleLayouts'
 import { ScreenHub } from './pages/ScreenHub'
 import { HeadOfficeGate, LoginPage } from './pages/LoginPage'
-import { BaDailyReportsPage, CommandCenterPage, OptimizationPage } from './pages/headOffice/CommandCenterPage'
+import { BaDailyReportsPage, OptimizationPage } from './pages/headOffice/CommandCenterPage'
 import { BaPerformanceDashboardPage } from './pages/headOffice/BaPerformanceDashboardPage'
 import { CampaignOverviewPage, CampaignsPage } from './pages/headOffice/CampaignPages'
 import { BaAttendancePage } from './pages/headOffice/BaAttendancePage'
+import { StockBoardPage } from './pages/headOffice/StockBoardPage'
 import { AmbassadorProfilePage, AmbassadorsPage } from './pages/headOffice/AmbassadorPages'
 import { TrainingManagerPage } from './pages/headOffice/TrainingManagerPage'
 import { DeploymentPage, StoreDetailPage, StoresPage } from './pages/headOffice/StorePages'
@@ -66,10 +67,12 @@ import {
 
 const hoPages = (
   <>
-    <Route index element={<Navigate to="dashboard" replace />} />
-    <Route path="dashboard" element={<CommandCenterPage />} />
+    {/* The Dashboard (BA performance) is the landing page; the old Campaign Metrics page is not shown. */}
+    <Route index element={<Navigate to="ba-performance" replace />} />
+    <Route path="dashboard" element={<Navigate to="../ba-performance" replace />} />
     <Route path="ba-performance" element={<BaPerformanceDashboardPage />} />
     <Route path="daily-reports" element={<BaDailyReportsPage />} />
+    <Route path="stock" element={<StockBoardPage />} />
     <Route path="attendance" element={<BaAttendancePage />} />
     <Route path="interceptions" element={<InterceptionsPage />} />
     <Route path="ambassadors" element={<AmbassadorsPage />} />
@@ -147,6 +150,7 @@ export default function App() {
               <Route path="targets" element={<SupervisorTargetsPage />} />
               <Route path="bas" element={<SupervisorBasPage />} />
               <Route path="submissions" element={<SupervisorSubmissionsPage />} />
+              <Route path="stock" element={<StockBoardPage />} />
             </Route>
 
             {/* Personal BA link — signs that ambassador in, then opens their app */}
@@ -179,7 +183,7 @@ export default function App() {
               <Route path=":storeSlug" element={<ShopperStoreEntry />} />
             </Route>
 
-            <Route path="/app/*" element={<Navigate to="/ho/dashboard" replace />} />
+            <Route path="/app/*" element={<Navigate to="/ho/ba-performance" replace />} />
             <Route path="*" element={<Navigate to="/login" replace />} />
           </Routes>
           </BrowserRouter>

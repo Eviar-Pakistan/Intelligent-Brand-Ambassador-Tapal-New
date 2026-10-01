@@ -106,6 +106,7 @@ urlpatterns = [
     path('complaints/', portal.complaints, name='complaints'),
     path('complaints/<str:pk>/', portal.complaint_detail, name='complaint-detail'),
     path('daily-reports/', portal.daily_reports, name='daily-reports'),
+    path('stock-board/', portal.stock_board, name='stock-board'),
     path('interceptions/', portal.interceptions, name='interceptions'),
     path('early-checkouts/', portal.early_checkouts, name='early-checkouts'),
     path('kpi-config/', portal.kpi_config, name='kpi-config'),

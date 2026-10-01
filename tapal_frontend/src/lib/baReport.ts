@@ -153,12 +153,46 @@ export function sectionsFromTarget(target: BaMonthTarget | null | undefined): Re
   }
 }
 
+/** A SKU on a city's list: the name the BA sees, and the SKU its stock and sales are saved under. */
+export type CityReportSku = { brand: string; label: string; sku: string }
+
+/** The SKU sections for a city's own list (Lahore, Multan), grouped by brand in the list's order. */
+export function sectionsFromCityList(list: CityReportSku[]): ReportSections {
+  const byBrand = new Map<string, CityReportSku[]>()
+  const seen = new Set<string>()
+  for (const item of list) {
+    if (seen.has(item.sku)) continue
+    seen.add(item.sku)
+    byBrand.set(item.brand, [...(byBrand.get(item.brand) ?? []), item])
+  }
+  const groups = [...byBrand.entries()]
+  return {
+    stock: groups.map(([title, items]) => ({
+      title,
+      fields: items.map((item) => ({ key: `${STOCK_SKU_PREFIX}${item.sku}`, label: item.label })),
+    })),
+    skuSales: groups.map(([title, items]) => ({
+      title: `${title} · sales (kg)`,
+      fields: items.map((item) => ({ key: `${SALES_SKU_PREFIX}${item.sku}`, label: item.label })),
+    })),
+    fromTarget: false,
+  }
+}
+
 let cachedSections: ReportSections | null = null
 
-/** The signed-in BA's report SKUs (their target this month from /api/ba/me/, else the default list). */
+/**
+ * The signed-in BA's report SKUs from /api/ba/me/: their city's SKU list when the city has one
+ * (Lahore, Multan), else the SKUs of their target this month, else the default list.
+ */
 export async function loadReportSections(): Promise<ReportSections> {
-  const me = await portalGet<{ monthTarget: BaMonthTarget | null }>('/api/ba/me/', 'ba')
-  if (me) cachedSections = sectionsFromTarget(me.monthTarget)
+  const me = await portalGet<{ monthTarget: BaMonthTarget | null; reportSkus?: CityReportSku[] | null }>(
+    '/api/ba/me/',
+    'ba',
+  )
+  if (me) {
+    cachedSections = me.reportSkus?.length ? sectionsFromCityList(me.reportSkus) : sectionsFromTarget(me.monthTarget)
+  }
   return cachedSections ?? DEFAULT_SECTIONS
 }
 

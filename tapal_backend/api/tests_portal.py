@@ -261,6 +261,29 @@ class ReportAndInterceptionTests(PortalTestBase):
         empty = {'token': self.ba.invite_token, 'id': 'rep-2', 'source': 'anytime', 'stock': {}}
         self.assertEqual(self.anon.post('/api/daily-reports/', empty, format='json').status_code, 400)
 
+    def test_stock_board_shows_latest_stock_report_per_store(self):
+        now = timezone.now()
+
+        def report(pk, store, stock, hours_ago):
+            DailyReport.objects.create(
+                id=pk, ambassador=self.ba, ba_name='Ali', store=store, city=store.city, source='anytime',
+                stock=stock, submitted_at=now - timezone.timedelta(hours=hours_ago),
+            )
+
+        report('old', self.store, {'stock:A': 'In Stock'}, 30)
+        report('new', self.store, {'stock:A': 'Out of Stock'}, 2)
+        report('sales-only', self.store, {}, 1)
+        report('other', self.other_store, {'stock:A': 'Near Out of Stock'}, 5)
+        rows = self.ho.get('/api/stock-board/').data['results']
+        self.assertEqual(
+            [(r['storeName'], r['stock']) for r in rows],
+            [('Imtiaz', {'stock:A': 'Near Out of Stock'}), ('Metro', {'stock:A': 'Out of Stock'})],
+        )
+        self.make_supervisor()
+        mine = self.supervisor_client().get('/api/stock-board/').data['results']
+        self.assertEqual([r['storeName'] for r in mine], ['Metro'])
+        self.assertEqual(self.anon.get('/api/stock-board/').status_code, 401)
+
     def test_interceptions(self):
         body = {'token': self.ba.invite_token, 'id': 'int-1', 'name': 'Bilal', 'contact': '0321', 'currentSku': 'Danedar 90g'}
         self.assertEqual(self.anon.post('/api/interceptions/', body, format='json').status_code, 201)

@@ -23,6 +23,7 @@ import {
   Menu,
   X,
   MessageSquareWarning,
+  PackageCheck,
   type LucideIcon,
   Target,
   UserCheck,
@@ -53,6 +54,7 @@ const headOfficeNav: NavItem[] = [
   // { to: '/ho/dashboard', label: 'Campaign Metrics', icon: LayoutDashboard, end: true, section: 'Command' },
   { to: '/ho/ba-performance', label: 'Dashboard', icon: BarChart3, section: 'Command' },
   { to: '/ho/daily-reports', label: 'Daily Reports', icon: ClipboardList, section: 'Command' },
+  { to: '/ho/stock', label: 'Stock', icon: PackageCheck, section: 'Command' },
   { to: '/ho/ambassadors', label: 'Ambassadors', icon: Users, section: 'Operations' },
   { to: '/ho/stores', label: 'Stores', icon: Store, section: 'Operations' },
   { to: '/ho/supervisors', label: 'Supervisors', icon: UserCog, section: 'Operations' },
@@ -93,6 +95,7 @@ const supervisorNav: NavItem[] = [
   { to: '/supervisor/targets', label: 'BA Targets', icon: Target, section: 'My stores' },
   { to: '/supervisor/bas', label: 'BA Performance', icon: Users, section: 'My stores' },
   { to: '/supervisor/submissions', label: 'BA submissions', icon: ClipboardCheck, section: 'My stores' },
+  { to: '/supervisor/stock', label: 'Stock', icon: PackageCheck, section: 'My stores' },
 ]
 
 type ShellKind = 'headOffice' | 'admin' | 'storeManager' | 'supervisor'
@@ -144,6 +147,8 @@ const titles: Record<string, string> = {
   '/supervisor/targets': 'BA Targets',
   '/supervisor/bas': 'BA Performance',
   '/supervisor/submissions': 'BA submissions',
+  '/ho/stock': 'Stock',
+  '/supervisor/stock': 'Stock',
   '/ho/deployment': 'Intelligent Deployment',
   '/ho/attendance': 'BA Attendance',
   '/ho/interceptions': 'User Interceptions',

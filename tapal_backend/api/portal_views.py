@@ -888,6 +888,39 @@ def daily_reports(request):
     return Response(report_payload(report), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def stock_board(request):
+    """Head Office / supervisor: each store's stock status per SKU, from the latest stock report filed there."""
+    scope = _scope(request)
+    if not scope:
+        return _denied()
+    qs = (
+        _ba_visible(DailyReport.objects.select_related('store'), scope)
+        .filter(store__isnull=False)
+        .exclude(stock={})
+        .only('store__name', 'store__city', 'ba_name', 'submitted_at', 'stock')
+    )
+    latest: dict[int, DailyReport] = {}
+    for report in qs.iterator():  # newest first
+        if report.store_id in latest or not any(str(v or '').strip() for v in report.stock.values()):
+            continue
+        latest[report.store_id] = report
+    rows = [
+        {
+            'storeId': r.store_id,
+            'storeName': r.store.name,
+            'city': r.store.city,
+            'baName': r.ba_name,
+            'submittedAt': _iso(r.submitted_at),
+            'stock': r.stock,
+        }
+        for r in latest.values()
+    ]
+    rows.sort(key=lambda row: (row['city'].lower(), row['storeName'].lower()))
+    return Response({'results': rows})
+
+
 # ─── BA user interceptions ───────────────────────────────────────────────────
 
 
@@ -1147,6 +1180,7 @@ def ba_me(request):
     from .intelligence import build_ba_leaderboard
     from .models import AmbassadorMonthTarget
     from .store_live import switched_to_tapal
+    from .target_sheet import report_skus_for_city
     from .views import _target_payload
 
     ambassador = _ambassador_from_token(request.query_params.get('token'))
@@ -1200,6 +1234,8 @@ def ba_me(request):
             'conversion': mine['conversion'] if mine else 0.0,
             'weekSessions': week_sessions,
             'monthTarget': _target_payload(target) if target else None,
+            # Lahore and Multan BAs report on their city's SKU list (None: use the target SKUs).
+            'reportSkus': report_skus_for_city(ambassador.city or (store.city if store else '')),
             'daysWorked': days_worked,
             'rating': round(sum(ratings) / len(ratings), 1) if ratings else None,
             'ratingCount': len(ratings),

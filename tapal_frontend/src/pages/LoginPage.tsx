@@ -6,7 +6,6 @@ import { useBrand } from '../context/BrandContext'
 import { DesktopShell } from '../components/AppShell'
 import { Button } from '../components/ui'
 import { authenticate, emailInUse, signIn as supervisorSignIn, signOut } from '../lib/supervisors'
-import { enableSupervisorPush } from '../lib/supervisorPush'
 import { baEmailInUse, baSignOut } from '../lib/baAccounts'
 import { djangoLogin, djangoMe } from '../lib/djangoApi'
 import { syncDjango } from '../lib/djangoSync'
@@ -59,13 +58,6 @@ export function LoginPage({ initialTab = 'headOffice' }: { initialTab?: LoginTab
     if (!supervisor) {
       setBusy(false)
       setError('Incorrect email or password.')
-      return
-    }
-    try {
-      await enableSupervisorPush(supervisor.id)
-    } catch (err) {
-      setBusy(false)
-      setError(err instanceof Error ? err.message : 'Allow notifications to continue.')
       return
     }
     baSignOut()
@@ -157,7 +149,7 @@ export function LoginPage({ initialTab = 'headOffice' }: { initialTab?: LoginTab
           </h2>
           <p className="mt-1 text-sm text-slate-500">
             {tab === 'supervisor'
-              ? 'Your stores only. Allow notifications so you are alerted when a BA checks in or out.'
+              ? 'Your stores only. Tap the bell after signing in to get alerts when a BA checks in or out.'
               : brand.productName}
           </p>
 

@@ -3,7 +3,6 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useRole } from '../../context/AppContext'
 import { useBrand } from '../../context/BrandContext'
 import { authenticate, signIn } from '../../lib/supervisors'
-import { enableSupervisorPush } from '../../lib/supervisorPush'
 
 export function SupervisorLoginPage() {
   const navigate = useNavigate()
@@ -12,7 +11,6 @@ export function SupervisorLoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -20,14 +18,6 @@ export function SupervisorLoginPage() {
     const supervisor = await authenticate(email, password)
     if (!supervisor) {
       setError('Incorrect email or password.')
-      return
-    }
-    setBusy(true)
-    try {
-      await enableSupervisorPush(supervisor.id)
-    } catch (err) {
-      setBusy(false)
-      setError(err instanceof Error ? err.message : 'Allow notifications to continue.')
       return
     }
     setRole('supervisor')
@@ -69,10 +59,9 @@ export function SupervisorLoginPage() {
           {error && <p className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}
           <button
             type="submit"
-            disabled={busy}
             className="w-full rounded-2xl bg-navy-900 py-3 text-sm font-semibold text-white transition enabled:hover:bg-brand-600 disabled:opacity-50"
           >
-            {busy ? 'Waiting for notifications…' : 'Sign in'}
+            Sign in
           </button>
         </form>
         <p className="mt-4 text-xs text-slate-500">

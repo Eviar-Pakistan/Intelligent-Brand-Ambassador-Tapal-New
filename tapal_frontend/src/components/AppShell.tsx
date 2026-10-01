@@ -37,7 +37,7 @@ import {
   syncSupervisorNotifications,
   useSupervisorNotifications,
 } from '../lib/supervisorNotifications'
-import { enableSupervisorPush } from '../lib/supervisorPush'
+import { enableSupervisorPush, supervisorPushPermission } from '../lib/supervisorPush'
 import { displayName, djangoLogout, useDjangoUser } from '../lib/djangoApi'
 import { useBrand } from '../context/BrandContext'
 
@@ -202,6 +202,20 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
   const [bellOpen, setBellOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
+  const [pushState, setPushState] = useState<'idle' | 'asking' | 'on'>('idle')
+
+  async function turnOnAlerts() {
+    if (!sv.supervisor || sv.preview) return
+    setPushState('asking')
+    setPushError(null)
+    try {
+      await enableSupervisorPush(sv.supervisor.id)
+      setPushState('on')
+    } catch (error) {
+      setPushState('idle')
+      setPushError(error instanceof Error ? error.message : 'Notifications could not be turned on.')
+    }
+  }
   const meta = roleMeta[role]
   const navGroups = groupNav(cfg.nav)
   // Who is signed in: the supervisor, or the Head Office / admin user from the server.
@@ -238,13 +252,12 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
   useEffect(() => {
     if (kind !== 'supervisor' || !sv.supervisor) return
     const supervisorId = sv.supervisor.id
-    void enableSupervisorPush(supervisorId)
-      .then(() => setPushError(null))
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : 'Notifications could not be enabled.'
-        setPushError(message)
-        console.error('[push] token registration failed', error)
-      })
+    // No prompt here: alerts are turned on from the bell. If already allowed, keep this phone registered.
+    if (!sv.preview && supervisorPushPermission() === 'granted') {
+      void enableSupervisorPush(supervisorId)
+        .then(() => setPushState('on'))
+        .catch((error) => console.error('[push] token registration failed', error))
+    }
     // The bell reads the server's notifications (the server also sends the push to the phone).
     void syncSupervisorNotifications()
     const id = window.setInterval(() => void syncSupervisorNotifications(), 15000)
@@ -432,7 +445,21 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             <div className="relative">
               <button
-                onClick={() => setBellOpen((v) => !v)}
+                onClick={() => {
+                  // Supervisor: tapping the bell asks for notification permission the first time.
+                  if (
+                    kind === 'supervisor' &&
+                    !bellOpen &&
+                    !sv.preview &&
+                    pushState !== 'on' &&
+                    supervisorPushPermission() !== 'granted' &&
+                    supervisorPushPermission() !== 'unsupported'
+                  ) {
+                    void turnOnAlerts()
+                  }
+                  setBellOpen((v) => !v)
+                }}
+                aria-label="Notifications"
                 className="relative rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50"
               >
                 <FilledIcon icon={Bell} size={16} />
@@ -462,6 +489,22 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
                         Clear
                       </button>
                     </div>
+                    {kind === 'supervisor' && !sv.preview && (pushState !== 'on' || pushError) && (
+                      <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        {pushState === 'asking'
+                          ? 'Turning on phone alerts…'
+                          : pushError ?? 'Phone alerts are off. Turn them on to be alerted when a BA checks in or out.'}
+                        {pushState !== 'asking' && (
+                          <button
+                            type="button"
+                            onClick={() => void turnOnAlerts()}
+                            className="mt-1.5 block font-semibold text-amber-950 underline"
+                          >
+                            Turn on alerts
+                          </button>
+                        )}
+                      </div>
+                    )}
                     {notifications.length === 0 ? (
                       <p className="py-4 text-center text-xs text-slate-400">No notifications</p>
                     ) : (
@@ -502,11 +545,6 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
         </header>
         {/* The page itself scrolls (smooth on phones); only sideways overflow is clipped. */}
         <main className="min-w-0 flex-1 overflow-x-clip p-3 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-6">
-          {pushError && kind === 'supervisor' && (
-            <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              Notifications are off for this browser. {pushError} Allow notifications, then refresh this page.
-            </div>
-          )}
           <Outlet />
         </main>
       </div>

@@ -1,12 +1,23 @@
 import { supervisorToken } from './serverApi'
 
+/** 'granted' | 'denied' | 'default' (not asked yet) | 'unsupported'. */
+export function supervisorPushPermission(): NotificationPermission | 'unsupported' {
+  return 'Notification' in window ? Notification.permission : 'unsupported'
+}
+
+/**
+ * Turns on phone alerts for the signed-in supervisor. Asks for permission (call it from a tap, e.g.
+ * the bell), then registers this browser with the server so it receives a push on BA check-in / out.
+ */
 export async function enableSupervisorPush(supervisorId: string) {
   if (!('Notification' in window)) {
-    throw new Error('This browser does not support notifications.')
+    throw new Error('This browser does not support notifications. On iPhone, add the site to the Home Screen first.')
   }
   const permission = await Notification.requestPermission()
   if (permission !== 'granted') {
-    throw new Error('Allow notifications to sign in. Supervisors are alerted when a BA checks in or out.')
+    throw new Error(
+      'Notifications are blocked for this site. Allow them from the lock icon in the address bar → Notifications, then tap the bell again.',
+    )
   }
 
   const config = await fetch('/firebase-config.json')

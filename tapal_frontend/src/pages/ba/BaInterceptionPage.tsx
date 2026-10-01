@@ -40,15 +40,15 @@ export function BaInterceptionPage() {
   const [savedName, setSavedName] = useState<string | null>(null)
 
   const phoneDigits = form.contact.replace(/\D/g, '')
+  // Every field just needs something in it — no minimum length.
   const canSubmit =
-    form.name.trim().length >= 2 &&
-    phoneDigits.length >= 10 &&
-    phoneDigits.length <= 13 &&
-    form.cityArea.trim().length >= 2 &&
-    form.previousBrand.trim().length >= 2 &&
-    form.previousSku.trim().length >= 2 &&
-    form.currentSku.trim().length >= 2 &&
-    form.feedback.trim().length >= 3
+    form.name.trim() !== '' &&
+    phoneDigits !== '' &&
+    form.cityArea.trim() !== '' &&
+    form.previousBrand.trim() !== '' &&
+    form.previousSku.trim() !== '' &&
+    form.currentSku.trim() !== '' &&
+    form.feedback.trim() !== ''
 
   function set(key: keyof typeof empty) {
     return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -60,7 +60,7 @@ export function BaInterceptionPage() {
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
     if (!canSubmit) {
-      setError('Fill every field. Contact should be a mobile number, for example 0346-4529909.')
+      setError('Fill every field.')
       return
     }
     const saved = submitUserInterception({

@@ -8,6 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+db_backups
 data/supervisor-push.json
 .env
 firebase-service-account.json
@@ -31,3 +32,5 @@ __pycache__/
 *.pyc
 tapal_backend/staticfiles/
 tapal_backend/.venv/
+tapal_backend/db.sqlite3
+tapal_backend/db_backups/

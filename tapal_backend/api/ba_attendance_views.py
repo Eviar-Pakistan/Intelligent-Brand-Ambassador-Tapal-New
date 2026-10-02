@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from django.utils import timezone
 from rest_framework import status
@@ -20,6 +20,26 @@ def _ambassador_from_token(token: str | None) -> Ambassador | None:
     if not token:
         return None
     return Ambassador.objects.filter(invite_token=token, is_active=True).first()
+
+
+def _server_now() -> datetime:
+    """The server's clock. Whether a check-out is early is decided on this, never on the BA's phone."""
+    return timezone.now()
+
+
+def _shift_end_at(shift: ShiftAssignment) -> datetime | None:
+    """When the shift ends, as an exact moment in the server's time zone (Asia/Karachi). A shift that ends past midnight ends the next day."""
+    if not shift.end_time:
+        return None
+    end = datetime.combine(shift.date, shift.end_time)
+    if shift.start_time and shift.end_time <= shift.start_time:
+        end += timedelta(days=1)
+    return timezone.make_aware(end)
+
+
+def _past_shift_end(shift: ShiftAssignment) -> bool:
+    end_at = _shift_end_at(shift)
+    return end_at is None or _server_now() >= end_at
 
 
 def _today_shift_for(ambassador: Ambassador) -> ShiftAssignment | None:
@@ -79,9 +99,11 @@ def _upcoming_rows(ambassador: Ambassador) -> list[dict]:
 def serialize_ba_shift(shift: ShiftAssignment | None, ambassador: Ambassador) -> dict:
     initials = ''.join(p[0] for p in (ambassador.name or 'BA').split() if p)[:2].upper() or 'BA'
     upcoming_rows = _upcoming_rows(ambassador)
+    server_now = _server_now().isoformat()
     if not shift:
         store = ambassador.store
         return {
+            'serverNow': server_now,
             'shift': None,
             'has_shift': False,
             'message': (
@@ -101,7 +123,9 @@ def serialize_ba_shift(shift: ShiftAssignment | None, ambassador: Ambassador) ->
         }
 
     store = shift.store
+    end_at = _shift_end_at(shift)
     return {
+        'serverNow': server_now,
         'has_shift': True,
         'message': None,
         'ambassador': {
@@ -119,6 +143,8 @@ def serialize_ba_shift(shift: ShiftAssignment | None, ambassador: Ambassador) ->
             'shift': shift.shift_label,
             'startTime': shift.start_time.strftime('%H:%M') if shift.start_time else None,
             'endTime': shift.end_time.strftime('%H:%M') if shift.end_time else None,
+            'endAt': end_at.isoformat() if end_at else None,
+            'pastShiftEnd': _past_shift_end(shift),
             'storeId': store.id,
             'storeName': store.name,
             'city': store.city,
@@ -190,7 +216,8 @@ def ba_submit_complaint(request):
 def ba_check_in(request):
     """
     POST /api/ba/check-in/
-    Body: { token, latitude?, longitude?, accuracy? }
+    Body: { token, latitude, longitude, accuracy?, selfie? }
+    The BA's location is required: no check-in is recorded without it.
     """
     ambassador = _ambassador_from_token(request.data.get('token'))
     if not ambassador:
@@ -210,8 +237,12 @@ def ba_check_in(request):
     if shift.checked_in_at:
         return Response(serialize_ba_shift(shift, ambassador))
 
+    lat, lng, accuracy = _location(request.data)
+    if lat is None:
+        return Response({'detail': LOCATION_REQUIRED.format('check in')}, status=status.HTTP_400_BAD_REQUEST)
+
     shift.checked_in_at = timezone.now()
-    shift.check_in_lat, shift.check_in_lng, shift.check_in_accuracy_m = _location(request.data)
+    shift.check_in_lat, shift.check_in_lng, shift.check_in_accuracy_m = lat, lng, accuracy
     from .portal_views import _image_from_data_url
 
     selfie = _image_from_data_url(request.data.get('selfie'), f'checkin-{shift.id}-{ambassador.id}')
@@ -229,6 +260,9 @@ def ba_check_in(request):
     )
     notify_supervisor(shift, 'check-in')
     return Response(serialize_ba_shift(shift, ambassador))
+
+
+LOCATION_REQUIRED = 'Your location is required to {}. Turn on location (GPS), allow it for this app, then try again.'
 
 
 def _location(data) -> tuple[float | None, float | None, float | None]:
@@ -268,8 +302,11 @@ def _clean_report(raw) -> dict | None:
 @permission_classes([AllowAny])
 def ba_check_out(request):
     """
-    POST /api/ba/check-out/  Body: { token, report: {stock, sales, otherBrands}, early_reason? }
+    POST /api/ba/check-out/
+    Body: { token, report: {stock, sales, otherBrands}, latitude, longitude, accuracy?, early_reason? }
     Check-out only counts once the report is submitted; that is what marks the BA Present.
+    The BA's location is required: no check-out is recorded without it.
+    Before the shift's end (server time) early_reason is required; after it, any early_reason is ignored.
     """
     ambassador = _ambassador_from_token(request.data.get('token'))
     if not ambassador:
@@ -289,13 +326,26 @@ def ba_check_out(request):
             {'detail': 'Submit your stock, sales and competitor report to check out.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    lat, lng, accuracy = _location(request.data)
+    if lat is None:
+        return Response({'detail': LOCATION_REQUIRED.format('check out')}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Early or not is decided here, on the server's clock. A reason is required when early and dropped when not.
+    early = not _past_shift_end(shift)
+    reason = str(request.data.get('early_reason') or '').strip()[:1000]
+    if early and not reason:
+        ends = shift.end_time.strftime('%I:%M %p').lstrip('0')
+        return Response(
+            {'detail': f'Your shift ends at {ends}. Give a reason to check out early.', 'early': True},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     now = timezone.now()
     shift.checkout_report = report
     shift.report_submitted_at = now
     shift.checked_out_at = now
-    shift.early_checkout_reason = str(request.data.get('early_reason') or '').strip()[:1000]
-    shift.check_out_lat, shift.check_out_lng, shift.check_out_accuracy_m = _location(request.data)
+    shift.early_checkout_reason = reason if early else ''
+    shift.check_out_lat, shift.check_out_lng, shift.check_out_accuracy_m = lat, lng, accuracy
     shift.save(
         update_fields=[
             'checkout_report',

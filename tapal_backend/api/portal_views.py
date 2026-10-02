@@ -878,6 +878,8 @@ def daily_reports(request):
             'sales': sales,
             'other_brands': others,
             'submitted_at': _when(data.get('submittedAt')),
+            # Only an explicit true counts. Kept for checking in the database; never returned (see report_payload).
+            'no_sales_confirmed': data.get('noSalesConfirmed') is True,
         },
     )
     if created and report.ambassador_id:

@@ -1,6 +1,8 @@
 import base64
 import shutil
 import tempfile
+from datetime import datetime, time
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -31,6 +33,8 @@ PIXEL = 'data:image/png;base64,' + base64.b64encode(
     )
 ).decode()
 REPORT = {'stock': {'danedar_950g': '10'}, 'sales': {'danedar_950g': '2'}, 'otherBrands': []}
+# The BA's position: check-in and check-out are refused without one
+GPS = {'latitude': 31.5204, 'longitude': 74.3587}
 
 MEDIA = tempfile.mkdtemp()
 
@@ -51,6 +55,16 @@ class PortalTestBase(TestCase):
         self.other_store = Store.objects.create(name='Imtiaz', store_code='ST-02', city='Karachi', address='y')
         self.ba = Ambassador.objects.create(name='Ali', status=Ambassador.Status.CERTIFIED)
         self.today = timezone.localdate()
+        # The server clock is pinned: by default it is the end of today, so a check-out is on time.
+        # Tests of early check-outs move it with self.set_clock(...).
+        patcher = mock.patch('api.ba_attendance_views._server_now')
+        self.clock = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.set_clock(time(23, 59, 59))
+
+    def set_clock(self, at: time):
+        """The server's time of day today (Asia/Karachi)."""
+        self.clock.return_value = timezone.make_aware(datetime.combine(self.today, at))
 
     def make_supervisor(self, **extra):
         body = {
@@ -132,7 +146,7 @@ class SupervisorTests(PortalTestBase):
         data = client.get('/api/supervisor/overview/').data
         self.assertEqual([s['id'] for s in data['stores']], [self.store.id])
         self.assertEqual(data['bas'][0]['state'], 'Offline')
-        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
         data = client.get('/api/supervisor/overview/').data
         self.assertEqual(data['bas'][0]['state'], 'Active')
         self.assertEqual(data['stores'][0]['assigned'][0]['name'], 'Ali')
@@ -141,8 +155,8 @@ class SupervisorTests(PortalTestBase):
     def test_check_in_and_out_notify_the_store_supervisor(self):
         self.make_supervisor()
         self.schedule_ba_today()
-        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
-        self.anon.post('/api/ba/check-out/', {'token': self.ba.invite_token, 'report': REPORT}, format='json')
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
+        self.anon.post('/api/ba/check-out/', {**GPS, 'token': self.ba.invite_token, 'report': REPORT}, format='json')
         client = self.supervisor_client()
         messages = [n['message'] for n in client.get('/api/supervisor/notifications/').data['results']]
         self.assertEqual(len(messages), 2)
@@ -261,6 +275,24 @@ class ReportAndInterceptionTests(PortalTestBase):
         empty = {'token': self.ba.invite_token, 'id': 'rep-2', 'source': 'anytime', 'stock': {}}
         self.assertEqual(self.anon.post('/api/daily-reports/', empty, format='json').status_code, 400)
 
+    def test_no_sales_confirmation_is_kept_but_never_returned(self):
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        base = {'token': token, 'source': 'checkout', 'stock': {'a': 'In stock'}, 'sales': {'sku:x': '0'}}
+        post = lambda body: self.anon.post('/api/daily-reports/', body, format='json')  # noqa: E731
+        self.assertEqual(post({**base, 'id': 'rep-yes', 'noSalesConfirmed': True}).status_code, 201)
+        self.assertEqual(post({**base, 'id': 'rep-no'}).status_code, 201)
+        # Only a real true counts: "true", 1 and so on are ignored.
+        self.assertEqual(post({**base, 'id': 'rep-str', 'noSalesConfirmed': 'true'}).status_code, 201)
+        flags = dict(DailyReport.objects.values_list('id', 'no_sales_confirmed'))
+        self.assertEqual(flags, {'rep-yes': True, 'rep-no': False, 'rep-str': False})
+        # Not in any reply: not the POST reply, not the BA's list, not Head Office's list.
+        self.assertNotIn('noSalesConfirmed', post({**base, 'id': 'rep-yes'}).data)
+        for res in (self.anon.get(f'/api/daily-reports/?token={token}'), self.ho.get('/api/daily-reports/')):
+            for row in res.data['results']:
+                self.assertNotIn('noSalesConfirmed', row)
+                self.assertNotIn('no_sales_confirmed', row)
+
     def test_stock_board_shows_latest_stock_report_per_store(self):
         now = timezone.now()
 
@@ -295,9 +327,10 @@ class ReportAndInterceptionTests(PortalTestBase):
 
     def test_early_checkouts(self):
         self.schedule_ba_today()
-        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
+        self.set_clock(time(12, 0))  # shift ends 23:59
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
         self.anon.post(
-            '/api/ba/check-out/', {'token': self.ba.invite_token, 'report': REPORT, 'early_reason': 'Unwell'},
+            '/api/ba/check-out/', {**GPS, 'token': self.ba.invite_token, 'report': REPORT, 'early_reason': 'Unwell'},
             format='json',
         )
         rows = self.ho.get('/api/early-checkouts/').data['results']
@@ -361,8 +394,8 @@ class UncertifiedBaCanUseAppTests(PortalTestBase):
         ).save()
         token = ba.invite_token
         self.assertTrue(self.anon.get(f'/api/ba/today-shift/?token={token}').data['has_shift'])
-        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 200)
-        out = self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json').status_code, 200)
+        out = self.anon.post('/api/ba/check-out/', {**GPS, 'token': token, 'report': REPORT}, format='json')
         self.assertEqual(out.status_code, 200)
         self.assertEqual(self.anon.get(f'/api/ba/leaderboard/?token={token}').status_code, 200)
         legacy = self.anon.post('/api/ba/complaints/', {'token': token, 'store_id': self.store.id, 'complaint': 'x'}, format='json')
@@ -386,7 +419,7 @@ class AmbassadorManagementTests(PortalTestBase):
         self.assertFalse(res.data['is_active'])
         self.assertEqual(self.anon.get(f'/api/ba/invite/{token}/').status_code, 404)
         self.assertEqual(self.anon.get(f'/api/ba/today-shift/?token={token}').status_code, 404)
-        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 404)
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json').status_code, 404)
         self.assertEqual(self.ho.get('/api/attendance/').data['results'], [])
         bulk = self.ho.post('/api/shifts/bulk/', {'rows': [{
             'ba_code': self.ba.ba_code, 'store_code': 'ST-01', 'start_time': '10:00', 'end_time': '14:00', 'month': '2026-11',
@@ -415,7 +448,7 @@ class LiveStoreTests(PortalTestBase):
         row = self.store_row()
         self.assertEqual((row['status'], row['bas'], row['coverage']), ('PARTIAL', 1, 0))
         self.assertEqual(row['assigned'], [{'id': f'api-{self.ba.id}', 'name': 'Ali', 'state': 'Offline'}])
-        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
         row = self.store_row()
         self.assertEqual((row['status'], row['coverage'], row['assigned'][0]['state']), ('LIVE', 100, 'Active'))
 
@@ -488,13 +521,78 @@ class CheckInOutLocationTests(PortalTestBase):
         self.assertEqual((row['checkInLat'], row['checkInLng'], row['checkInAccuracy']), (31.5204, 74.3587, 12.0))
         self.assertEqual((row['checkOutLat'], row['checkOutLng'], row['checkOutAccuracy']), (31.521, 74.359, 20.0))
 
-    def test_missing_or_bad_location_is_not_stored(self):
+    def test_check_in_refused_without_a_valid_location(self):
         self.schedule_ba_today()
         token = self.ba.invite_token
-        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token, 'latitude': 999, 'longitude': 74}, format='json').status_code, 200)
-        self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
-        row = self.ho.get('/api/attendance/').data['results'][0]
-        self.assertEqual((row['checkInLat'], row['checkOutLat'], row['status']), (None, None, 'Present'))
+        for body in ({'token': token}, {'token': token, 'latitude': 999, 'longitude': 74}):
+            res = self.anon.post('/api/ba/check-in/', body, format='json')
+            self.assertEqual(res.status_code, 400)
+            self.assertIn('location is required', res.data['detail'])
+        self.assertFalse(ShiftAssignment.objects.filter(checked_in_at__isnull=False).exists())
+
+    def test_check_out_refused_without_a_valid_location(self):
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json')
+        for extra in ({}, {'latitude': 31.5, 'longitude': 999}):
+            res = self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT, **extra}, format='json')
+            self.assertEqual(res.status_code, 400)
+            self.assertIn('location is required', res.data['detail'])
+        shift = ShiftAssignment.objects.get(checked_in_at__isnull=False)
+        self.assertIsNone(shift.checked_out_at)
+        self.assertIsNone(shift.report_submitted_at)
+
+
+class EarlyCheckoutServerClockTests(PortalTestBase):
+    """Whether a check-out is early is decided on the server's clock (shift here ends 23:59)."""
+
+    def setUp(self):
+        super().setUp()
+        self.schedule_ba_today()
+        self.token = self.ba.invite_token
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': self.token}, format='json')
+
+    def check_out(self, **extra):
+        return self.anon.post('/api/ba/check-out/', {**GPS, 'token': self.token, 'report': REPORT, **extra}, format='json')
+
+    def shift_row(self):
+        return ShiftAssignment.objects.get(checked_in_at__isnull=False)
+
+    def test_early_check_out_without_reason_is_refused(self):
+        self.set_clock(time(15, 0))
+        res = self.check_out()
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('reason', res.data['detail'])
+        self.assertIsNone(self.shift_row().checked_out_at)
+
+    def test_early_check_out_with_reason_is_saved(self):
+        self.set_clock(time(15, 0))
+        self.assertEqual(self.check_out(early_reason='  Unwell  ').status_code, 200)
+        self.assertEqual(self.shift_row().early_checkout_reason, 'Unwell')
+
+    def test_check_out_at_shift_end_is_not_early(self):
+        self.set_clock(time(23, 59))  # exactly the end
+        self.assertEqual(self.check_out().status_code, 200)
+
+    def test_one_minute_before_shift_end_is_early(self):
+        self.set_clock(time(23, 58))
+        self.assertEqual(self.check_out().status_code, 400)
+
+    def test_reason_sent_after_shift_end_is_ignored(self):
+        self.set_clock(time(23, 59, 59))
+        self.assertEqual(self.check_out(early_reason='Left early').status_code, 200)
+        self.assertEqual(self.shift_row().early_checkout_reason, '')
+        data = self.ho.get('/api/attendance/').data
+        self.assertEqual(data['summary']['early_checkouts'], 0)
+
+    def test_today_shift_tells_the_app_the_server_time(self):
+        self.set_clock(time(15, 0))
+        data = self.anon.get(f'/api/ba/today-shift/?token={self.token}').data
+        self.assertEqual(data['serverNow'], self.clock.return_value.isoformat())
+        self.assertFalse(data['shift']['pastShiftEnd'])
+        self.assertTrue(data['shift']['endAt'].endswith('+05:00'))  # Asia/Karachi
+        self.set_clock(time(23, 59, 30))
+        self.assertTrue(self.anon.get(f'/api/ba/today-shift/?token={self.token}').data['shift']['pastShiftEnd'])
 
 
 class BaAppDataTests(PortalTestBase):
@@ -503,7 +601,7 @@ class BaAppDataTests(PortalTestBase):
 
         self.schedule_ba_today()
         token = self.ba.invite_token
-        self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json')
         AmbassadorMonthTarget.objects.create(
             ambassador=self.ba, store=self.store, month=self.today.strftime('%Y-%m'), target_total=100, sales_total=40
         )
@@ -522,7 +620,7 @@ class BaAppDataTests(PortalTestBase):
 
     def test_check_in_selfie_is_saved(self):
         self.schedule_ba_today()
-        self.anon.post('/api/ba/check-in/', {'token': self.ba.invite_token, 'selfie': PIXEL}, format='json')
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token, 'selfie': PIXEL}, format='json')
         row = self.ho.get('/api/attendance/').data['results'][0]
         self.assertIn('/media/checkins/', row['checkInPhoto'])
 
@@ -567,10 +665,10 @@ class OncePerDayTests(PortalTestBase):
         for store, (start, end) in ((self.store, ('00:00', '11:00')), (self.other_store, ('12:00', '23:59'))):
             build_monthly_shift(store=store, ambassador=self.ba, month=month, start=parse_hhmm(start), end=parse_hhmm(end)).save()
         token = self.ba.invite_token
-        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 200)
-        self.assertEqual(self.anon.post('/api/ba/check-in/', {'token': token}, format='json').status_code, 200)  # same shift
-        self.assertEqual(self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json').status_code, 200)
-        again = self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json').status_code, 200)
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json').status_code, 200)  # same shift
+        self.assertEqual(self.anon.post('/api/ba/check-out/', {**GPS, 'token': token, 'report': REPORT}, format='json').status_code, 200)
+        again = self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json')
         self.assertEqual(again.status_code, 400)
         self.assertIn('already checked in and out today', again.data['detail'])
         self.assertEqual(ShiftAssignment.objects.filter(checked_in_at__isnull=False).count(), 1)
@@ -584,8 +682,8 @@ class LeaderboardTests(PortalTestBase):
         gone = Ambassador.objects.create(name='Gone', status=Ambassador.Status.CERTIFIED, is_active=False)
         self.schedule_ba_today()
         token = self.ba.invite_token
-        self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
-        self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json')
+        self.anon.post('/api/ba/check-out/', {**GPS, 'token': token, 'report': REPORT}, format='json')
         UserInterception.objects.create(
             id='int-lb', ambassador=pending, ba_name='Pending BA', store=self.store, name='S', contact='0300',
             previous_brand='Lipton', current_sku='DD', created_at=timezone.now(),
@@ -627,9 +725,9 @@ class ServerPushTests(PortalTestBase):
         self.schedule_ba_today()
         token = self.ba.invite_token
         with mock.patch('api.push_views.send_push_later') as push:
-            self.anon.post('/api/ba/check-in/', {'token': token}, format='json')
-            self.anon.post('/api/ba/check-in/', {'token': token}, format='json')  # repeat: no second alert
-            self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+            self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json')
+            self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json')  # repeat: no second alert
+            self.anon.post('/api/ba/check-out/', {**GPS, 'token': token, 'report': REPORT}, format='json')
         titles = [c.args[1] for c in push.call_args_list]
         self.assertEqual(titles, ['BA checked in', 'BA checked out'])
         self.assertEqual(push.call_args_list[0].args[0], 'sup-test')

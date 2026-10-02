@@ -1,9 +1,15 @@
+from datetime import datetime, time
+from unittest import mock
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .models import Ambassador, MonthlyShift, ShiftAssignment, Store
+
+# The BA's position: check-in and check-out are refused without one
+GPS = {'latitude': 31.5204, 'longitude': 74.3587}
 
 
 class ShiftTestBase(TestCase):
@@ -122,7 +128,7 @@ class DailyAttendanceTests(ShiftTestBase):
         self.assertEqual(ShiftAssignment.objects.get().monthly_shift, self.monthly)
 
     def test_check_in_records_today_only(self):
-        res = self.client.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
+        res = self.client.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
         self.assertIn(res.status_code, (200, 201), res.data)
         row = ShiftAssignment.objects.get()
         self.assertEqual(row.date, timezone.localdate())
@@ -134,7 +140,7 @@ class DailyAttendanceTests(ShiftTestBase):
         self.assertEqual(ShiftAssignment.objects.get().shift_label, '12:00 PM – 8:00 PM')
 
     def test_deleting_keeps_checked_in_day(self):
-        self.client.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
+        self.client.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
         self.client.delete(f'/api/shifts/{self.monthly.id}/')
         self.assertEqual(MonthlyShift.objects.count(), 0)
         self.assertEqual(ShiftAssignment.objects.count(), 1)
@@ -147,7 +153,7 @@ class CampaignMetricsTests(ShiftTestBase):
         month = timezone.localdate().strftime('%Y-%m')
         self.post([self.row(month=month)])
         Consumer.objects.create(store=self.store, answers={})
-        self.client.post('/api/ba/check-in/', {'token': self.ba.invite_token}, format='json')
+        self.client.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
 
         res = self.client.get('/api/intelligence/campaign-metrics/')
         self.assertEqual(res.status_code, 200)
@@ -172,12 +178,22 @@ class CheckoutAttendanceTests(ShiftTestBase):
         self.today = timezone.localdate()
         self.post([self.row(month=self.today.strftime('%Y-%m'))])
         self.token = self.ba.invite_token
+        # The shift runs 10:00-14:00. The server clock is pinned to 15:00, so check-outs are on time
+        # unless a test moves it with self.set_clock(...).
+        patcher = mock.patch('api.ba_attendance_views._server_now')
+        self.clock = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.set_clock(time(15, 0))
+
+    def set_clock(self, at):
+        """The server's time of day today (Asia/Karachi)."""
+        self.clock.return_value = timezone.make_aware(datetime.combine(self.today, at))
 
     def check_in(self):
-        return self.client.post('/api/ba/check-in/', {'token': self.token}, format='json')
+        return self.client.post('/api/ba/check-in/', {**GPS, 'token': self.token}, format='json')
 
     def check_out(self, **body):
-        return self.client.post('/api/ba/check-out/', {'token': self.token, **body}, format='json')
+        return self.client.post('/api/ba/check-out/', {**GPS, 'token': self.token, **body}, format='json')
 
     def attendance(self, **params):
         return self.client.get('/api/attendance/', params).data
@@ -198,6 +214,7 @@ class CheckoutAttendanceTests(ShiftTestBase):
 
     def test_report_submission_marks_present(self):
         self.check_in()
+        self.set_clock(time(12, 0))  # before the 14:00 end: early
         res = self.check_out(report=REPORT, early_reason='Store closed early')
         self.assertEqual(res.status_code, 200, res.data)
         self.assertTrue(res.data['shift']['reportSubmitted'])
@@ -208,6 +225,18 @@ class CheckoutAttendanceTests(ShiftTestBase):
         self.assertEqual(data['results'][0]['earlyCheckoutReason'], 'Store closed early')
         self.assertEqual(data['summary']['present'], 1)
         self.assertEqual(data['summary']['early_checkouts'], 1)
+
+    def test_early_is_decided_on_karachi_time_at_the_boundary(self):
+        """Shift ends 14:00 Karachi = 09:00 UTC. The server's clock is UTC; the boundary must still be 14:00 Karachi."""
+        from datetime import timedelta, timezone as dt_timezone
+
+        self.check_in()
+        end_utc = timezone.make_aware(datetime.combine(self.today, time(14, 0))).astimezone(dt_timezone.utc)
+        self.assertEqual(end_utc.hour, 9)
+        self.clock.return_value = end_utc - timedelta(seconds=1)
+        self.assertEqual(self.check_out(report=REPORT).status_code, 400)  # 13:59:59 Karachi
+        self.clock.return_value = end_utc
+        self.assertEqual(self.check_out(report=REPORT).status_code, 200)  # 14:00:00 Karachi
 
     def test_not_checked_in_today(self):
         data = self.attendance()

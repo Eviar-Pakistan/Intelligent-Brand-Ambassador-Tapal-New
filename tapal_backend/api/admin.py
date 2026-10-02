@@ -231,6 +231,7 @@ class DailyReportAdmin(admin.ModelAdmin):
     list_display = ('id', 'ba_name', 'store', 'source', 'submitted_at')
     list_filter = ('source',)
     search_fields = ('ba_name',)
+    exclude = ('no_sales_confirmed',)  # for checking in the database only, not shown anywhere
 
 
 @admin.register(UserInterception)

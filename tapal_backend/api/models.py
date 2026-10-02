@@ -843,6 +843,9 @@ class DailyReport(models.Model):
     sales = models.JSONField(default=dict, blank=True)
     other_brands = models.JSONField(default=list, blank=True)
     submitted_at = models.DateTimeField()
+    # The Daily Sales step had every field empty or zero, the BA was asked "continue without sales?" and said yes.
+    # For checking in the database only: it is not returned by the API and not shown in the app or admin.
+    no_sales_confirmed = models.BooleanField(default=False)
 
     class Meta:
         ordering = ['-submitted_at']

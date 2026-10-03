@@ -16,6 +16,23 @@ export type BaPerformanceRecord = {
   teaBagSales: number
   weekSales: { week: number; sales: number }[]
   skuSales: { sku: string; sales: number }[]
+  /** Target / sales in packs (kg / grammage per SKU); only set for records built from live targets */
+  targetPacks?: number
+  salesPacks?: number
+}
+
+/** Packs for a target row's SKU lines: target = line.unit (or kg / grammage), sales = line.sales / grammage. */
+export function packsFromLines(
+  lines: { kg: number; unit?: number | null; grammage?: number; sales?: number | null }[] = [],
+) {
+  let target = 0
+  let sales = 0
+  for (const line of lines) {
+    const grammage = line.grammage && line.grammage > 0 ? line.grammage : 0
+    target += line.unit ?? (grammage ? line.kg / grammage : 0)
+    sales += grammage && line.sales ? line.sales / grammage : 0
+  }
+  return { target, sales }
 }
 
 export const baPerformanceTowns = (generated.towns as string[]).filter((t) => !EXCLUDED_TOWNS.has(t))
@@ -48,9 +65,9 @@ export type BaPerformanceAggregate = {
   productivePct: number
   targetKg: number
   salesKg: number
-  /** Packs implied by the same achievement rate as kilograms. */
+  /** Target in packs (kg / grammage per SKU). */
   targetUnits: number
-  /** Packs sold, from the SKU lines in the same filtered records. */
+  /** Packs sold (sales kg / grammage per SKU). */
   unitsSold: number
   achievementPct: number
   categorySales: { name: string; value: number }[]
@@ -242,10 +259,10 @@ export function recordsFromTargets(
     month: string
     targetKg: number
     salesKg: number
-    lines?: { sku: string; qty: number }[]
+    lines?: { sku: string; kg: number; unit?: number | null; grammage?: number; sales?: number | null }[]
   }[],
   /** BA interceptions (User interception form): shoppers the BA spoke with and what they bought */
-  interceptions: { baId: string; createdAt: string; currentSku: string }[] = [],
+  interceptions: { baId: string; createdAt: string; currentSku: string; status?: string }[] = [],
 ): BaPerformanceRecord[] {
   // Interceptions per BA and month (YYYY-MM, Karachi time).
   const monthOf = (iso: string) =>
@@ -255,7 +272,7 @@ export function recordsFromTargets(
     const key = `${item.baId}|${monthOf(item.createdAt)}`
     const entry = intercepted.get(key) ?? { total: 0, productive: 0 }
     entry.total += 1
-    if (item.currentSku.trim()) entry.productive += 1
+    if ((item.status ?? (item.currentSku.trim() ? 'productive' : '')) === 'productive') entry.productive += 1
     intercepted.set(key, entry)
   }
   return rows.map((row) => {
@@ -268,10 +285,13 @@ export function recordsFromTargets(
         const danedar = sku.includes('danedar')
         const hit =
           kind === 'tea' ? tea : kind === 'family' ? family && !tea : danedar && !tea && !family
-        return hit ? total + line.qty : total
+        return hit ? total + line.kg : total
       }, 0)
     const monthIndex = Number(row.month.split('-')[1]) - 1
+    const packs = packsFromLines(lines)
     return {
+      targetPacks: packs.target,
+      salesPacks: packs.sales,
       town: row.city?.trim() || 'Unknown',
       month: MONTH_ORDER[monthIndex] ?? row.month,
       store: row.storeName?.trim() || 'Store',
@@ -283,7 +303,7 @@ export function recordsFromTargets(
       familyPackSales: bucket('family'),
       teaBagSales: bucket('tea'),
       weekSales: [1, 2, 3, 4].map((week) => ({ week, sales: 0 })),
-      skuSales: lines.map((line) => ({ sku: line.sku, sales: line.qty })),
+      skuSales: lines.map((line) => ({ sku: line.sku, sales: line.kg })),
     }
   })
 }
@@ -307,9 +327,15 @@ export function aggregateBaPerformance(
   )
   const targetKg = Math.round(targetKgRaw)
   const salesKg = Math.round(salesKgRaw * 10) / 10
-  const unitsSold = rankBy === 'target' ? Math.round(salesKgRaw) : Math.round(unitsSoldRaw)
-  const targetUnits =
-    rankBy === 'target'
+  const hasPacks = records.some((r) => r.targetPacks !== undefined)
+  const unitsSold = hasPacks
+    ? Math.round(records.reduce((s, r) => s + (r.salesPacks ?? 0), 0))
+    : rankBy === 'target'
+      ? Math.round(salesKgRaw)
+      : Math.round(unitsSoldRaw)
+  const targetUnits = hasPacks
+    ? Math.round(records.reduce((s, r) => s + (r.targetPacks ?? 0), 0))
+    : rankBy === 'target'
       ? Math.round(unitsSoldRaw)
       : salesKgRaw > 0
         ? Math.round(unitsSoldRaw * (targetKgRaw / salesKgRaw))

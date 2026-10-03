@@ -5,12 +5,17 @@ import { ambassadors, stores } from '../../data/mock'
 import { useBaShift } from '../../context/BaShiftContext'
 import { useBaSession } from '../../lib/baAccounts'
 import { baCurrentStore, useCreatedStores } from '../../lib/storeRegistry'
-import { submitUserInterception } from '../../lib/userInterceptions'
+import {
+  INTERCEPTION_STATUSES,
+  submitUserInterception,
+  type InterceptionStatus,
+} from '../../lib/userInterceptions'
 
 const fieldClass =
   'w-full rounded-xl border border-slate-200 bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-brand-500 focus:bg-white focus:ring-2 focus:ring-brand-500/15'
 
 const empty = {
+  status: 'productive' as InterceptionStatus,
   name: '',
   contact: '',
   cityArea: '',
@@ -40,18 +45,21 @@ export function BaInterceptionPage() {
   const [savedName, setSavedName] = useState<string | null>(null)
 
   const phoneDigits = form.contact.replace(/\D/g, '')
-  // Every field just needs something in it — no minimum length.
+  const nonProductive = form.status === 'non_productive'
+  // Every field just needs something in it — no minimum length. A non-productive interception has no
+  // required fields (and no purchased SKU).
   const canSubmit =
-    form.name.trim() !== '' &&
+    nonProductive ||
+    (form.name.trim() !== '' &&
     phoneDigits !== '' &&
     form.cityArea.trim() !== '' &&
     form.previousBrand.trim() !== '' &&
     form.previousSku.trim() !== '' &&
     form.currentSku.trim() !== '' &&
-    form.feedback.trim() !== ''
+    form.feedback.trim() !== '')
 
   function set(key: keyof typeof empty) {
-    return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
       setForm((current) => ({ ...current, [key]: event.target.value }))
       setError(null)
     }
@@ -69,6 +77,7 @@ export function BaInterceptionPage() {
       storeId: store?.id ?? null,
       storeName: store?.name ?? '',
       ...form,
+      currentSku: nonProductive ? '' : form.currentSku,
     })
     setSavedName(saved.name)
     setForm(empty)
@@ -97,6 +106,15 @@ export function BaInterceptionPage() {
           <h2 className="text-sm font-bold text-navy-900">Shopper details</h2>
         </div>
 
+        <Field label="Interception type">
+          <select className={fieldClass} value={form.status} onChange={set('status')}>
+            {INTERCEPTION_STATUSES.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="Name">
           <input className={fieldClass} value={form.name} onChange={set('name')} placeholder="Ayesha" />
         </Field>
@@ -133,14 +151,16 @@ export function BaInterceptionPage() {
             placeholder="430gm"
           />
         </Field>
-        <Field label="Current purchased SKU">
-          <input
-            className={fieldClass}
-            value={form.currentSku}
-            onChange={set('currentSku')}
-            placeholder="Tapal Danedar 430gm"
-          />
-        </Field>
+        {!nonProductive && (
+          <Field label="Current purchased SKU">
+            <input
+              className={fieldClass}
+              value={form.currentSku}
+              onChange={set('currentSku')}
+              placeholder="Tapal Danedar 430gm"
+            />
+          </Field>
+        )}
         <Field label="Feedback">
           <textarea
             className={`${fieldClass} min-h-24 resize-y`}

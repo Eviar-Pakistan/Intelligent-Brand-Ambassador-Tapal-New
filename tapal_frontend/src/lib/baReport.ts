@@ -119,7 +119,20 @@ export type ReportSections = {
 }
 
 const STOCK_SKU_PREFIX = 'stock:'
+/** Older reports: SKU sales in kg. */
 const SALES_SKU_PREFIX = 'sku:'
+/** SKU sales in units (whole packs). */
+const SALES_UNIT_PREFIX = 'unit:'
+
+/** True for a Daily Sales SKU field: units must be whole numbers. */
+export function isUnitSalesKey(key: string) {
+  return key.startsWith(SALES_UNIT_PREFIX)
+}
+
+/** A whole number of units: digits only, no decimals, no sign. */
+export function isWholeUnits(value: string) {
+  return /^\d+$/.test(value.trim())
+}
 
 const DEFAULT_SECTIONS: ReportSections = {
   stock: defaultStockSections,
@@ -146,8 +159,8 @@ export function sectionsFromTarget(target: BaMonthTarget | null | undefined): Re
       fields: skus.map((sku) => ({ key: `${STOCK_SKU_PREFIX}${sku}`, label: sku })),
     })),
     skuSales: groups.map(([title, skus]) => ({
-      title: `${title} · sales (kg)`,
-      fields: skus.map((sku) => ({ key: `${SALES_SKU_PREFIX}${sku}`, label: sku })),
+      title: `${title} · sales (units)`,
+      fields: skus.map((sku) => ({ key: `${SALES_UNIT_PREFIX}${sku}`, label: sku })),
     })),
     fromTarget: true,
   }
@@ -172,8 +185,8 @@ export function sectionsFromCityList(list: CityReportSku[]): ReportSections {
       fields: items.map((item) => ({ key: `${STOCK_SKU_PREFIX}${item.sku}`, label: item.label })),
     })),
     skuSales: groups.map(([title, items]) => ({
-      title: `${title} · sales (kg)`,
-      fields: items.map((item) => ({ key: `${SALES_SKU_PREFIX}${item.sku}`, label: item.label })),
+      title: `${title} · sales (units)`,
+      fields: items.map((item) => ({ key: `${SALES_UNIT_PREFIX}${item.sku}`, label: item.label })),
     })),
     fromTarget: false,
   }
@@ -215,6 +228,8 @@ export const SESSION_KEYS = {
   stock: 'ba-stock-report',
   sales: 'ba-daily-sales',
   otherBrands: 'ba-other-brands',
+  /** Set when the BA chose to continue from Daily Sales with every field empty or 0. */
+  salesSkipped: 'ba-sales-skipped',
   excelName: 'ba-reports-excel',
 } as const
 
@@ -224,6 +239,7 @@ const COL = { value: 2, key: 4 } as const
 
 const NOTE_STOCK = `Type one of: ${STOCK_OPTIONS.join(' / ')}`
 const NOTE_NUMBER = 'Number (0 or more) — leave blank if none'
+const NOTE_UNITS = 'Whole number of units (0 or more), no decimals — leave blank if none'
 const NOTE_PRICE = 'Selling price in Rs.'
 
 const brandKey = (row: OtherBrandRow) => `brand-${row.id}`
@@ -238,7 +254,9 @@ export async function downloadBaReportTemplate() {
     for (const f of s.fields) rows.push([`Stock Report – ${s.title}`, f.label, '', NOTE_STOCK, f.key])
   }
   for (const s of [...fixedSalesSections, ...sections.skuSales]) {
-    for (const f of s.fields) rows.push([`Daily Sales – ${s.title}`, f.label, '', NOTE_NUMBER, f.key])
+    for (const f of s.fields) {
+      rows.push([`Daily Sales – ${s.title}`, f.label, '', isUnitSalesKey(f.key) ? NOTE_UNITS : NOTE_NUMBER, f.key])
+    }
   }
   for (const b of DEFAULT_OTHER_BRANDS) {
     rows.push(['Other Brands', b.name, '', `${NOTE_PRICE} — optional`, brandKey(b)])
@@ -252,7 +270,7 @@ export async function downloadBaReportTemplate() {
     [],
     [`1. Fill only the "Value" column (column C) on the "${TEMPLATE_SHEET}" sheet.`],
     [`2. Stock Report: every item is required. Type: ${STOCK_OPTIONS.join(' / ')}.`],
-    ['3. Daily Sales: numbers only (0 or more). Leave an item blank if it does not apply.'],
+    ['3. Daily Sales: numbers only (0 or more). SKU sales are whole units — no decimals. Leave an item blank if it does not apply.'],
     ['4. Other Brands: optional. Enter a selling price in Rs. only for packs you checked.'],
     ['5. Do not rename, move or delete rows, and do not edit the "Key" column.'],
     ['6. Save the file, then upload it from the BA app home screen after check-in.'],
@@ -352,7 +370,13 @@ export async function parseBaReportFile(file: File): Promise<ParseResult> {
   for (const s of [...fixedSalesSections, ...sections.skuSales]) {
     for (const f of s.fields) {
       const c = at(f.key, `Daily Sales – ${f.label}`)
-      if (c) sales[f.key] = parseNumber(c, `Daily Sales – ${s.title} – ${f.label}`)
+      if (!c) continue
+      if (isUnitSalesKey(f.key) && c.value && !isWholeUnits(c.value.replace(/,/g, ''))) {
+        errors.push(`Row ${c.row} (Daily Sales – ${s.title} – ${f.label}): units must be a whole number, no decimals (found "${c.value}").`)
+        sales[f.key] = ''
+        continue
+      }
+      sales[f.key] = parseNumber(c, `Daily Sales – ${s.title} – ${f.label}`)
     }
   }
 
@@ -387,6 +411,8 @@ export type StoredDailyReport = {
   stock: Record<string, string>
   sales: Record<string, string>
   otherBrands: OtherBrandRow[]
+  /** Sent to the server for checking only. Never shown in the app. */
+  noSalesConfirmed?: boolean
   /** Submitted on this device but not accepted by the server yet; sent again on the next sync. */
   unsent?: boolean
 }
@@ -466,7 +492,7 @@ export async function syncDailyReports() {
 /** Sends a completed daily report to the head-office dashboard inbox. */
 export function recordDailyReport(
   data: ParsedBaReport,
-  meta: { baId: string; baName: string; city: string; source: ReportSource },
+  meta: { baId: string; baName: string; city: string; source: ReportSource; noSalesConfirmed?: boolean },
 ) {
   const entry: StoredDailyReport = {
     id: `rep-${Date.now().toString(36)}${Math.random().toString(16).slice(2, 8)}`,
@@ -478,6 +504,7 @@ export function recordDailyReport(
     stock: data.stock,
     sales: data.sales,
     otherBrands: data.otherBrands,
+    ...(meta.noSalesConfirmed ? { noSalesConfirmed: true } : {}),
   }
   commitReports([{ ...entry, unsent: true }, ...reports])
   void sendReport(entry)
@@ -542,7 +569,9 @@ function linesFor(kind: ExtractKind, report: StoredDailyReport) {
         const legacy = legacySales.get(key)
         return legacy
           ? { section: legacy.section, item: legacy.label, value }
-          : { section: 'SKU sales (kg)', item: key.replace(SALES_SKU_PREFIX, ''), value }
+          : isUnitSalesKey(key)
+            ? { section: 'SKU sales (units)', item: key.replace(SALES_UNIT_PREFIX, ''), value }
+            : { section: 'SKU sales (kg)', item: key.replace(SALES_SKU_PREFIX, ''), value }
       })
     return [...fixed, ...skus]
   }

@@ -894,7 +894,7 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
   useEffect(() => {
     if (!open) return
     const row = targetForBa(baId, month, targets)
-    const current = (row?.lines ?? []).map((line) => ({ sku: line.sku, qty: String(line.qty) }))
+    const current = (row?.lines ?? []).map((line) => ({ sku: line.sku, qty: String(line.kg) }))
     setLines(current.length ? current : [{ sku: '', qty: '' }])
   }, [open, baId, month, targets])
 
@@ -921,8 +921,8 @@ function SetTargetModal({ open, onClose }: { open: boolean; onClose: () => void 
     const info = new Map((catalogue ?? []).map((row) => [row.sku, row]))
     const targetLines = filled.map((line) => ({
       sku: line.sku,
-      qty: kgOf(line),
-      count: unitsOf(line),
+      kg: kgOf(line),
+      unit: unitsOf(line),
       brand: info.get(line.sku)?.range,
       grammage: info.get(line.sku)?.grammage,
     }))

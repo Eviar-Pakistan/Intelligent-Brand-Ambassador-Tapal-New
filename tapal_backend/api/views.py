@@ -479,7 +479,7 @@ def sku_catalogue(request):
 def ba_targets(request):
     """
     GET ?month=YYYY-MM — every BA's target for the month (SKU lines included).
-    POST {rows: [{baCode, month, lines: [{sku, brand?, qty, sales?, grammage?}]}]} — save SKU targets per BA.
+    POST {rows: [{baCode, month, lines: [{sku, brand?, kg, sales?, grammage?}]}]} — save SKU targets per BA.
     """
     viewer = viewer_scope(request)  # Head Office, or a supervisor (read only, their stores)
     if viewer is None:

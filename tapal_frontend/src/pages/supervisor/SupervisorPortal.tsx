@@ -3,6 +3,7 @@ import { Link, Navigate } from 'react-router-dom'
 import { DesktopShell } from '../../components/AppShell'
 import { BaAttendancePage } from '../headOffice/BaAttendancePage'
 import { SupervisorTargets } from './SupervisorTargets'
+import { SupervisorSales } from './SupervisorSales'
 import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
 import { Card, Modal, PageHeader, StatusBadge, TableScroll, Tabs } from '../../components/ui'
 import { useComplaints } from '../../context/ComplaintsContext'
@@ -408,6 +409,16 @@ export function SupervisorTargetsPage() {
     <div className="space-y-5">
       {header}
       {supervisor && <SupervisorTargets />}
+    </div>
+  )
+}
+
+export function SupervisorSalesPage() {
+  const { supervisor, header } = usePortal('Sales', 'SKU-wise target, sales and achievement of a BA')
+  return (
+    <div className="space-y-5">
+      {header}
+      {supervisor && <SupervisorSales />}
     </div>
   )
 }

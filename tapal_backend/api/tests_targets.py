@@ -54,9 +54,9 @@ class StoreSkuTargetUploadTests(TestCase):
         target = AmbassadorMonthTarget.objects.get(ambassador=self.ba, month='2026-10')
         self.assertEqual(float(target.target_total), 22.4)
         lines = {line['sku']: line for line in target.lines}
-        self.assertEqual(lines['DD 100gm Tea Bag']['count'], 50.0)       # 5 kg / 0.1 kg per pack
-        self.assertEqual(lines['DD 1750gm Pouch']['count'], 10.0)
-        self.assertIsNone(lines['TD 290gm Pouch']['count'])              # grammage 0 -> no #DIV/0!
+        self.assertEqual(lines['DD 100gm Tea Bag']['unit'], 50.0)       # 5 kg / 0.1 kg per pack
+        self.assertEqual(lines['DD 1750gm Pouch']['unit'], 10.0)
+        self.assertIsNone(lines['TD 290gm Pouch']['unit'])              # grammage 0 -> no #DIV/0!
         self.assertEqual(lines['Elaichi 45gm']['brand'], 'Green Tea')
         shown = self.ho.get('/api/ba-targets/?month=2026-10').data['results'][0]
         self.assertEqual((shown['storeName'], shown['targetKg'], len(shown['lines'])), (STORE, 22.4, 4))
@@ -120,7 +120,7 @@ class SkuTemplateTests(StoreSkuTargetUploadTests):
         self.assertEqual(res.status_code, 200)
         book = openpyxl.load_workbook(BytesIO(res.content))
         rows = [r for r in book['Targets'].iter_rows(values_only=True) if any(r)]
-        self.assertEqual(rows[0], ('BA Code', 'SKU', 'Month', 'Brand', 'Target Kg', 'Grammage', 'Units'))
+        self.assertEqual(rows[0], ('BA Code', 'SKU', 'Month', 'Brand', 'Target Kg', 'Grammage', 'Target Units', 'Sales Kg', 'Sales Units'))
         self.assertTrue(str(rows[1][6]).startswith('=IF('))  # Units = Target Kg / Grammage formula
         self.assertEqual(len([r for r in book['SKU List'].iter_rows(values_only=True) if r[0]]) - 1, len(SKU_CATALOGUE))
         # saved targets come back filled in, one row per SKU
@@ -140,7 +140,7 @@ class SkuTemplateTests(StoreSkuTargetUploadTests):
         ]}]}, format='json')
         self.assertEqual(res.status_code, 201, res.data)
         t = AmbassadorMonthTarget.objects.get(ambassador=self.ba, month='2026-10')
-        lines = {l['sku']: (l['count'], l['qty']) for l in t.lines}
+        lines = {l['sku']: (l['unit'], l['kg']) for l in t.lines}
         self.assertEqual(lines, {'DD 100gm Tea Bag': (6, 0.6), 'DD 900gm Pouch': (10, 9.0)})
         self.assertEqual(float(t.target_total), 9.6)
 
@@ -162,16 +162,34 @@ class SkuTemplateTests(StoreSkuTargetUploadTests):
         t = AmbassadorMonthTarget.objects.get(ambassador=self.ba, month='2026-10')
         self.assertEqual((float(t.target_total), float(t.sales_total), t.store, len(t.lines)), (23.5, 0.0, self.store, 3))
         lines = {l['sku']: l for l in t.lines}
-        self.assertEqual(lines['DD 100gm Tea Bag']['count'], 50.0)
+        self.assertEqual(lines['DD 100gm Tea Bag']['unit'], 50.0)
         self.assertEqual((lines['DD 900gm Pouch']['brand'], lines['TD 80gm Hard Pack']['brand']), ('Danedar', 'Tezdum'))
-        self.assertEqual(lines['TD 80gm Hard Pack']['count'], 25.0)
+        self.assertEqual(lines['TD 80gm Hard Pack']['unit'], 25.0)
         shown = self.ho.get('/api/ba-targets/?month=2026-10').data['results'][0]
         self.assertEqual((shown['baCode'], len(shown['lines'])), (self.ba.ba_code, 3))
         # re-upload replaces the lines
         self.ho.post('/api/ba-targets/', {'rows': [{'baCode': self.ba.ba_code, 'month': '2026-10',
-                     'lines': [{'sku': 'DD 100gm Tea Bag', 'qty': 1}]}]}, format='json')
+                     'lines': [{'sku': 'DD 100gm Tea Bag', 'kg': 1}]}]}, format='json')
         t.refresh_from_db()
         self.assertEqual((float(t.target_total), float(t.sales_total), len(t.lines)), (1.0, 0.0, 1))
+
+    def test_unit_sales_are_whole_numbers_and_count_as_kg(self):
+        ba_app = APIClient()
+
+        def report(report_id, sales):
+            return ba_app.post('/api/daily-reports/', {
+                'token': self.ba.invite_token, 'id': report_id, 'source': 'checkout',
+                'submittedAt': '2026-10-03T18:00:00+05:00', 'stock': {}, 'sales': sales, 'otherBrands': [],
+            }, format='json')
+
+        self.ho.post('/api/ba-targets/', {'rows': [{'baCode': self.ba.ba_code, 'month': '2026-10', 'lines': [
+            {'sku': 'DD 100gm Tea Bag', 'kg': 10},
+        ]}]}, format='json')
+        self.assertEqual(report('rep-dec', {'unit:DD 100gm Tea Bag': '2.5'}).status_code, 400)
+        self.assertEqual(report('rep-ok', {'unit:DD 100gm Tea Bag': '12'}).status_code, 201)
+        t = AmbassadorMonthTarget.objects.get(ambassador=self.ba, month='2026-10')
+        self.assertEqual(t.lines[0]['sales'], 1.2)  # 12 units x 0.1 kg
+        self.assertEqual(float(t.sales_total), 1.2)
 
     def test_daily_sales_reports_drive_achievement(self):
         ba_app = APIClient()
@@ -186,7 +204,7 @@ class SkuTemplateTests(StoreSkuTargetUploadTests):
         # a report before any target exists still counts once the target is set
         report('rep-1', '2026-10-03T18:00:00+05:00', {'sku:DD 100gm Tea Bag': '2.5', 'totalInterceptions': '9'})
         self.ho.post('/api/ba-targets/', {'rows': [{'baCode': self.ba.ba_code, 'month': '2026-10', 'lines': [
-            {'sku': 'DD 100gm Tea Bag', 'qty': 10}, {'sku': 'TD 80gm Hard Pack', 'qty': 4},
+            {'sku': 'DD 100gm Tea Bag', 'kg': 10}, {'sku': 'TD 80gm Hard Pack', 'qty': 4},
         ]}]}, format='json')
         # next day: two reports, the later one replaces the earlier one for that day
         report('rep-2', '2026-10-04T12:00:00+05:00', {'sku:DD 100gm Tea Bag': '1', 'sku:TD 80gm Hard Pack': '1'})

@@ -115,10 +115,16 @@ export function FaceCheckInModal({
   confirmLabel = 'Check In',
   scanningMessage = 'No face detected. Look at the camera to check in.',
   readyMessage = 'Face detected. You can check in now.',
+  busy = false,
+  error = null,
 }: {
   open: boolean
   onClose: () => void
   onConfirmed: (selfie?: string) => void
+  /** The confirm is being saved: the button waits. */
+  busy?: boolean
+  /** Why the last confirm was not saved; shown so the BA can try again. */
+  error?: string | null
   title?: string
   confirmLabel?: string
   scanningMessage?: string
@@ -282,15 +288,19 @@ export function FaceCheckInModal({
           </div>
         </div>
 
+        {error && !busy && (
+          <div className="rounded-xl bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-700">{error}</div>
+        )}
+
         <div className="flex flex-col gap-2 sm:flex-row-reverse">
           <button
             type="button"
-            disabled={!faceReady}
+            disabled={!faceReady || busy}
             onClick={() => onConfirmed(videoRef.current ? captureVideoFrame(videoRef.current) : undefined)}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition enabled:hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 sm:w-auto sm:px-5"
           >
-            <Camera size={16} />
-            {confirmLabel}
+            {busy ? <Loader2 size={16} className="animate-spin" /> : <Camera size={16} />}
+            {busy ? 'Please wait…' : confirmLabel}
           </button>
           <button
             type="button"

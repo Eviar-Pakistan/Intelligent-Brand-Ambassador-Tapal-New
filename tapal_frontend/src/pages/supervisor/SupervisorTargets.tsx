@@ -129,12 +129,12 @@ export function SupervisorTargets() {
                     <ul className="mt-2 space-y-1 rounded-xl bg-slate-50 p-2 text-xs">
                       {lines.map((line, i) => {
                         const sales = Number(line.sales ?? 0)
-                        const linePct = achievementPct(Number(line.qty), sales)
+                        const linePct = achievementPct(Number(line.kg), sales)
                         return (
                           <li key={`${line.sku}-${i}`} className="flex items-center justify-between gap-2">
                             <span className="min-w-0 break-words text-slate-700">{line.sku}</span>
                             <span className="shrink-0 tabular-nums text-slate-500">
-                              {kg(sales)} / {kg(Number(line.qty))}{' '}
+                              {kg(sales)} / {kg(Number(line.kg))}{' '}
                               <span className={`font-semibold ${pctTone(linePct)}`}>{linePct}%</span>
                             </span>
                           </li>
@@ -204,12 +204,12 @@ export function SupervisorTargets() {
                               <tbody>
                                 {lines.map((line, i) => {
                                   const sales = Number(line.sales ?? 0)
-                                  const linePct = achievementPct(Number(line.qty), sales)
+                                  const linePct = achievementPct(Number(line.kg), sales)
                                   return (
                                     <tr key={`${line.sku}-${i}`} className="border-t border-slate-100">
                                       <td className="py-2 pr-3 font-medium">{line.sku}</td>
                                       <td className="py-2 pr-3">{line.brand || '—'}</td>
-                                      <td className="py-2 pr-3 text-right tabular-nums">{kg(Number(line.qty))}</td>
+                                      <td className="py-2 pr-3 text-right tabular-nums">{kg(Number(line.kg))}</td>
                                       <td className="py-2 pr-3 text-right tabular-nums">{kg(sales)}</td>
                                       <td className={`py-2 text-right font-semibold tabular-nums ${pctTone(linePct)}`}>
                                         {linePct}%

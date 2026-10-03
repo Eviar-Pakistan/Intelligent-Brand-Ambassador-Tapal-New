@@ -124,25 +124,6 @@ export async function djangoFetch(path: string, init: RequestInit = {}) {
   return fetch(path, { ...init, headers })
 }
 
-/**
- * Check-in stays instant in the app; this also tells Django when the BA has a real invite token.
- * Check-out is not here: it is sent with the report (BaShiftContext.submitCheckoutReport).
- */
-export function mirrorCheckIn(token: string | undefined, selfie?: string) {
-  if (!token || token.startsWith('demo-')) return
-  // The BA's GPS position goes with the check-in (sent without it if location is unavailable).
-  void import('./baLocation')
-    .then(({ getBaLocation }) => getBaLocation())
-    .then((location) =>
-      fetch('/api/ba/check-in/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, ...(location ?? {}), ...(selfie ? { selfie } : {}) }),
-      }),
-    )
-    .catch(() => undefined)
-}
-
 export function mirrorComplaint(token: string | undefined, storeId: number, complaint: string) {
   if (!token || token.startsWith('demo-') || !complaint.trim()) return
   void fetch('/api/ba/complaints/', {

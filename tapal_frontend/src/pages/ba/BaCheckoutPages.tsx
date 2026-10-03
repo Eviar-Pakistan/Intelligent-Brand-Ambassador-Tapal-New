@@ -4,9 +4,12 @@ import { ArrowLeft, CheckCircle2 } from 'lucide-react'
 import { useBaShift } from '../../context/BaShiftContext'
 import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
 import { useBaSession } from '../../lib/baAccounts'
+import { Modal } from '../../components/ui'
 import {
   DEFAULT_OTHER_BRANDS,
   fixedSalesSections,
+  isUnitSalesKey,
+  isWholeUnits,
   recordDailyReport,
   SESSION_KEYS,
   STOCK_OPTIONS,
@@ -37,10 +40,13 @@ function NumberField({
   label,
   value,
   onChange,
+  whole = false,
 }: {
   label: string
   value: string
   onChange: (v: string) => void
+  /** Units: whole numbers only, a decimal point can not be typed or pasted. */
+  whole?: boolean
 }) {
   return (
     <label className="block">
@@ -48,9 +54,11 @@ function NumberField({
       <input
         type="number"
         min={0}
-        inputMode="decimal"
+        step={whole ? 1 : 'any'}
+        inputMode={whole ? 'numeric' : 'decimal'}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={whole ? (e) => ['.', ',', 'e', 'E', '+', '-'].includes(e.key) && e.preventDefault() : undefined}
+        onChange={(e) => onChange(whole ? e.target.value.replace(/\D/g, '') : e.target.value)}
         placeholder="0"
         className="w-full rounded-xl border border-slate-200 bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-brand-500 focus:bg-white focus:ring-2 focus:ring-brand-500/15"
       />
@@ -88,6 +96,11 @@ function StockCheckboxes({
       </div>
     </div>
   )
+}
+
+/** True when every sales field is empty or 0. */
+function hasNoSales(values: Record<string, string>) {
+  return Object.values(values).every((value) => !(Number(value) > 0))
 }
 
 function reportPath(path: string, anytime: boolean) {
@@ -160,15 +173,37 @@ function DailySalesForm({ sections, anytime }: { sections: ReportSections; anyti
   const { city } = useBaShift()
   const all = [...fixedSalesSections, ...sections.skuSales]
   const [values, setValues] = useState(() => emptyNumeric(all.flatMap((section) => section.fields)))
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [unitError, setUnitError] = useState<string | null>(null)
 
   function setField(key: string, value: string) {
     setValues((prev) => ({ ...prev, [key]: value }))
+    setUnitError(null)
+  }
+
+  /** Saves the form and moves on. `confirmedNoSales` records that the BA was asked and chose to continue without sales. */
+  function saveAndContinue(confirmedNoSales: boolean) {
+    sessionStorage.setItem(SESSION_KEYS.sales, JSON.stringify(values))
+    if (confirmedNoSales) sessionStorage.setItem(SESSION_KEYS.salesSkipped, 'true')
+    else sessionStorage.removeItem(SESSION_KEYS.salesSkipped)
+    navigate(reportPath('/ba/other-brands', anytime))
   }
 
   function handleContinue(e: FormEvent) {
     e.preventDefault()
-    sessionStorage.setItem(SESSION_KEYS.sales, JSON.stringify(values))
-    navigate(reportPath('/ba/other-brands', anytime))
+    // Units are whole packs: a decimal can not be saved.
+    const bad = all
+      .flatMap((section) => section.fields)
+      .find((f) => isUnitSalesKey(f.key) && values[f.key] !== '' && !isWholeUnits(values[f.key] ?? ''))
+    if (bad) {
+      setUnitError(`${bad.label}: sales are counted in units, so enter a whole number (no decimals).`)
+      return
+    }
+    if (hasNoSales(values)) {
+      setConfirmOpen(true)
+      return
+    }
+    saveAndContinue(false)
   }
 
   return (
@@ -186,10 +221,20 @@ function DailySalesForm({ sections, anytime }: { sections: ReportSections; anyti
       {all.map((section) => (
         <Section key={section.title} title={section.title}>
           {section.fields.map((f) => (
-            <NumberField key={f.key} label={f.label} value={values[f.key]} onChange={(v) => setField(f.key, v)} />
+            <NumberField
+              key={f.key}
+              label={f.label}
+              value={values[f.key]}
+              whole={isUnitSalesKey(f.key)}
+              onChange={(v) => setField(f.key, v)}
+            />
           ))}
         </Section>
       ))}
+
+      {unitError && (
+        <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{unitError}</p>
+      )}
 
       <button
         type="submit"
@@ -197,6 +242,29 @@ function DailySalesForm({ sections, anytime }: { sections: ReportSections; anyti
       >
         Next · Competitor data
       </button>
+
+      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Continue without sales?">
+        <p className="text-sm text-slate-600">
+          You have not entered any sales. Every field is empty or 0. Are you sure you want to continue without filling
+          in your sales?
+        </p>
+        <div className="mt-5 flex flex-col gap-2 sm:flex-row-reverse">
+          <button
+            type="button"
+            onClick={() => saveAndContinue(true)}
+            className="w-full rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition hover:bg-brand-600 sm:w-auto sm:px-5"
+          >
+            Yes, continue
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(false)}
+            className="w-full rounded-xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 sm:w-auto sm:px-5"
+          >
+            Back
+          </button>
+        </div>
+      </Modal>
     </form>
   )
 }
@@ -340,6 +408,9 @@ export function BaOtherBrandsPage() {
         })
       }
     }
+    // Only counts if the BA confirmed on the Daily Sales step and the sales are still empty or 0.
+    const noSalesConfirmed =
+      !anytime && readSession<boolean>(SESSION_KEYS.salesSkipped, false) === true && hasNoSales(sales)
     recordDailyReport(
       { stock, sales, otherBrands: payload },
       {
@@ -347,9 +418,13 @@ export function BaOtherBrandsPage() {
         baName: account?.name ?? 'Brand Ambassador',
         city: account?.city || city,
         source: anytime ? 'anytime' : 'checkout',
+        noSalesConfirmed,
       },
     )
-    if (!anytime) sessionStorage.removeItem(SESSION_KEYS.stock)
+    if (!anytime) {
+      sessionStorage.removeItem(SESSION_KEYS.stock)
+      sessionStorage.removeItem(SESSION_KEYS.salesSkipped)
+    }
     setSubmitted(true)
   }
 

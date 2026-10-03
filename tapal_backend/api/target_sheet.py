@@ -139,8 +139,8 @@ def read_columns(path: Path) -> list[dict]:
             qty = _qty(sheet.cell(row, col).value)
             if qty is None:
                 continue
-            lines.append({'sku': str(sku).strip(), 'qty': float(qty)})
-        total = sum((Decimal(str(line['qty'])) for line in lines), Decimal('0'))
+            lines.append({'sku': str(sku).strip(), 'kg': float(qty)})
+        total = sum((Decimal(str(line['kg'])) for line in lines), Decimal('0'))
         total = total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         columns.append(
             {
@@ -264,10 +264,10 @@ def read_store_sku_sheet(file) -> tuple[dict[str, dict], list[str]]:
             {
                 'sku': sku,
                 'brand': str(cell(row, 'brand') or '').strip(),
-                'qty': float(kg),
+                'kg': float(kg),
                 'grammage': grams,
                 # packs = kg / kg-per-pack (the sheet's Count column); None when grammage is 0
-                'count': round(float(kg) / grams, 2) if grams > 0 else None,
+                'unit': round(float(kg) / grams) if grams > 0 else None,
             }
         )
     return stores, problems
@@ -318,7 +318,7 @@ def import_store_sku_targets(file, month: str, scope=None) -> dict:
         if not store:
             unmatched.append(name)
             continue
-        total = sum((Decimal(str(line['qty'])) for line in data['lines']), Decimal('0'))
+        total = sum((Decimal(str(line['kg'])) for line in data['lines']), Decimal('0'))
         total = total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         if total == 0:
             empty.append(store.name)
@@ -420,7 +420,7 @@ def build_sku_target_template(month: str, scope=None) -> bytes:
 
     existing: dict[int, dict[str, float]] = {}
     for target in AmbassadorMonthTarget.objects.filter(month=month, store_id__in=[s.id for s, _ in blocks]):
-        existing.setdefault(target.store_id, {line.get('sku'): line.get('qty') for line in (target.lines or [])})
+        existing.setdefault(target.store_id, {line.get('sku'): line.get('kg') for line in (target.lines or [])})
 
     book = openpyxl.Workbook()
     sheet = book.active
@@ -463,7 +463,9 @@ def build_sku_target_template(month: str, scope=None) -> bytes:
 
 # ─── BA SKU target template (one row per BA per SKU, keyed by BA Code) ─────
 
-BA_TEMPLATE_HEADERS = ['BA Code', 'SKU', 'Month', 'Brand', 'Target Kg', 'Grammage', 'Units']
+BA_TEMPLATE_HEADERS = [
+    'BA Code', 'SKU', 'Month', 'Brand', 'Target Kg', 'Grammage', 'Target Units', 'Sales Kg', 'Sales Units',
+]
 GRAMMAGE = {sku: grams for _brand, sku, grams in SKU_CATALOGUE}
 BRAND = {sku: brand for brand, sku, _grams in SKU_CATALOGUE}
 _CANONICAL_SKU = {sku.lower(): sku for _brand, sku, _grams in SKU_CATALOGUE}
@@ -518,7 +520,8 @@ def build_ba_sku_template(month: str, scope=None) -> bytes:
         for line in target.lines or []:
             sku = canonical_sku(line.get('sku'))
             if sku:
-                sheet.append([target.ambassador.ba_code, sku, month, BRAND[sku], line.get('qty')])
+                sheet.append([target.ambassador.ba_code, sku, month, BRAND[sku], line.get('kg')])
+                sheet.cell(sheet.max_row, 8).value = line.get('sales') or 0
     yellow = PatternFill('solid', fgColor='FFFF00')
     last = max(sheet.max_row, 1) + 500  # room to add rows
     list_end = len(SKU_CATALOGUE) + 1
@@ -527,8 +530,12 @@ def build_ba_sku_template(month: str, scope=None) -> bytes:
         sheet.cell(row, 5).fill = yellow
         # Grammage (kg per unit) from the SKU list; Units = Target Kg / Grammage
         sheet.cell(row, 6).value = f"=IF(B{row}=\"\",\"\",IFERROR(VLOOKUP(B{row},'SKU List'!$A$2:$C${list_end},3,FALSE),\"\"))"
-        sheet.cell(row, 7).value = f'=IF(OR(E{row}="",F{row}="",F{row}=0),"",ROUND(E{row}/F{row},2))'
-    for column, width in zip('ABCDEFG', (14, 30, 10, 16, 11, 10, 9)):
+        sheet.cell(row, 7).value = f'=IF(OR(E{row}="",F{row}="",F{row}=0),"",ROUND(E{row}/F{row},0))'
+        # Sales are not entered (they come from the BA's Daily Sales reports): 0 until the BA reports.
+        if sheet.cell(row, 8).value is None:
+            sheet.cell(row, 8).value = f'=IF(B{row}="","",0)'
+        sheet.cell(row, 9).value = f'=IF(OR(H{row}="",F{row}="",F{row}=0),"",ROUND(H{row}/F{row},0))'
+    for column, width in zip('ABCDEFGHI', (14, 30, 10, 16, 11, 10, 13, 10, 13)):
         sheet.column_dimensions[column].width = width
     sheet.freeze_panes = 'A2'
 
@@ -562,7 +569,8 @@ def build_ba_sku_template(month: str, scope=None) -> bytes:
         [f'4. Month: YYYY-MM, e.g. {month}.'],
         ['5. Brand: optional — it is taken from the SKU (see the "SKU List" sheet).'],
         ['6. Target Kg (yellow): the target for that SKU in kg. Rows with no Target Kg are skipped.'],
-        ['   Grammage and Units fill in by themselves: Units = Target Kg / Grammage (e.g. 0.6 kg / 0.1 = 6 units).'],
+        ['   Grammage and Target Units fill in by themselves: Target Units = Target Kg / Grammage (e.g. 0.6 kg / 0.1 = 6 units).'],
+        ['   Sales Kg and Sales Units are 0 by default and are not uploaded; they fill from the BA\'s Daily Sales reports.'],
         ['7. Uploading replaces that BA\'s SKU targets for that month with the rows in the file.'],
         ['   Sales are not entered: they come from the BA\'s Daily Sales reports. Achievement = sales / target x 100.'],
     ):
@@ -585,10 +593,10 @@ def _num(value):
 @transaction.atomic
 def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
     """
-    rows: [{baCode, month, lines: [{sku, qty}]}] — qty is the Target Kg; units = qty / the SKU's grammage
-    (a {sku, units} line is also accepted: kg = units x grammage). — sku must be one of SKU_CATALOGUE (brand and
+    rows: [{baCode, month, lines: [{sku, kg}]}] — kg is the Target Kg (older callers may send qty); unit = kg / the SKU's grammage
+    (a {sku, unit} line is also accepted: kg = unit x grammage). — sku must be one of SKU_CATALOGUE (brand and
     grammage are taken from the list).
-    Replaces each BA's SKU targets for the month. Target = sum of qty (kg). Sales are never set here:
+    Replaces each BA's SKU targets for the month. Target = sum of kg. Sales are never set here:
     they are the kg the BA reports per SKU in their Daily Sales reports (recompute_target_sales).
     """
     from .shifts import parse_month
@@ -612,8 +620,8 @@ def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
         lines, unknown, seen = [], [], set()
         for raw in row.get('lines') or []:
             name = str(raw.get('sku') or '').strip()
-            units = _num(raw.get('units'))
-            qty = _num(raw.get('qty'))
+            units = _num(raw.get('unit', raw.get('units')))
+            qty = _num(raw.get('kg', raw.get('qty')))
             if not name or (units is None and qty is None) or (units is not None and units < 0) or (qty is not None and qty < 0):
                 continue
             sku = canonical_sku(name)
@@ -630,9 +638,9 @@ def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
             lines.append({
                 'sku': sku,
                 'brand': BRAND[sku],
-                'qty': qty,
+                'kg': qty,
                 'grammage': grams,
-                'count': units if units is not None else (round(qty / grams, 2) if grams else None),
+                'unit': round(units) if units is not None else (round(qty / grams) if grams else None),
             })
         if unknown:
             errors.append(f'{code}: {", ".join(unknown)} — not in the SKU list, so not saved.')
@@ -641,7 +649,7 @@ def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
             errors.append(f'{code}: no SKU with a Target Kg for {month}.')
             continue
         existing = AmbassadorMonthTarget.objects.filter(ambassador=ba, month=month).first()
-        target = Decimal(str(sum(line['qty'] for line in lines))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        target = Decimal(str(sum(line['kg'] for line in lines))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         AmbassadorMonthTarget.objects.update_or_create(
             ambassador=ba,
             month=month,
@@ -658,7 +666,8 @@ def save_ba_sku_targets(rows: list[dict], scope=None) -> dict:
 
 # ─── Sales achievement from the BA's Daily Sales reports ───────────────────
 
-SALES_SKU_PREFIX = 'sku:'
+SALES_SKU_PREFIX = 'sku:'  # older reports: kg per SKU
+SALES_UNIT_PREFIX = 'unit:'  # SKU sales in units (whole packs); kg = units x the SKU's grammage
 
 
 def _kg(value) -> float | None:
@@ -683,8 +692,15 @@ def reported_sku_sales(ambassador_id, month: str) -> dict[str, float]:
         sold = {}
         for key, value in (report.sales or {}).items():
             kg = _kg(value)
-            if str(key).startswith(SALES_SKU_PREFIX) and kg is not None:
+            if kg is None:
+                continue
+            if str(key).startswith(SALES_SKU_PREFIX):
                 sold[str(key)[len(SALES_SKU_PREFIX):].strip().lower()] = kg
+            elif str(key).startswith(SALES_UNIT_PREFIX):
+                name = str(key)[len(SALES_UNIT_PREFIX):].strip()
+                grams = GRAMMAGE.get(canonical_sku(name) or '', 0)
+                if grams:
+                    sold[name.lower()] = round(kg * grams, 3)
         if sold:
             by_day[timezone.localtime(report.submitted_at).date()] = sold
     totals: dict[str, float] = {}

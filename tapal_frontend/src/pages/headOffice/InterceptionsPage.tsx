@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Download } from 'lucide-react'
 import { Button, Card, PageHeader, SearchInput, TableScroll, Tabs } from '../../components/ui'
 import { currentPortal, portalGet } from '../../lib/serverApi'
-import { switchedToTapal } from '../../lib/userInterceptions'
+import { interceptionStatusLabel, switchedToTapal } from '../../lib/userInterceptions'
 import type { UserInterception } from '../../lib/userInterceptions'
 
 function isoDay(d: Date) {
@@ -30,7 +30,7 @@ function when(iso: string) {
 async function download(rows: UserInterception[], from: string, to: string) {
   const XLSX = await import('xlsx')
   const sheet = XLSX.utils.aoa_to_sheet([
-    ['When', 'BA', 'Store', 'Shopper', 'Contact', 'City / Area', 'Previous brand', 'Previous SKU', 'Purchased SKU', 'Switched to Tapal', 'Feedback'],
+    ['When', 'BA', 'Store', 'Shopper', 'Contact', 'City / Area', 'Previous brand', 'Previous SKU', 'Purchased SKU', 'Type', 'Switched to Tapal', 'Feedback'],
     ...rows.map((r) => [
       when(r.createdAt),
       r.baName,
@@ -41,11 +41,12 @@ async function download(rows: UserInterception[], from: string, to: string) {
       r.previousBrand,
       r.previousSku,
       r.currentSku,
+      interceptionStatusLabel(r.status),
       switchedToTapal(r.previousBrand) ? 'Yes' : 'No',
       r.feedback,
     ]),
   ])
-  sheet['!cols'] = [18, 22, 26, 20, 14, 16, 16, 18, 18, 12, 40].map((wch) => ({ wch }))
+  sheet['!cols'] = [18, 22, 26, 20, 14, 16, 16, 18, 18, 14, 12, 40].map((wch) => ({ wch }))
   const book = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(book, sheet, 'Interceptions')
   XLSX.writeFile(book, `BA_Interceptions_${from}_to_${to}.xlsx`)
@@ -191,6 +192,7 @@ export function InterceptionsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div>{r.currentSku || '—'}</div>
+                      <div className="text-xs text-slate-400">{interceptionStatusLabel(r.status)}</div>
                       {switchedToTapal(r.previousBrand) && (
                         <span className="mt-1 inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
                           Switched

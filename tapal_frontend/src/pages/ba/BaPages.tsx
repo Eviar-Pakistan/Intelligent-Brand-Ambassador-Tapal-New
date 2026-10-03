@@ -12,6 +12,7 @@ import {
   CloudSun,
   Download,
   FileSpreadsheet,
+  Loader2,
   MapPin,
   Trophy,
   Upload,
@@ -37,7 +38,6 @@ import {
 import { FaceCheckInModal } from '../../components/FaceCheckInModal'
 import { Modal } from '../../components/ui'
 import { useBaSession } from '../../lib/baAccounts'
-import { mirrorCheckIn } from '../../lib/djangoApi'
 import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
 import { useUserInterceptions } from '../../lib/userInterceptions'
 import { BaOnboarding } from './BaOnboarding'
@@ -89,12 +89,16 @@ export function BaHomePage() {
     submitCheckoutReport,
     doneForToday,
     reloadShift,
+    shiftStatus,
+    retryShiftLoad,
   } = useBaShift()
 
   const [now, setNow] = useState(() => new Date())
   const [tempC, setTempC] = useState<string | null>(null)
   const [weatherText, setWeatherText] = useState('Loading…')
   const [faceCheckOpen, setFaceCheckOpen] = useState(false)
+  const [checkInBusy, setCheckInBusy] = useState(false)
+  const [checkInError, setCheckInError] = useState<string | null>(null)
   const [checkoutWarningOpen, setCheckoutWarningOpen] = useState(false)
   const [earlyReasonOpen, setEarlyReasonOpen] = useState(false)
   const [earlyReason, setEarlyReason] = useState('')
@@ -297,10 +301,28 @@ export function BaHomePage() {
             {initialsOf(baName)}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="font-semibold text-slate-900">{storeLabel || city || 'No store assigned'}</div>
-            <div className="text-sm text-slate-500">{shiftLabel}</div>
+            <div className="font-semibold text-slate-900">
+              {shiftStatus === 'ready' ? storeLabel || city || 'No store assigned' : city || 'Today'}
+            </div>
+            <div className="text-sm text-slate-500">
+              {shiftStatus === 'ready' ? shiftLabel : shiftStatus === 'loading' ? 'Loading…' : '—'}
+            </div>
           </div>
-          {!checkedIn && !doneForToday ? (
+          {/* Check In shows only once the server has said whether the BA is already checked in. */}
+          {shiftStatus === 'loading' ? (
+            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-500">
+              <Loader2 size={14} className="animate-spin" />
+              Checking your status…
+            </span>
+          ) : shiftStatus === 'error' ? (
+            <button
+              type="button"
+              onClick={retryShiftLoad}
+              className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 transition hover:bg-amber-100"
+            >
+              Retry
+            </button>
+          ) : !checkedIn && !doneForToday ? (
             <button
               type="button"
               onClick={() => setFaceCheckOpen(true)}
@@ -315,6 +337,12 @@ export function BaHomePage() {
             </span>
           )}
         </div>
+
+        {shiftStatus === 'error' && (
+          <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2.5 text-sm font-medium text-amber-800">
+            Could not load your status. Check your internet, then tap Retry.
+          </p>
+        )}
 
         {checkedIn && checkInAt && (
           <div className="mt-3 rounded-xl bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-700">
@@ -481,12 +509,24 @@ export function BaHomePage() {
 
       <FaceCheckInModal
         open={faceCheckOpen}
-        onClose={() => setFaceCheckOpen(false)}
-        onConfirmed={(selfie) => {
-          checkIn()
-          mirrorCheckIn(account?.accessToken, selfie)
+        onClose={() => {
+          setFaceCheckOpen(false)
+          setCheckInError(null)
+        }}
+        busy={checkInBusy}
+        error={checkInError}
+        onConfirmed={async (selfie) => {
+          // Checked in only once the server has saved it; otherwise the BA sees why and can retry.
+          setCheckInBusy(true)
+          setCheckInError(null)
+          const problem = await checkIn(selfie)
+          setCheckInBusy(false)
+          if (problem) {
+            setCheckInError(problem)
+            return
+          }
           // Re-read today's shift so the app matches what the server recorded.
-          window.setTimeout(reloadShift, 4000)
+          reloadShift()
           setFaceCheckOpen(false)
         }}
       />
@@ -1005,10 +1045,10 @@ export function BaPerformancePage() {
               <span className="text-right">%</span>
             </div>
             {target.lines
-              .filter((line) => line.qty > 0)
+              .filter((line) => line.kg > 0)
               .map((line) => {
                 const grams = line.grammage ?? 0
-                const units = line.count ?? (grams ? line.qty / grams : null)
+                const units = line.unit ?? (grams ? line.kg / grams : null)
                 const soldKg = Number(line.sales ?? 0)
                 const soldUnits = grams ? soldKg / grams : null
                 return (
@@ -1018,7 +1058,7 @@ export function BaPerformancePage() {
                   >
                     <span className="min-w-0 break-words text-slate-700">{line.sku}</span>
                     <span className="text-right tabular-nums">
-                      <span className="font-semibold text-slate-900">{fmtNum(line.qty)} kg</span>
+                      <span className="font-semibold text-slate-900">{fmtNum(line.kg)} kg</span>
                       <span className="block text-[10px] text-slate-500">
                         {units != null ? `${fmtNum(units)} units` : ''}
                       </span>
@@ -1030,7 +1070,7 @@ export function BaPerformancePage() {
                       </span>
                     </span>
                     <span className="text-right font-semibold text-brand-600 tabular-nums">
-                      {achievementPct(line.qty, soldKg)}%
+                      {achievementPct(line.kg, soldKg)}%
                     </span>
                   </div>
                 )

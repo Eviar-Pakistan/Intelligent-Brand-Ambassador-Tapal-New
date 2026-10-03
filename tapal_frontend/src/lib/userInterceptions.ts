@@ -3,6 +3,18 @@ import { currentBaAccountId } from './baAccounts'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
+export type InterceptionStatus = 'productive' | 'trialist' | 'non_productive'
+
+export const INTERCEPTION_STATUSES: { value: InterceptionStatus; label: string }[] = [
+  { value: 'productive', label: 'Productive' },
+  { value: 'trialist', label: 'Trialist' },
+  { value: 'non_productive', label: 'Non-Productive' },
+]
+
+export function interceptionStatusLabel(status: InterceptionStatus) {
+  return INTERCEPTION_STATUSES.find((item) => item.value === status)?.label ?? ''
+}
+
 /** A shopper a brand ambassador spoke with during a store visit. */
 export type UserInterception = {
   id: string
@@ -17,6 +29,7 @@ export type UserInterception = {
   previousSku: string
   currentSku: string
   feedback: string
+  status: InterceptionStatus
   createdAt: string
   /** Recorded on this device but not accepted by the server yet; sent again on the next sync. */
   unsent?: boolean
@@ -29,7 +42,8 @@ function load(): UserInterception[] {
     const raw = localStorage.getItem(STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : null
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(
+    return parsed
+      .filter(
       (row): row is UserInterception =>
         !!row &&
         typeof row.id === 'string' &&
@@ -41,7 +55,12 @@ function load(): UserInterception[] {
         typeof row.previousSku === 'string' &&
         typeof row.currentSku === 'string' &&
         typeof row.feedback === 'string',
-    )
+      )
+      // Records saved before the status existed: a purchased SKU meant productive.
+      .map((row) => ({
+        ...row,
+        status: row.status ?? (row.currentSku.trim() ? 'productive' : 'non_productive'),
+      }))
   } catch {
     return []
   }

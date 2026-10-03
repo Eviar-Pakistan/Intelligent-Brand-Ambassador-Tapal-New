@@ -25,6 +25,7 @@ import {
   SupervisorTargetsPage,
   SupervisorGate,
   SupervisorHomePage,
+  SupervisorSalesPage,
   SupervisorStoresPage,
   SupervisorSubmissionsPage,
 } from './pages/supervisor/SupervisorPortal'
@@ -151,6 +152,7 @@ export default function App() {
               <Route path="bas" element={<SupervisorBasPage />} />
               <Route path="submissions" element={<SupervisorSubmissionsPage />} />
               <Route path="stock" element={<StockBoardPage />} />
+              <Route path="sales" element={<SupervisorSalesPage />} />
             </Route>
 
             {/* Personal BA link — signs that ambassador in, then opens their app */}

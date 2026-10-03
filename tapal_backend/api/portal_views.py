@@ -865,6 +865,13 @@ def daily_reports(request):
     others = data.get('otherBrands') if isinstance(data.get('otherBrands'), list) else []
     if not (stock or sales or others):
         return Response({'detail': 'The report is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+    for key, value in sales.items():
+        # SKU sales are counted in units: whole packs only.
+        if str(key).startswith('unit:') and str(value).strip() and not re.fullmatch(r'\d+', str(value).strip()):
+            return Response(
+                {'detail': f'{str(key)[5:]}: sales are in units, so enter a whole number (no decimals).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
     report_id = _client_id(data.get('id'), 'rep')
     report, created = DailyReport.objects.get_or_create(
         id=report_id,
@@ -940,6 +947,7 @@ def interception_payload(r: UserInterception) -> dict:
         'previousSku': r.previous_sku,
         'currentSku': r.current_sku,
         'feedback': r.feedback,
+        'status': r.status,
         'createdAt': _iso(r.created_at),
     }
 
@@ -967,8 +975,14 @@ def interceptions(request):
     text = {k: str(data.get(k) or '').strip() for k in (
         'name', 'contact', 'cityArea', 'previousBrand', 'previousSku', 'currentSku', 'feedback', 'storeName'
     )}
-    if not text['name'] or not text['contact']:
+    outcome = str(data.get('status') or '').strip()
+    if outcome not in ('productive', 'trialist', 'non_productive'):
+        # older app versions: a purchased SKU means productive
+        outcome = 'productive' if text['currentSku'] else 'non_productive'
+    if outcome != 'non_productive' and (not text['name'] or not text['contact']):
         return Response({'detail': 'Name and contact are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if outcome == 'non_productive':
+        text['currentSku'] = ''  # nothing was bought
     store = Store.objects.filter(pk=data.get('storeId')).first() if data.get('storeId') else None
     store = store or _ba_store(scope.ambassador)
     record, created = UserInterception.objects.get_or_create(
@@ -985,6 +999,7 @@ def interceptions(request):
             'previous_sku': text['previousSku'][:120],
             'current_sku': text['currentSku'][:120],
             'feedback': text['feedback'][:2000],
+            'status': outcome,
             'created_at': _when(data.get('createdAt')),
         },
     )

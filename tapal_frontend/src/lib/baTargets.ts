@@ -2,13 +2,13 @@ import { useSyncExternalStore } from 'react'
 import { djangoFetch, djangoToken } from './djangoApi'
 import { loadSkuCatalogue } from './skuCatalogue'
 
-/** One SKU of a store target. qty is kg; from the store SKU sheet also brand, grammage (kg per pack) and packs. */
+/** One SKU of a store target. kg is the target in kg and unit the packs; also brand and grammage (kg per pack). */
 export type TargetLine = {
   sku: string
-  qty: number
+  kg: number
   brand?: string
   grammage?: number
-  count?: number | null
+  unit?: number | null
   /** Sales kg for this SKU, when recorded */
   sales?: number | null
 }
@@ -32,6 +32,15 @@ const STORAGE_KEY = 'ba-month-targets-v1'
 
 const seed: BaMonthTarget[] = []
 
+/** Older saved rows named the SKU target `qty` and the packs `count`; they are now `kg` and `unit`. */
+function normalizeLines(lines: unknown): TargetLine[] {
+  if (!Array.isArray(lines)) return []
+  return lines.map((raw) => {
+    const { qty, count, ...rest } = raw as TargetLine & { qty?: number; count?: number | null }
+    return { ...rest, kg: rest.kg ?? qty ?? 0, unit: rest.unit ?? count ?? null }
+  })
+}
+
 const SAMPLE_BA_IDS = new Set(['ayesha', 'hamza', 'sara', 'fatima', 'bilal'])
 
 function load(): BaMonthTarget[] {
@@ -49,7 +58,7 @@ function load(): BaMonthTarget[] {
         !SAMPLE_BA_IDS.has(row.baId),
     )
     const keys = new Set(stored.map((row) => `${row.baId}:${row.month}`))
-    return [...stored, ...seed.filter((row) => !keys.has(`${row.baId}:${row.month}`))]
+    return [...stored.map((row) => ({ ...row, lines: normalizeLines(row.lines) })), ...seed.filter((row) => !keys.has(`${row.baId}:${row.month}`))]
   } catch {
     return seed
   }
@@ -138,7 +147,7 @@ export function replaceTargetsFromApi(rows: BaMonthTarget[], month?: string) {
         ...row,
         baName: row.baName.trim(),
         salesKg: typeof row.salesKg === 'number' ? row.salesKg : 0,
-        lines: Array.isArray(row.lines) ? row.lines : [],
+        lines: normalizeLines(row.lines),
       })),
     ...kept,
   ])
@@ -251,7 +260,8 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
   table[headerAt].forEach((header, index) => columns.set(targetHeaderKey(header), index))
   const skuColumn = columns.has('sku name') ? 'sku name' : 'sku'
   // Target Kg is what Head Office fills (Units = Kg / Grammage). A file with only Units: kg = units x grammage.
-  const byUnits = !columns.has('target kg') && columns.has('units')
+  const unitsColumn = columns.has('target units') ? 'target units' : 'units'
+  const byUnits = !columns.has('target kg') && columns.has(unitsColumn)
   if ((!byUnits && !columns.has('target kg')) || !columns.has('month') || !columns.has(skuColumn)) {
     return { rows: [], errors: ['The template needs BA Code, SKU, Month and Target Kg columns. Download a fresh template.'] }
   }
@@ -278,7 +288,7 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
     const listed = skuByName.get(skuText.toLowerCase())
     const sku = listed?.sku ?? skuText
     const month = parseMonthCell(cell(row, 'month'), (value) => XLSX.SSF.parse_date_code(value))
-    const units = byUnits ? parseKg(cell(row, 'units')) : null
+    const units = byUnits ? parseKg(cell(row, unitsColumn)) : null
     const grammage = listed?.grammage || null
     const rawTarget = byUnits
       ? units === null
@@ -312,9 +322,9 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
     entry.lines!.push({
       sku,
       brand: listed?.range ?? '',
-      qty: target,
+      kg: target,
       grammage: grammage ?? undefined,
-      count: units ?? (grammage ? Math.round((target / grammage) * 100) / 100 : null),
+      unit: units ?? (grammage ? Math.round(target / grammage) : null),
     })
     entry.targetKg = Math.round((entry.targetKg + target) * 1000) / 1000
     grouped.set(key, entry)
@@ -339,7 +349,7 @@ export async function saveBaTargetsToServer(rows: BaMonthTarget[]) {
         month: row.month,
         // Targets only: sales come from the BA's Daily Sales reports.
         // Target Kg per SKU; the server works out units = kg / grammage.
-        lines: (row.lines ?? []).map(({ sku, brand, qty }) => ({ sku, brand, qty })),
+        lines: (row.lines ?? []).map(({ sku, brand, kg }) => ({ sku, brand, kg })),
       })),
     }),
   })

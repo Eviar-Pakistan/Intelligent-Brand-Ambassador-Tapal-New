@@ -7,6 +7,7 @@ import {
   aggregateBaPerformance,
   applySkuFilter,
   MONTH_ORDER,
+  packsFromLines,
   recordsFromTargets,
   type BaPerformanceRecord,
 } from '../../data/baPerformance'
@@ -373,18 +374,25 @@ export function BaPerformanceDashboardPage() {
   )
 
   const cityRows = useMemo(() => {
-    const grouped = new Map<string, { stores: Set<string>; ambassadors: number; target: number; sales: number }>()
+    const grouped = new Map<
+      string,
+      { stores: Set<string>; ambassadors: number; target: number; sales: number; targetUnits: number; salesUnits: number }
+    >()
     for (const record of scopedRecords) {
       const current = grouped.get(record.town) ?? {
         stores: new Set<string>(),
         ambassadors: 0,
         target: 0,
         sales: 0,
+        targetUnits: 0,
+        salesUnits: 0,
       }
       current.stores.add(record.store)
       current.ambassadors += 1
       current.target += record.targetKg
       current.sales += record.salesKg
+      current.targetUnits += record.targetPacks ?? 0
+      current.salesUnits += record.salesPacks ?? 0
       grouped.set(record.town, current)
     }
     return [...grouped.entries()]
@@ -394,6 +402,8 @@ export function BaPerformanceDashboardPage() {
         ambassadors: row.ambassadors,
         target: Math.round(row.target),
         sales: Math.round(row.sales * 10) / 10,
+        targetUnits: Math.round(row.targetUnits),
+        salesUnits: Math.round(row.salesUnits),
       }))
       .sort((a, b) => a.city.localeCompare(b.city))
   }, [scopedRecords])
@@ -742,9 +752,11 @@ export function BaPerformanceDashboardPage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <KpiCard label="Ambassadors" value={totalAmbassadors.toLocaleString()} hint={countScope} />
         <KpiCard label="Stores" value={totalStores.toLocaleString()} hint={countScope} />
+        <KpiCard label="Target (kg)" value={data.targetKg.toLocaleString()} />
         <KpiCard label="Target (units)" value={data.targetUnits.toLocaleString()} />
+        <KpiCard label="Sales (kg)" value={data.salesKg.toLocaleString()} />
         <KpiCard label="Sales (units)" value={data.unitsSold.toLocaleString()} />
-        <KpiCard label="Achievement" value={`${data.achievementPct}%`} />
+        <KpiCard label="Achievement (kg)" value={`${data.achievementPct}%`} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)] lg:grid-rows-[auto_auto]">
@@ -838,14 +850,17 @@ export function BaPerformanceDashboardPage() {
               <tr>
                 <th className="px-4 py-3">Ambassador</th>
                 <th className="px-4 py-3">Store</th>
+                <th className="px-4 py-3">Target (kg)</th>
                 <th className="px-4 py-3">Target (units)</th>
+                <th className="px-4 py-3">Sales (kg)</th>
                 <th className="px-4 py-3">Sales (units)</th>
-                <th className="px-4 py-3">Achievement</th>
+                <th className="px-4 py-3">Achievement (kg)</th>
               </tr>
             </thead>
             <tbody>
               {targetRows.map((row) => {
                 const pct = achievementPct(row.targetKg, row.salesKg)
+                const packs = packsFromLines(row.lines)
                 return (
                   <tr key={`${row.baId}-${row.month}`} className="border-t border-slate-100">
                     <td className="px-4 py-3 font-medium text-slate-900">
@@ -854,7 +869,9 @@ export function BaPerformanceDashboardPage() {
                     </td>
                     <td className="px-4 py-3 text-slate-600">{row.storeName || '—'}</td>
                     <td className="px-4 py-3 tabular-nums">{row.targetKg.toLocaleString()}</td>
+                    <td className="px-4 py-3 tabular-nums">{Math.round(packs.target).toLocaleString()}</td>
                     <td className="px-4 py-3 tabular-nums">{row.salesKg.toLocaleString()}</td>
+                    <td className="px-4 py-3 tabular-nums">{Math.round(packs.sales).toLocaleString()}</td>
                     <td className="px-4 py-3">
                       <span
                         className={
@@ -871,7 +888,7 @@ export function BaPerformanceDashboardPage() {
                   </tr>
                 )
               })}
-              {targetRows.length === 0 && <EmptyRow cols={5} />}
+              {targetRows.length === 0 && <EmptyRow cols={7} />}
             </tbody>
           </table>
         </TableScroll>
@@ -888,7 +905,9 @@ export function BaPerformanceDashboardPage() {
                 <th className="px-4 py-3">City</th>
                 <th className="px-4 py-3">Stores</th>
                 <th className="px-4 py-3">Ambassadors</th>
+                <th className="px-4 py-3">Target (kg)</th>
                 <th className="px-4 py-3">Target (units)</th>
+                <th className="px-4 py-3">Sales (kg)</th>
                 <th className="px-4 py-3">Sales (units)</th>
               </tr>
             </thead>
@@ -899,10 +918,12 @@ export function BaPerformanceDashboardPage() {
                   <td className="px-4 py-3 text-slate-600">{row.stores}</td>
                   <td className="px-4 py-3 font-semibold text-slate-900">{row.ambassadors}</td>
                   <td className="px-4 py-3 tabular-nums">{row.target.toLocaleString()}</td>
+                  <td className="px-4 py-3 tabular-nums">{row.targetUnits.toLocaleString()}</td>
                   <td className="px-4 py-3 tabular-nums">{row.sales.toLocaleString()}</td>
+                  <td className="px-4 py-3 tabular-nums">{row.salesUnits.toLocaleString()}</td>
                 </tr>
               ))}
-              {cityRows.length === 0 && <EmptyRow cols={5} />}
+              {cityRows.length === 0 && <EmptyRow cols={7} />}
             </tbody>
           </table>
         </TableScroll>

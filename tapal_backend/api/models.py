@@ -868,6 +868,12 @@ class UserInterception(models.Model):
     previous_sku = models.CharField(max_length=120, blank=True)
     current_sku = models.CharField(max_length=120, blank=True)
     feedback = models.TextField(blank=True)
+    # Outcome of the conversation: bought (productive), tried a sample (trialist) or did not buy.
+    status = models.CharField(
+        max_length=20,
+        choices=[('productive', 'Productive'), ('trialist', 'Trialist'), ('non_productive', 'Non-Productive')],
+        default='productive',
+    )
     created_at = models.DateTimeField()
 
     class Meta:

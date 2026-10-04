@@ -7,7 +7,7 @@ import {
   LogOut,
   MessageSquareWarning,
 } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useLayoutEffect } from 'react'
 import { useRole, type Role } from '../context/AppContext'
 import { cn } from './ui'
 import { useBrand } from '../context/BrandContext'
@@ -20,6 +20,18 @@ export function RoleSync({ role }: { role: Role }) {
   useEffect(() => {
     setRole(role)
   }, [role, setRole])
+  return null
+}
+
+/** Every BA screen (each checkout step too) opens at the top, not where the last one was scrolled to. */
+function ScrollToTop() {
+  const { pathname, search } = useLocation()
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0)
+    document.documentElement.scrollTop = 0
+    document.body.scrollTop = 0
+    document.querySelector('main')?.scrollTo(0, 0)
+  }, [pathname, search])
   return null
 }
 
@@ -43,6 +55,7 @@ export function BaShell() {
     <BaShiftProvider>
       <div className="flex min-h-[100dvh] flex-col bg-slate-50">
         <RoleSync role="ba" />
+        <ScrollToTop />
         <header className="safe-top sticky top-0 z-20 border-b border-slate-200 bg-white">
           <div className="mx-auto flex h-14 w-full max-w-lg items-center justify-between gap-2 px-4">
             <div className="min-w-0">

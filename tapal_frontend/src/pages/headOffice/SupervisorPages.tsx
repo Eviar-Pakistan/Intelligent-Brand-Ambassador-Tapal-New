@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { CalendarDays, Download, Eye, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
 import { Avatar, Button, Card, Modal, PageHeader, PasswordField, StatusBadge, TableScroll } from '../../components/ui'
 import { stores } from '../../data/mock'
@@ -482,8 +482,9 @@ function JourneyPlanCell({ supervisorId }: { supervisorId: string }) {
 /** Head Office opens the supervisor's portal as a preview — no password needed, and it is labelled. */
 function usePreview() {
   const navigate = useNavigate()
+  const location = useLocation()
   return (id: string) => {
-    signIn(id, true)
+    signIn(id, true, `${location.pathname}${location.search}${location.hash}`)
     navigate('/supervisor')
   }
 }

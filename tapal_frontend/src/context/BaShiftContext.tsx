@@ -39,6 +39,7 @@ type TodayShift = {
   storeName: string
   supervisorId: string | null
   checkedIn: boolean
+  attendanceType?: 'store' | 'training'
   checkedOut: boolean
   checkedInAt: string | null
   checkedOutAt: string | null
@@ -62,6 +63,7 @@ export type BaShiftState = {
   shiftLabel: string
   shiftEndLabel: string
   checkedIn: boolean
+  attendanceType: 'store' | 'training'
   checkInAt: Date | null
   checkedOut: boolean
   checkOutAt: Date | null
@@ -74,7 +76,7 @@ export type BaShiftState = {
    * Check-in counts only once the server has saved it. Returns an error message when it could not
    * be saved (nothing changes then), so the BA is never shown as checked in without a record.
    */
-  checkIn: (selfie?: string) => Promise<string | null>
+  checkIn: (selfie?: string, attendanceType?: 'store' | 'training') => Promise<string | null>
   endShift: () => void
   checkOut: () => void
   setEarlyCheckoutReason: (reason: string | null) => void
@@ -84,6 +86,7 @@ export type BaShiftState = {
    * then checks out here. Returns an error message when the server refuses (nothing changes then).
    */
   submitCheckoutReport: (report: ParsedBaReport, earlyReason?: string | null) => Promise<string | null>
+  submitTrainingCheckout: () => Promise<string | null>
   resetShift: () => void
   /** Checked in and out already today: no second check-in until tomorrow. */
   doneForToday: boolean
@@ -116,6 +119,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   const [clockOffsetMs, setClockOffsetMs] = useState(0)
   const [now, setNow] = useState(() => new Date())
   const [checkedIn, setCheckedIn] = useState(false)
+  const [attendanceType, setAttendanceType] = useState<'store' | 'training'>('store')
   const [checkInAt, setCheckInAt] = useState<Date | null>(null)
   const [checkedOut, setCheckedOut] = useState(false)
   const [checkOutAt, setCheckOutAt] = useState<Date | null>(null)
@@ -163,6 +167,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
           const s = data.shift
           if (s?.checkedIn) {
             setCheckedIn(true)
+            setAttendanceType(s.attendanceType === 'training' ? 'training' : 'store')
             if (s.checkedInAt) setCheckInAt(new Date(s.checkedInAt))
           }
           if (s?.checkedOut) {
@@ -203,7 +208,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   const doneForToday = checkedOut || !!todayShift?.checkedOut
 
   const checkIn = useCallback(
-    async (selfie?: string) => {
+    async (selfie?: string, attendance: 'store' | 'training' = 'store') => {
       if (doneForToday) return 'You have already checked in and out today. Check-in opens again tomorrow.'
       // No check-in without the server: every account, sample ones included, must be recorded there.
       if (!token) return 'Your account is not linked to the server, so you cannot check in. Please sign in again.'
@@ -215,21 +220,23 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
         const response = await fetch('/api/ba/check-in/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token, ...location, ...(selfie ? { selfie } : {}) }),
+          body: JSON.stringify({ token, attendance_type: attendance, ...location, ...(selfie ? { selfie } : {}) }),
         })
         const data = (await response.json().catch(() => ({}))) as {
           detail?: string
-          shift?: { checkedIn?: boolean; checkedInAt?: string | null } | null
+          shift?: { checkedIn?: boolean; checkedInAt?: string | null; attendanceType?: 'store' | 'training' } | null
         }
         // Only the server's own confirmation counts: anything else leaves the BA not checked in.
         if (!response.ok || !data.shift?.checkedIn) {
           return data.detail || 'Your check-in could not be saved. Please try again.'
         }
         if (data.shift.checkedInAt) t = new Date(data.shift.checkedInAt)
+        attendance = data.shift.attendanceType === 'training' ? 'training' : 'store'
       } catch {
         return 'No connection. You are not checked in — please try again.'
       }
       setCheckedIn(true)
+      setAttendanceType(attendance)
       setCheckInAt(t)
       setCheckedOut(false)
       setCheckOutAt(null)
@@ -281,8 +288,33 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     [token, earlyCheckoutReason],
   )
 
+  const submitTrainingCheckout = useCallback(async () => {
+    if (token && !token.startsWith('demo-')) {
+      try {
+        const location = await getBaLocation()
+        if (!location) return LOCATION_REQUIRED_MESSAGE
+        const response = await fetch('/api/ba/check-out/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, ...location }),
+        })
+        if (!response.ok) {
+          const data = (await response.json().catch(() => ({}))) as { detail?: string }
+          return data.detail || 'Your training check-out could not be saved. Please try again.'
+        }
+      } catch {
+        return 'No connection. Your training check-out was not saved — please try again.'
+      }
+    }
+    setCheckedOut(true)
+    setCheckOutAt(new Date())
+    setReportSubmitted(true)
+    return null
+  }, [token])
+
   const resetShift = useCallback(() => {
     setCheckedIn(false)
+    setAttendanceType('store')
     setCheckInAt(null)
     setCheckedOut(false)
     setCheckOutAt(null)
@@ -304,6 +336,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       shiftLabel: todayShift?.shift ?? 'No shift scheduled today',
       shiftEndLabel,
       checkedIn,
+      attendanceType,
       checkInAt,
       checkedOut,
       checkOutAt,
@@ -318,6 +351,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       setEarlyCheckoutReason,
       markReportSubmitted,
       submitCheckoutReport,
+      submitTrainingCheckout,
       resetShift,
       doneForToday,
       reloadShift,
@@ -329,6 +363,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       account?.city,
       shiftEndLabel,
       checkedIn,
+      attendanceType,
       checkInAt,
       checkedOut,
       checkOutAt,
@@ -342,6 +377,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       checkOut,
       markReportSubmitted,
       submitCheckoutReport,
+      submitTrainingCheckout,
       resetShift,
       doneForToday,
       reloadShift,

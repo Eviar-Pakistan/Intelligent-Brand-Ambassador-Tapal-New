@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { Camera, ChevronLeft, ChevronRight, MapPin } from 'lucide-react'
 import { FaceCheckInModal, captureVideoFrame } from '../../components/FaceCheckInModal'
 import { Button, Card, CardHeader, Modal, PageHeader, StatusBadge } from '../../components/ui'
@@ -20,7 +20,7 @@ import {
   type Weekday,
 } from '../../lib/journeyPlans'
 import { useCreatedStores } from '../../lib/storeRegistry'
-import { signOut, useSupervisorSession, type Supervisor } from '../../lib/supervisors'
+import { exitPreview, useSupervisorSession, type Supervisor } from '../../lib/supervisors'
 
 type VisitDraft = {
   storeId: number
@@ -233,6 +233,7 @@ function EvidenceShot({ label, src }: { label: string; src: string }) {
 
 function usePortal(title: string, description: string) {
   const { supervisor, preview } = useSupervisorSession()
+  const navigate = useNavigate()
   const header = (
     <>
       {preview && supervisor && (
@@ -240,9 +241,9 @@ function usePortal(title: string, description: string) {
           <span>
             Head Office preview — you are viewing the portal as <strong>{supervisor.name}</strong>.
           </span>
-          <Link to="/ho/supervisors" onClick={signOut} className="text-xs font-semibold text-amber-900 underline">
+          <button type="button" onClick={() => navigate(exitPreview())} className="text-xs font-semibold text-amber-900 underline">
             Exit preview
-          </Link>
+          </button>
         </div>
       )}
       <PageHeader title={title} description={supervisor ? `${supervisor.name} · ${description}` : description} />

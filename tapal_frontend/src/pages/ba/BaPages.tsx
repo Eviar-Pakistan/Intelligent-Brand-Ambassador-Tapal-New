@@ -3,7 +3,7 @@ import { portalSend } from '../../lib/serverApi'
 import { useKpiConfig } from '../../lib/kpiConfig'
 import { baStatusLabel, useBaMe } from '../../lib/baMe'
 import { Link, useNavigate } from 'react-router-dom'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   AlertTriangle,
@@ -30,10 +30,12 @@ import { useTrainingContent } from '../../context/TrainingContentContext'
 import {
   downloadBaReportTemplate,
   hasAnytimeStockSubmitted,
+  labeledSales,
   parseBaReportFile,
   recordDailyReport,
   saveBaReport,
   useDailyReports,
+  type StoredDailyReport,
 } from '../../lib/baReport'
 import { FaceCheckInModal } from '../../components/FaceCheckInModal'
 import { Modal } from '../../components/ui'
@@ -41,6 +43,7 @@ import { useBaSession } from '../../lib/baAccounts'
 import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
 import { useUserInterceptions } from '../../lib/userInterceptions'
 import { BaOnboarding } from './BaOnboarding'
+import { loadSkuCatalogue, type SkuRow } from '../../lib/skuCatalogue'
 
 function greetingFor(hour: number) {
   if (hour < 12) return 'Good Morning'
@@ -79,6 +82,7 @@ export function BaHomePage() {
     shiftLabel,
     shiftEndLabel,
     checkedIn,
+    attendanceType,
     checkInAt,
     canCheckOut,
     reportSubmitted,
@@ -87,6 +91,7 @@ export function BaHomePage() {
     checkIn,
     setEarlyCheckoutReason,
     submitCheckoutReport,
+    submitTrainingCheckout,
     doneForToday,
     reloadShift,
     shiftStatus,
@@ -97,8 +102,11 @@ export function BaHomePage() {
   const [tempC, setTempC] = useState<string | null>(null)
   const [weatherText, setWeatherText] = useState('Loading…')
   const [faceCheckOpen, setFaceCheckOpen] = useState(false)
+  const [checkInMode, setCheckInMode] = useState<'store' | 'training'>('store')
   const [checkInBusy, setCheckInBusy] = useState(false)
   const [checkInError, setCheckInError] = useState<string | null>(null)
+  const [trainingCheckoutBusy, setTrainingCheckoutBusy] = useState(false)
+  const [trainingCheckoutError, setTrainingCheckoutError] = useState<string | null>(null)
   const [checkoutWarningOpen, setCheckoutWarningOpen] = useState(false)
   const [earlyReasonOpen, setEarlyReasonOpen] = useState(false)
   const [earlyReason, setEarlyReason] = useState('')
@@ -169,12 +177,28 @@ export function BaHomePage() {
   }
 
   function handleCheckOutClick() {
+    if (attendanceType === 'training') {
+      void finishTrainingCheckout()
+      return
+    }
     if (isEarlyCheckout) {
       setEarlyReason('')
       setEarlyReasonOpen(true)
       return
     }
     setCheckoutWarningOpen(true)
+  }
+
+  async function finishTrainingCheckout() {
+    setTrainingCheckoutBusy(true)
+    setTrainingCheckoutError(null)
+    const problem = await submitTrainingCheckout()
+    setTrainingCheckoutBusy(false)
+    if (problem) {
+      setTrainingCheckoutError(problem)
+      return
+    }
+    reloadShift()
   }
 
   function submitEarlyReason() {
@@ -325,7 +349,7 @@ export function BaHomePage() {
           ) : !checkedIn && !doneForToday ? (
             <button
               type="button"
-              onClick={() => setFaceCheckOpen(true)}
+              onClick={() => { setCheckInMode('store'); setFaceCheckOpen(true) }}
               className="shrink-0 rounded-full bg-navy-900 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-600"
             >
               Check In
@@ -333,7 +357,7 @@ export function BaHomePage() {
           ) : (
             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-brand-50 px-3 py-1.5 text-xs font-bold text-brand-700">
               <CheckCircle2 size={14} />
-              {doneForToday ? 'Done for today' : 'Checked In'}
+              {doneForToday ? 'Done for today' : attendanceType === 'training' ? 'Checked in for training' : 'Checked in at store'}
             </span>
           )}
         </div>
@@ -357,11 +381,11 @@ export function BaHomePage() {
           <>
             <button
               type="button"
-              disabled={!canCheckOut}
+              disabled={!canCheckOut || trainingCheckoutBusy}
               onClick={handleCheckOutClick}
               className="mt-3 w-full rounded-2xl bg-navy-900 py-3 text-sm font-semibold text-white shadow-md shadow-navy-900/20 transition enabled:hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none"
             >
-              Check Out
+              {trainingCheckoutBusy ? 'Checking out…' : attendanceType === 'training' ? 'Check Out of Training' : 'Check Out'}
             </button>
             {!canCheckOut && (
               <p className="mt-2 text-center text-xs text-slate-500">
@@ -369,9 +393,12 @@ export function BaHomePage() {
               </p>
             )}
             {canCheckOut && isEarlyCheckout && (
-              <p className="mt-2 text-center text-xs text-amber-700">
+              attendanceType === 'store' && <p className="mt-2 text-center text-xs text-amber-700">
                 Shift ends at {shiftEndLabel}. Early checkout requires a reason.
               </p>
+            )}
+            {trainingCheckoutError && (
+              <p className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-center text-xs text-rose-700">{trainingCheckoutError}</p>
             )}
           </>
         )}
@@ -379,7 +406,7 @@ export function BaHomePage() {
         {reportSubmitted && (
           <div className="mt-3 flex items-center gap-2 rounded-xl bg-brand-50 px-3 py-2.5 text-sm font-semibold text-brand-700">
             <CheckCircle2 size={16} />
-            Today&apos;s report submitted
+            {attendanceType === 'training' ? 'Training attendance complete' : 'Today’s report submitted'}
           </div>
         )}
       </div>
@@ -432,7 +459,33 @@ export function BaHomePage() {
         )}
       </div>
 
-      {checkedIn && (
+      <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+        <div className="flex items-center gap-2">
+          <CheckCircle2 size={18} className="text-brand-600" />
+          <h3 className="text-sm font-bold text-slate-900">Training attendance</h3>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          Use this check-in when you are attending training instead of working at your store.
+        </p>
+        <button
+          type="button"
+          disabled={shiftStatus !== 'ready' || checkedIn || doneForToday}
+          onClick={() => { setCheckInMode('training'); setFaceCheckOpen(true) }}
+          className="mt-3 inline-flex w-full items-center justify-center rounded-2xl border border-brand-600 bg-white py-3 text-sm font-semibold text-brand-700 transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+        >
+          {checkedIn
+            ? attendanceType === 'training' ? 'Checked In for Training' : 'Unavailable · already checked in'
+            : doneForToday
+              ? 'Shift completed today'
+              : shiftStatus === 'loading'
+                ? 'Loading shift status…'
+                : shiftStatus === 'error'
+                  ? 'Retry shift status to check in'
+                  : 'Training Check In'}
+        </button>
+      </div>
+
+      {checkedIn && attendanceType === 'store' && (
         <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
           <div className="flex items-center gap-2">
             <FileSpreadsheet size={18} className="text-brand-600" />
@@ -515,11 +568,13 @@ export function BaHomePage() {
         }}
         busy={checkInBusy}
         error={checkInError}
+        title={checkInMode === 'training' ? 'Training face check-in' : 'Face check-in'}
+        confirmLabel={checkInMode === 'training' ? 'Check In for Training' : 'Check In at Store'}
         onConfirmed={async (selfie) => {
           // Checked in only once the server has saved it; otherwise the BA sees why and can retry.
           setCheckInBusy(true)
           setCheckInError(null)
-          const problem = await checkIn(selfie)
+          const problem = await checkIn(selfie, checkInMode)
           setCheckInBusy(false)
           if (problem) {
             setCheckInError(problem)
@@ -963,10 +1018,107 @@ function BaTrainingLibrary() {
   )
 }
 
+type RewardPeriod = 'today' | 'yesterday' | 'last7' | 'month'
+
+function periodBounds(period: RewardPeriod, now = new Date()) {
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const end = new Date(start)
+  if (period === 'yesterday') {
+    start.setDate(start.getDate() - 1)
+    end.setDate(end.getDate() - 1)
+  }
+  if (period === 'last7') start.setDate(start.getDate() - 6)
+  if (period === 'month') start.setDate(1)
+  return { start, end }
+}
+
+function localDay(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function packKg(sku: string, catalogue: SkuRow[], target: { sku: string; grammage?: number }[]) {
+  const name = sku.trim().toLowerCase()
+  const fromTarget = target.find((line) => line.sku.trim().toLowerCase() === name)?.grammage
+  if (fromTarget && fromTarget > 0) return fromTarget
+  const listed = catalogue.find((line) => line.sku.trim().toLowerCase() === name)?.grammage
+  if (listed && listed > 0) return listed
+  const carton = /(?:^|\s)(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(kg|g|gm|gram)\b/i.exec(sku)
+  if (carton) return Number(carton[1]) * Number(carton[2]) * (/^kg$/i.test(carton[3]) ? 1 : 0.001)
+  const size = /(\d+(?:\.\d+)?)\s*(kg|g|gm|gram)\b/i.exec(sku)
+  return size ? Number(size[1]) * (/^kg$/i.test(size[2]) ? 1 : 0.001) : 0
+}
+
+function salesForPeriod(
+  reports: StoredDailyReport[],
+  baId: string,
+  period: RewardPeriod,
+  catalogue: SkuRow[],
+  target: { sku: string; grammage?: number }[],
+) {
+  const { start, end } = periodBounds(period)
+  const startKey = localDay(start)
+  const endKey = localDay(end)
+  const byDay = new Map<string, StoredDailyReport>()
+  for (const report of [...reports].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))) {
+    if (report.baId !== baId) continue
+    const submitted = new Date(report.submittedAt)
+    const key = localDay(submitted)
+    if (key < startKey || key > endKey) continue
+    const skuLines = labeledSales(report.sales).filter((line) => line.section.toLowerCase().includes('sales'))
+    const hasSalesSubmission = report.source === 'checkout' ||
+      (report.source === 'excel' && skuLines.some((line) => Number(line.value) > 0))
+    if (hasSalesSubmission) byDay.set(key, report)
+  }
+  const bySku = new Map<string, { sku: string; kg: number; units: number }>()
+  for (const report of byDay.values()) {
+    for (const line of labeledSales(report.sales).filter((row) => row.section.toLowerCase().includes('sales'))) {
+      const amount = Number(line.value)
+      if (!Number.isFinite(amount) || amount <= 0) continue
+      const grams = packKg(line.item, catalogue, target)
+      const row = bySku.get(line.item.toLowerCase()) ?? { sku: line.item, kg: 0, units: 0 }
+      if (line.section.toLowerCase().includes('(units)')) {
+        row.units += amount
+        row.kg += grams * amount
+      } else {
+        row.kg += amount
+        if (grams > 0) row.units += amount / grams
+      }
+      bySku.set(line.item.toLowerCase(), row)
+    }
+  }
+  const items = [...bySku.values()].sort((a, b) => a.sku.localeCompare(b.sku))
+  const totals = items.reduce((total, item) => ({ kg: total.kg + item.kg, units: total.units + item.units }), { kg: 0, units: 0 })
+  return { ...totals, items }
+}
+
 export function BaPerformancePage() {
   const me = useBaMe()
+  const { account } = useBaSession()
+  const reports = useDailyReports()
+  const [period, setPeriod] = useState<RewardPeriod>('month')
+  const [catalogue, setCatalogue] = useState<SkuRow[]>([])
+  useEffect(() => { void loadSkuCatalogue().then(setCatalogue) }, [])
   const kpi = useKpiConfig()
   const target = me?.monthTarget ?? null
+  const sales = useMemo(
+    () => salesForPeriod(reports, account?.id ?? '', period, catalogue, target?.lines ?? []),
+    [reports, account?.id, period, catalogue, target?.lines],
+  )
+  const targetKg = target?.targetKg ?? 0
+  const targetUnits = (target?.lines ?? []).reduce((sum, line) => sum + (line.unit ?? (line.grammage ? line.kg / line.grammage : 0)), 0)
+  const detailRows = useMemo(() => {
+    const rows = new Map<string, { sku: string; targetKg: number; targetUnits: number; soldKg: number; soldUnits: number }>()
+    for (const line of target?.lines ?? []) rows.set(line.sku.toLowerCase(), {
+      sku: line.sku, targetKg: line.kg, targetUnits: line.unit ?? (line.grammage ? line.kg / line.grammage : 0), soldKg: 0, soldUnits: 0,
+    })
+    for (const line of sales.items) {
+      const existing = rows.get(line.sku.toLowerCase()) ?? { sku: line.sku, targetKg: 0, targetUnits: 0, soldKg: 0, soldUnits: 0 }
+      existing.soldKg = line.kg
+      existing.soldUnits = line.units
+      rows.set(line.sku.toLowerCase(), existing)
+    }
+    return [...rows.values()].sort((a, b) => a.sku.localeCompare(b.sku))
+  }, [target?.lines, sales.items])
   // Pay: base + conversion and session incentives, from the KPI settings Head Office set.
   const pay = me
     ? calculateIncentive(
@@ -1012,71 +1164,37 @@ export function BaPerformancePage() {
       </div>
 
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-        <div className="flex items-center justify-between gap-2">
-          <div className="text-sm font-bold text-slate-900">Target vs achievement</div>
-          <span className="text-[11px] font-semibold text-slate-500">
-            {formatTargetMonth(target?.month ?? currentMonthKey())}
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-bold text-slate-900">Sales & target achievement</div>
+            <div className="mt-0.5 text-[11px] text-slate-500">Sales for selected period · target for {formatTargetMonth(target?.month ?? currentMonthKey())}</div>
+          </div>
+          <select aria-label="Sales period" value={period} onChange={(e) => setPeriod(e.target.value as RewardPeriod)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-brand-500 sm:w-auto">
+            <option value="today">Today</option><option value="yesterday">Yesterday</option><option value="last7">Last 7 days</option><option value="month">Current month</option>
+          </select>
         </div>
-        {target ? (
-          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-            <div>
-              <div className="text-lg font-bold text-slate-900">{fmtNum(target.targetKg)}</div>
-              <div className="text-[10px] font-medium text-slate-500">Target Kg</div>
+        <div className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-3 lg:grid-cols-5">
+          <RewardMetric label="Target (kg)" value={fmtNum(Math.round(targetKg))} />
+          <RewardMetric label="Target (units)" value={fmtNum(Math.round(targetUnits))} />
+          <RewardMetric label="Sales (kg)" value={fmtNum(sales.kg)} />
+          <RewardMetric label="Sales (units)" value={fmtNum(Math.round(sales.units))} />
+          <RewardMetric label="Achievement" value={`${achievementPct(targetKg, sales.kg)}%`} highlight />
+        </div>
+        {!target && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">No target is assigned for this month. Target and achievement are shown as 0%; reported sales are still included.</p>}
+        <div className="mt-4 border-t border-slate-100 pt-3">
+          <div className="mb-2 text-xs font-bold tracking-wide text-slate-500 uppercase">Sales by SKU · selected period</div>
+          {detailRows.length === 0 ? <p className="py-2 text-xs text-slate-500">No SKU sales reported for this period.</p> : (
+            <div className="max-h-72 space-y-2 overflow-y-auto">
+              {detailRows.map((line) => (
+                <div key={line.sku} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2 border-b border-slate-50 pb-2 text-xs last:border-0">
+                  <span className="min-w-0 break-words font-medium text-slate-700">{line.sku}</span>
+                  <span className="text-right tabular-nums"><span className="block font-semibold text-slate-900">{fmtNum(line.soldKg)} kg</span><span className="text-[10px] text-slate-500">target {fmtNum(Math.round(line.targetKg))} kg · {fmtNum(Math.round(line.targetUnits))} units</span></span>
+                  <span className="text-right tabular-nums"><span className="block font-semibold text-slate-900">{fmtNum(Math.round(line.soldUnits))} units</span><span className="text-[10px] text-brand-600">{achievementPct(line.targetKg, line.soldKg)}%</span></span>
+                </div>
+              ))}
             </div>
-            <div>
-              <div className="text-lg font-bold text-slate-900">{fmtNum(target.salesKg)}</div>
-              <div className="text-[10px] font-medium text-slate-500">Sales Kg</div>
-            </div>
-            <div>
-              <div className="text-lg font-bold text-brand-600">{achievementPct(target.targetKg, target.salesKg)}%</div>
-              <div className="text-[10px] font-medium text-slate-500">Achievement</div>
-            </div>
-          </div>
-        ) : (
-          <p className="mt-2 text-sm text-slate-500">No target has been set for this month yet.</p>
-        )}
-        {target?.lines && target.lines.length > 0 && (
-          <div className="mt-3 max-h-64 overflow-y-auto border-t border-slate-100 pt-2 text-xs">
-            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-2 pb-1 text-[10px] font-semibold text-slate-500 uppercase">
-              <span>SKU</span>
-              <span className="text-right">Target</span>
-              <span className="text-right">Sold</span>
-              <span className="text-right">%</span>
-            </div>
-            {target.lines
-              .filter((line) => line.kg > 0)
-              .map((line) => {
-                const grams = line.grammage ?? 0
-                const units = line.unit ?? (grams ? line.kg / grams : null)
-                const soldKg = Number(line.sales ?? 0)
-                const soldUnits = grams ? soldKg / grams : null
-                return (
-                  <div
-                    key={line.sku}
-                    className="grid grid-cols-[1fr_auto_auto_auto] items-start gap-x-2 border-t border-slate-50 py-1.5"
-                  >
-                    <span className="min-w-0 break-words text-slate-700">{line.sku}</span>
-                    <span className="text-right tabular-nums">
-                      <span className="font-semibold text-slate-900">{fmtNum(line.kg)} kg</span>
-                      <span className="block text-[10px] text-slate-500">
-                        {units != null ? `${fmtNum(units)} units` : ''}
-                      </span>
-                    </span>
-                    <span className="text-right tabular-nums">
-                      <span className="font-semibold text-slate-900">{fmtNum(soldKg)} kg</span>
-                      <span className="block text-[10px] text-slate-500">
-                        {soldUnits != null ? `${fmtNum(soldUnits)} units` : ''}
-                      </span>
-                    </span>
-                    <span className="text-right font-semibold text-brand-600 tabular-nums">
-                      {achievementPct(line.kg, soldKg)}%
-                    </span>
-                  </div>
-                )
-              })}
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
@@ -1099,6 +1217,15 @@ function BaStatPill({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-2xl bg-white px-2 py-3 text-center shadow-sm ring-1 ring-black/5">
       <div className="text-lg font-bold text-slate-900">{value}</div>
+      <div className="mt-0.5 text-[10px] font-medium text-slate-500">{label}</div>
+    </div>
+  )
+}
+
+function RewardMetric({ label, value, highlight = false }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className="min-w-0 rounded-xl bg-slate-50 px-2 py-3">
+      <div className={`break-words text-lg font-bold ${highlight ? 'text-brand-600' : 'text-slate-900'}`}>{value}</div>
       <div className="mt-0.5 text-[10px] font-medium text-slate-500">{label}</div>
     </div>
   )

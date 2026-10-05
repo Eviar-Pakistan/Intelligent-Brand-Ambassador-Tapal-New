@@ -32,7 +32,7 @@ import { roleMeta, useDemo, useRole, type Role } from '../context/AppContext'
 import { useEffect, useState } from 'react'
 import { cn } from './ui'
 import { RoleSync } from './RoleLayouts'
-import { signOut, useSupervisorSession } from '../lib/supervisors'
+import { exitPreview, signOut, useSupervisorSession } from '../lib/supervisors'
 import {
   clearSupervisorNotifications,
   syncSupervisorNotifications,
@@ -293,8 +293,7 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
       return
     }
     if (kind === 'supervisor' && sv.preview) {
-      signOut()
-      navigate('/ho/supervisors')
+      navigate(exitPreview())
       return
     }
     djangoLogout()

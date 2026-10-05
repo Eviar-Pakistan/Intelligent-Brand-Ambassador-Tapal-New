@@ -59,7 +59,7 @@ export function SupervisorStoreCards({ supervisor }: { supervisor: Supervisor })
               <ProgressBar value={s.coverage} />
             </div>
 
-            <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+            <div className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-3">
               <Stat label="Engagement" value={`${s.engagement}%`} />
               <Stat label="Conversion" value={`${s.conversion}%`} />
               <Stat label="Footfall today" value={s.todayFootfall.toLocaleString()} />

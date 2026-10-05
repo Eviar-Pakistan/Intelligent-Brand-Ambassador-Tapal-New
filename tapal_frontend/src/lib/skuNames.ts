@@ -1,0 +1,52 @@
+const aliases: Record<string, string> = {
+  'danedar 3in1 elaichi 200gm': 'DD 3IN1 Elaichi 200gm',
+  'danedar 170gm hard pack': 'DD 170gm Hard Pack',
+  'danedar 85gm hard pack': 'DD 85gm Hard Pack',
+  'danedar elaichi 170gm hard pack': 'DD Elaichi 170gm Hard Pack',
+  'danedar elaichi 80gm hard pack': 'DD Elaichi 80gm Hard Pack',
+  'danedar 440gm jar pack new': 'DD 440gm Jar Pack New',
+  'danedar 350gm pouch': 'DD 350gm Pouch',
+  'danedar 430gm pouch': 'DD 430gm Pouch',
+  'danedar 900gm pouch': 'DD 900gm Pouch',
+  'danedar 100gm tea bag (envelope)': 'DD 100gm Tea Bag Envelope',
+  'danedar 100gmtea bag (envelope)': 'DD 100gm Tea Bag Envelope',
+  'danedar 100gm tea bag': 'DD 100gm Tea Bag',
+  'danedar 200gm rtb': 'DD 200gm RTB',
+  'danedar 200gm tea bag': 'DD 200gm Tea Bag',
+  'danedar 200gm tea bag (envelope)': 'DD 200gm Tea Bag Envelope',
+  'danedar 40gm': 'DD 40gm RTB',
+  'danedar 50gm tea bag': 'DD 50gm Tea Bag',
+  'danedar elaichi 100gm tea bag (env)': 'DD Elaichi 100gm Tea Bag Envelope',
+  'danedar 1200gm tea bag ooh': 'DD 1200gm Tea Bag OOH',
+  'family mixture 170gm hard pack': 'FM 170gm Hard Pack',
+  'family mixture 80gm hard pack': 'FM 80gm Hard Pack',
+  'family mixture 440gm jar pack': 'FM 440gm Jar Pack',
+  'family mixture 430gm pouch': 'FM 430gm Pouch',
+  'family mixture 900gm pouch': 'FM 900gm Pouch',
+  'elaichi 45gm green tea bag': 'Elaichi 45gm',
+  'ginger honey 45gm green tea bag': 'Ginger Honey 45gm',
+  'jasmine 100gm jar pack': 'Jasmine 100gm',
+  'jasmine 45gm green tea bag': 'Jasmine 45gm',
+  'lemon 135gm tea bag boxes': 'Lemon 135gm',
+  'lemon 45gm green tea bag': 'Lemon 45gm',
+  'lemon grass 100gm jar pack': 'Lemon Grass 100gm',
+  'mango 45gm green tea bag': 'Mango 45gm',
+  'mint 45gm green tea bag': 'Mint 45gm',
+  'pure green 45gm green tea bag': 'Pure Green 45gm',
+  'sog 48gm green tea bag': 'SOG 48gm',
+  'stawberry 45gm green tea bag': 'Strawberry 45gm',
+  'strawberry 45gm green tea bag': 'Strawberry 45gm',
+  'tropical peach 45gm green tea bag': 'Tropical Peach 45gm',
+  'tapal insta brew 750gm': 'Tapal Insta Brew 750gm',
+  'tezdum 170gm hard pack': 'TD 170gm Hard Pack',
+  'tezdum 80gm hard pack': 'TD 80gm Hard Pack',
+  'tezdum 430gm pouch': 'TD 430gm Pouch',
+  'tezdum 900gm pouch': 'TD 900gm Pouch',
+}
+
+/** Resolve target-sheet and older BA display names to the canonical SKU name. */
+export function canonicalSkuName(name: string) {
+  const normalized = name.replace(/\s+/g, ' ').trim().toLowerCase()
+  const withoutPackCount = normalized.replace(/\s+x\s*\d+(?:\.\d+)?(?:\s+boxes?)?(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim()
+  return aliases[normalized] ?? aliases[withoutPackCount] ?? name.replace(/\s+/g, ' ').trim()
+}

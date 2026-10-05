@@ -66,17 +66,19 @@ export function SupervisorTargets() {
   return (
     <div className="space-y-5">
       <Card>
-        <div className="flex flex-wrap items-end gap-3">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
           <label className="text-xs text-slate-500">
             Month
             <input
               type="month"
               value={month}
               onChange={(e) => e.target.value && setMonth(e.target.value)}
-              className="ml-2 rounded-xl border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700 outline-none focus:border-brand-500"
+              className="mt-1 block w-full max-w-full rounded-xl border border-slate-200 bg-white px-2 py-2 text-sm text-slate-700 outline-none focus:border-brand-500 sm:mt-0 sm:ml-2 sm:inline-block sm:w-auto"
             />
           </label>
-          <SearchInput placeholder="Search BA, code or store..." value={query} onChange={(e) => setQuery(e.target.value)} />
+          <div className="w-full min-w-0 sm:w-64">
+            <SearchInput placeholder="Search BA, code or store..." value={query} onChange={(e) => setQuery(e.target.value)} />
+          </div>
           {rows === null && <span className="text-xs text-slate-400">Loading…</span>}
         </div>
       </Card>

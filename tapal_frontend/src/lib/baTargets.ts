@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { djangoFetch, djangoToken } from './djangoApi'
-import { loadSkuCatalogue } from './skuCatalogue'
+import { loadSkuCatalogue, type SkuRow } from './skuCatalogue'
+import { canonicalSkuName } from './skuNames'
 
 /** One SKU of a store target. kg is the target in kg and unit the packs; also brand and grammage (kg per pack). */
 export type TargetLine = {
@@ -272,6 +273,20 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
     return { rows: [], errors: ['The SKU list could not be loaded from the server. Try again.'] }
   }
   const skuByName = new Map(catalogue.map((item) => [item.sku.replace(/\s+/g, ' ').trim().toLowerCase(), item]))
+  const additionalSkus: SkuRow[] = [
+    { range: 'Danedar', sku: 'DD 1200gm Tea Bag OOH', grammage: 1.2 },
+    { range: 'Danedar', sku: 'DD 3IN1 Elaichi 200gm', grammage: 0.2 },
+    { range: 'Danedar', sku: 'DD Elaichi 100gm Tea Bag Envelope', grammage: 0.1 },
+    { range: 'Green Tea', sku: 'Lemon Grass 100gm', grammage: 0.1 },
+    { range: 'Insta Brew', sku: 'Tapal Insta Brew 750gm', grammage: 0.75 },
+  ]
+  for (const item of additionalSkus) {
+    const canonical = item.sku.toLowerCase()
+    if (!skuByName.has(canonical)) {
+      catalogue.push(item)
+      skuByName.set(canonical, item)
+    }
+  }
   const byCode = new Map(
     people.filter((p) => p.baCode).map((person) => [person.baCode!.trim().toUpperCase(), person] as const),
   )
@@ -285,7 +300,7 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
     if (row.every((value) => String(value ?? '').trim() === '')) return
     const code = String(cell(row, 'ba code') ?? '').trim().toUpperCase()
     const skuText = String(cell(row, skuColumn) ?? '').replace(/\s+/g, ' ').trim()
-    const listed = skuByName.get(skuText.toLowerCase())
+    const listed = skuByName.get(canonicalSkuName(skuText).toLowerCase())
     const sku = listed?.sku ?? skuText
     const month = parseMonthCell(cell(row, 'month'), (value) => XLSX.SSF.parse_date_code(value))
     const units = byUnits ? parseKg(cell(row, unitsColumn)) : null

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link, Navigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { DesktopShell } from '../../components/AppShell'
 import { BaAttendancePage } from '../headOffice/BaAttendancePage'
 import { SupervisorTargets } from './SupervisorTargets'
@@ -9,7 +9,7 @@ import { Card, Modal, PageHeader, StatusBadge, TableScroll, Tabs } from '../../c
 import { useComplaints } from '../../context/ComplaintsContext'
 import { formatComplaintDate, type Complaint } from '../../data/complaints'
 import { labeledSales, labeledStock, useDailyReports, type StoredDailyReport } from '../../lib/baReport'
-import { signOut, supervisorOverview, useSupervisorSession, type Supervisor } from '../../lib/supervisors'
+import { exitPreview, supervisorOverview, useSupervisorSession, type Supervisor } from '../../lib/supervisors'
 import {
   SupervisorBaTable,
   SupervisorIncentiveCard,
@@ -26,6 +26,7 @@ export function SupervisorGate() {
 
 function usePortal(title: string, description: string) {
   const { supervisor, preview } = useSupervisorSession()
+  const navigate = useNavigate()
 
   const header = (
     <>
@@ -34,13 +35,9 @@ function usePortal(title: string, description: string) {
           <span>
             Head Office preview — you are viewing the portal as <strong>{supervisor.name}</strong>.
           </span>
-          <Link
-            to="/ho/supervisors"
-            onClick={signOut}
-            className="text-xs font-semibold text-amber-900 underline"
-          >
+          <button type="button" onClick={() => navigate(exitPreview())} className="text-xs font-semibold text-amber-900 underline">
             Exit preview
-          </Link>
+          </button>
         </div>
       )}
       <PageHeader title={title} description={supervisor ? `${supervisor.name} · ${description}` : description} />
@@ -115,7 +112,28 @@ function SupervisorComplaintList({ supervisor }: { supervisor: Supervisor }) {
     <>
       <Tabs tabs={['All', 'Customer', 'BA']} value={tab} onChange={setTab} />
       <Card padding={false}>
-        <TableScroll minWidth={860}>
+        <ul className="divide-y divide-slate-100 sm:hidden">
+          {filtered.map((c) => (
+            <li key={c.id} className="space-y-2 px-4 py-3">
+              <div className="flex min-w-0 items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-medium text-slate-900">{c.kind === 'customer' ? 'Customer' : 'BA'} complaint</div>
+                  <div className="break-words text-xs text-slate-500">{c.storeName} · {c.city}</div>
+                </div>
+                <StatusBadge status={c.status} />
+              </div>
+              <p className="break-words text-sm text-slate-700">
+                {c.kind === 'customer' ? `${c.brand} · ${c.sku} — ${c.complaint}` : c.subject}
+              </p>
+              <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+                <span className="min-w-0 truncate">{c.baName} · {formatComplaintDate(c.createdAt)}</span>
+                <button type="button" onClick={() => setSelected(c)} className="shrink-0 font-semibold text-brand-600">View</button>
+              </div>
+            </li>
+          ))}
+          {filtered.length === 0 && <li className="px-4 py-8 text-center text-sm text-slate-500">No complaints from your stores yet.</li>}
+        </ul>
+        <TableScroll minWidth={860} className="hidden sm:block">
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
               <tr>
@@ -383,7 +401,7 @@ function SubmissionSlice({
           {filled.map((row) => (
             <li key={`${row.section}-${row.item}`} className="flex justify-between gap-3">
               <span className="min-w-0 break-words text-slate-600">{row.item}</span>
-              <span className="shrink-0 font-semibold text-slate-900">{row.value}</span>
+              <span className="max-w-[55%] shrink text-right font-semibold break-words text-slate-900">{row.value}</span>
             </li>
           ))}
         </ul>
@@ -418,7 +436,7 @@ export function SupervisorSalesPage() {
   return (
     <div className="space-y-5">
       {header}
-      {supervisor && <SupervisorSales />}
+      {supervisor && <SupervisorSales supervisor={supervisor} />}
     </div>
   )
 }

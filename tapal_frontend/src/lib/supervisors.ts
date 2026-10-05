@@ -268,7 +268,7 @@ export async function authenticate(email: string, password: string): Promise<Sup
 }
 
 /** `preview` = Head Office looking at the portal as this supervisor, without their password. */
-export type SupervisorSession = { id: string; preview: boolean }
+export type SupervisorSession = { id: string; preview: boolean; returnTo?: string }
 
 const sessionListeners = new Set<() => void>()
 let sessionCache: string | null | undefined
@@ -290,14 +290,31 @@ function readSession(): SupervisorSession | null {
   }
 }
 
-export function signIn(id: string, preview = false) {
+export function signIn(id: string, preview = false, returnTo?: string) {
   try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ id, preview } satisfies SupervisorSession))
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ id, preview, ...(preview && returnTo ? { returnTo } : {}) } satisfies SupervisorSession))
   } catch {
     // ignore
   }
   sessionCache = undefined
   sessionListeners.forEach((l) => l())
+}
+
+/** Ends a Head Office preview without logging out the Head Office session, returning to its origin. */
+export function exitPreview() {
+  const session = readSession()
+  const candidate = session?.preview ? session.returnTo : null
+  const returnTo = candidate && candidate.startsWith('/') && !candidate.startsWith('//') && !candidate.startsWith('/supervisor')
+    ? candidate
+    : '/ho/supervisors'
+  try {
+    localStorage.removeItem(SESSION_KEY)
+  } catch {
+    // ignore
+  }
+  sessionCache = undefined
+  sessionListeners.forEach((listener) => listener())
+  return returnTo
 }
 
 export function signOut() {

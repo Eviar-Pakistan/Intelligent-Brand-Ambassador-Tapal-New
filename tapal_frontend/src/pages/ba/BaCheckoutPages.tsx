@@ -18,6 +18,7 @@ import {
   type OtherBrandRow,
   type ReportSections,
 } from '../../lib/baReport'
+import { portalGet } from '../../lib/serverApi'
 
 function emptyNumeric(fields: FieldDef[]) {
   return Object.fromEntries(fields.map((f) => [f.key, ''])) as Record<string, string>
@@ -375,6 +376,15 @@ export function BaOtherBrandsPage() {
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
 
+  useEffect(() => {
+    let active = true
+    void portalGet<{ results: Array<{ key: string; label: string; fieldType: 'text' | 'number' }> }>('/api/competitor-fields/', 'ba').then((data) => {
+      if (!active || !data?.results?.length) return
+      setRows(data.results.map((field) => ({ id: field.key, name: field.label, price: '', fieldType: field.fieldType })))
+    })
+    return () => { active = false }
+  }, [])
+
   function updateRow(id: string, patch: Partial<OtherBrandRow>) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
   }
@@ -479,11 +489,11 @@ export function BaOtherBrandsPage() {
               />
             </label>
             <label className="block">
-              <span className="mb-1 block text-xs font-semibold text-slate-600">Price (Rs.)</span>
+              <span className="mb-1 block text-xs font-semibold text-slate-600">{row.fieldType === 'text' ? 'Details' : 'Price / value'}</span>
               <input
-                type="number"
-                min={0}
-                inputMode="decimal"
+                type={row.fieldType ?? 'number'}
+                min={row.fieldType === 'text' ? undefined : 0}
+                inputMode={row.fieldType === 'text' ? 'text' : 'decimal'}
                 value={row.price}
                 onChange={(e) => updateRow(row.id, { price: e.target.value })}
                 placeholder="0"

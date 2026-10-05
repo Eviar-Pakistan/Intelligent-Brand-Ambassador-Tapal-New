@@ -5,6 +5,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { currentBaAccountId } from './baAccounts'
 import type { BaMonthTarget } from './baTargets'
+import { canonicalSkuName } from './skuNames'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
@@ -12,13 +13,12 @@ export type FieldDef = { key: string; label: string }
 
 export type ReportSection = { title: string; fields: FieldDef[] }
 
-export type OtherBrandRow = { id: string; name: string; price: string }
+export type OtherBrandRow = { id: string; name: string; price: string; fieldType?: 'text' | 'number' }
 
 export const interceptionFields: FieldDef[] = [
   { key: 'totalInterceptions', label: 'Total Interceptions' },
   { key: 'productiveCalls', label: 'Productive Calls' },
   { key: 'nonProductiveCalls', label: 'Non-Productive Calls' },
-  { key: 'totalSalesKg', label: 'Total Sales (Kg)' },
 ]
 
 export const competitiveFields: FieldDef[] = [
@@ -542,6 +542,8 @@ const legacySales = new Map(
   ),
 )
 const fixedSalesKeys = new Set(fixedSalesSections.flatMap((section) => section.fields.map((field) => field.key)))
+// Backend-derived total; retain it in report exports without showing it in the BA form.
+const derivedSalesKeys = new Set(['totalSalesKg'])
 
 export type ExtractKind = 'stock' | 'sales' | 'competitors'
 
@@ -563,15 +565,24 @@ function linesFor(kind: ExtractKind, report: StoredDailyReport) {
     const fixed = fixedSalesSections.flatMap((section) =>
       section.fields.map((field) => ({ section: section.title, item: field.label, value: report.sales[field.key] ?? '' })),
     )
+    if (report.sales.totalSalesKg !== undefined) {
+      fixed.push({ section: 'Interceptions', item: 'Total Sales (Kg)', value: report.sales.totalSalesKg })
+    }
     const skus = Object.entries(report.sales)
-      .filter(([key]) => !fixedSalesKeys.has(key))
+      .filter(([key]) => !fixedSalesKeys.has(key) && !derivedSalesKeys.has(key))
       .map(([key, value]) => {
         const legacy = legacySales.get(key)
+        const rawSkuName = key.startsWith(SALES_UNIT_PREFIX)
+          ? key.replace(SALES_UNIT_PREFIX, '')
+          : key.startsWith(SALES_SKU_PREFIX)
+            ? key.replace(SALES_SKU_PREFIX, '')
+            : legacy?.label ?? key
+        const item = canonicalSkuName(rawSkuName)
         return legacy
-          ? { section: legacy.section, item: legacy.label, value }
+          ? { section: legacy.section, item, value }
           : isUnitSalesKey(key)
-            ? { section: 'SKU sales (units)', item: key.replace(SALES_UNIT_PREFIX, ''), value }
-            : { section: 'SKU sales (kg)', item: key.replace(SALES_SKU_PREFIX, ''), value }
+            ? { section: 'SKU sales (units)', item, value }
+            : { section: 'SKU sales (kg)', item, value }
       })
     return [...fixed, ...skus]
   }

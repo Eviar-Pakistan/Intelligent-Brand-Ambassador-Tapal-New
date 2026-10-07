@@ -24,6 +24,7 @@ import {
   X,
   MessageSquareWarning,
   PackageCheck,
+  ScrollText,
   type LucideIcon,
   Target,
   UserCheck,
@@ -39,7 +40,7 @@ import {
   useSupervisorNotifications,
 } from '../lib/supervisorNotifications'
 import { enableSupervisorPush, supervisorPushPermission } from '../lib/supervisorPush'
-import { displayName, djangoLogout, useDjangoUser } from '../lib/djangoApi'
+import { displayName, djangoLogout, isMisUser, useDjangoUser } from '../lib/djangoApi'
 import { useBrand } from '../context/BrandContext'
 
 type NavItem = {
@@ -49,6 +50,9 @@ type NavItem = {
   end?: boolean
   section?: string
 }
+
+/** Paths hidden from MIS Head Office users (sidebar + direct URL). */
+export const MIS_HIDDEN_HO_PATHS = ['/ho/ba-performance', '/ho/stock', '/ho/dashboard', '/ho/audit-log'] as const
 
 const headOfficeNav: NavItem[] = [
   // { to: '/ho/dashboard', label: 'Campaign Metrics', icon: LayoutDashboard, end: true, section: 'Command' },
@@ -62,6 +66,7 @@ const headOfficeNav: NavItem[] = [
   { to: '/ho/attendance', label: 'BA Attendance', icon: ClipboardCheck, section: 'Operations' },
   { to: '/ho/interceptions', label: 'Interceptions', icon: UserRound, section: 'Operations' },
   { to: '/ho/complaints', label: 'Complaint Center', icon: MessageSquareWarning, section: 'Operations' },
+  { to: '/ho/audit-log', label: 'MIS Audit Log', icon: ScrollText, section: 'Operations' },
   // { to: '/ho/consumers', label: 'Consumers', icon: ShoppingBag, section: 'Intelligence' },
   { to: '/ho/optimization', label: 'AI Optimization', icon: Brain, section: 'Intelligence' },
   { to: '/ho/leaderboard', label: 'Leaderboard', icon: Trophy, section: 'Intelligence' },
@@ -154,6 +159,7 @@ const titles: Record<string, string> = {
   '/ho/deployment': 'Intelligent Deployment',
   '/ho/attendance': 'BA Attendance',
   '/ho/interceptions': 'User Interceptions',
+  '/ho/audit-log': 'MIS Audit Log',
   '/ho/complaints': 'Complaint Center',
   '/ho/consumers': 'Consumer Intelligence',
   '/ho/optimization': 'AI Optimization',
@@ -224,9 +230,16 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
     }
   }
   const meta = roleMeta[role]
-  const navGroups = groupNav(cfg.nav)
   // Who is signed in: the supervisor, or the Head Office / admin user from the server.
   const officeUser = useDjangoUser()
+  const navItems =
+    kind === 'headOffice' && isMisUser(officeUser)
+      ? cfg.nav.filter((item) => !(MIS_HIDDEN_HO_PATHS as readonly string[]).includes(item.to))
+      : cfg.nav
+  const navGroups = groupNav(navItems)
+  const officeRoleLabel = isMisUser(officeUser)
+    ? 'MIS'
+    : officeUser?.user_type_label || meta.label
   const person =
     kind === 'supervisor'
       ? {
@@ -236,7 +249,7 @@ export function DesktopShell({ kind }: { kind: ShellKind }) {
       : officeUser
         ? {
             name: displayName(officeUser),
-            detail: `${officeUser.user_type_label || meta.label} · ${officeUser.city || 'All cities'}`,
+            detail: `${officeRoleLabel} · ${officeUser.city || 'All cities'}`,
           }
         : { name: cfg.brand, detail: meta.label }
   const personInitials =

@@ -2,15 +2,29 @@ import { useEffect, useState } from 'react'
 
 const ACCESS_KEY = 'django-access-token'
 
+export type HoRole = 'standard' | 'mis'
+
 export type DjangoUser = {
   id: number
   email: string
   user_type: number
   user_type_label?: string
+  /** Head Office sub-role: standard (full UI) or mis (hides Dashboard & Stock) */
+  ho_role?: HoRole
   first_name?: string
   last_name?: string
   /** Blank = every city (Head Office); otherwise the one city this login covers */
   city?: string
+}
+
+/** MIS shares the Head Office app but cannot use Dashboard or Stock. */
+export function isMisUser(user: DjangoUser | null | undefined) {
+  return user?.user_type === 1 && user.ho_role === 'mis'
+}
+
+/** Landing page after Head Office sign-in (MIS skips Dashboard). */
+export function headOfficeHome(user: DjangoUser | null | undefined) {
+  return isMisUser(user) ? '/ho/daily-reports' : '/ho/ba-performance'
 }
 
 // The signed-in Head Office user, shared by every screen (loaded once per sign-in).

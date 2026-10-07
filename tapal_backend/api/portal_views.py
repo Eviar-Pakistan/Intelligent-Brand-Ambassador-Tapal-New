@@ -846,6 +846,118 @@ def report_payload(r: DailyReport) -> dict:
     }
 
 
+def _mis_patch_daily_report(request, scope: Scope):
+    """MIS may correct stock condition, sales quantities, and competitor prices on an existing report."""
+    if not scope.head_office or scope.supervisor is not None:
+        return _forbidden('Only MIS Head Office can edit daily reports.')
+    user = request.user
+    if not getattr(user, 'is_mis', False):
+        return _forbidden('Only MIS can edit daily reports.')
+
+    report_id = str(request.data.get('id') or '').strip()
+    if not report_id:
+        return Response({'detail': 'Report id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    report = (
+        DailyReport.objects.select_related('ambassador', 'submitted_by', 'store')
+        .filter(pk=report_id)
+        .first()
+    )
+    if not report:
+        return Response({'detail': 'Report not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if not scope.city.is_all:
+        allowed = (
+            (report.store_id and scope.city.allows_store(report.store_id))
+            or (report.ambassador_id and scope.city.allows_ambassador(report.ambassador_id))
+        )
+        if not allowed:
+            return Response({'detail': 'Report not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    before = {
+        'stock': report.stock,
+        'sales': report.sales,
+        'otherBrands': report.other_brands,
+    }
+    touched: list[str] = []
+    data = request.data
+    if 'stock' in data:
+        stock = data.get('stock') if isinstance(data.get('stock'), dict) else None
+        if stock is None:
+            return Response({'detail': 'Stock must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
+        report.stock = {str(k): str(v or '').strip() for k, v in stock.items()}
+        touched.append('stock')
+
+    if 'sales' in data:
+        sales = data.get('sales') if isinstance(data.get('sales'), dict) else None
+        if sales is None:
+            return Response({'detail': 'Sales must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
+        sales = {str(k): str(v or '').strip() for k, v in sales.items()}
+        sales.pop('totalSalesKg', None)
+        for key, value in sales.items():
+            if str(key).startswith('unit:') and value and not re.fullmatch(r'\d+', value):
+                return Response(
+                    {'detail': f'{str(key)[5:]}: sales are in units, so enter a whole number (no decimals).'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        sales['totalSalesKg'] = _total_sales_kg(sales)
+        report.sales = sales
+        touched.append('sales')
+
+    if 'otherBrands' in data:
+        others = data.get('otherBrands') if isinstance(data.get('otherBrands'), list) else None
+        if others is None:
+            return Response({'detail': 'Competitor data must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+        cleaned = []
+        for row in others:
+            if not isinstance(row, dict):
+                continue
+            cleaned.append(
+                {
+                    'id': str(row.get('id') or '')[:64],
+                    'name': str(row.get('name') or '').strip()[:120],
+                    'price': str(row.get('price') or '').strip()[:40],
+                }
+            )
+        report.other_brands = cleaned
+        touched.append('competitors')
+
+    report.save(update_fields=['stock', 'sales', 'other_brands'])
+    after = {
+        'stock': report.stock,
+        'sales': report.sales,
+        'otherBrands': report.other_brands,
+    }
+    ba_name = report.ambassador.name if report.ambassador_id else ''
+    from .audit import changed_fields, log_mis_action
+    from .models import MisAuditLog
+
+    diff = changed_fields(before, after)
+    if diff['before'] or diff['after']:
+        log_mis_action(
+            actor=user,
+            action=MisAuditLog.Action.DAILY_REPORT_EDIT,
+            entity_type='daily_report',
+            entity_id=report.pk,
+            summary=f"Edited {', '.join(touched) or 'report'} for {ba_name or 'BA'} ({report.source})",
+            before=diff['before'],
+            after=diff['after'],
+            meta={
+                'baId': report.ambassador_id,
+                'baName': ba_name,
+                'storeId': report.store_id,
+                'storeName': report.store.name if report.store_id else '',
+                'source': report.source,
+                'fields': touched,
+            },
+            request=request,
+        )
+    if report.ambassador_id and 'sales' in data:
+        from .target_sheet import recompute_target_sales
+
+        recompute_target_sales(report.ambassador_id, timezone.localtime(report.submitted_at).strftime('%Y-%m'))
+    return Response(report_payload(report))
+
+
 def _ba_store(ambassador: Ambassador) -> Store | None:
     """The store the BA works at today (their shift), else the store they are deployed to."""
     today = timezone.localdate()
@@ -893,10 +1005,10 @@ def _total_sales_kg(sales: dict) -> float:
     return round(total, 3)
 
 
-@api_view(['GET', 'POST'])
+@api_view(['GET', 'POST', 'PATCH'])
 @permission_classes([AllowAny])
 def daily_reports(request):
-    """GET reports (Head Office / supervisor / the BA's own) · POST — the BA submits one with their token."""
+    """GET reports · POST (BA submit) · PATCH (MIS Head Office edits stock/sales/competitors)."""
     scope = _scope(request, allow_ba=True)
     if not scope:
         return _denied()
@@ -907,6 +1019,9 @@ def daily_reports(request):
         else:
             qs = _ba_visible(qs, scope)
         return Response({'results': [report_payload(r) for r in qs[:500]]})
+
+    if request.method == 'PATCH':
+        return _mis_patch_daily_report(request, scope)
 
     if not scope.ambassador:
         return _forbidden('Only a BA submits a daily report.')

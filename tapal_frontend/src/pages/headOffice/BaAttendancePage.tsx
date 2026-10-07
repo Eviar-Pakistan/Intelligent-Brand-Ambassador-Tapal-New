@@ -98,6 +98,7 @@ export function useAttendance(dateFrom: string, dateTo: string, ambassadorId?: n
   const [data, setData] = useState<AttendanceResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [reloadTick, setReloadTick] = useState(0)
 
   useEffect(() => {
     if (ambassadorId === null) return
@@ -129,9 +130,9 @@ export function useAttendance(dateFrom: string, dateTo: string, ambassadorId?: n
       cancelled = true
       window.clearInterval(id)
     }
-  }, [dateFrom, dateTo, ambassadorId])
+  }, [dateFrom, dateTo, ambassadorId, reloadTick])
 
-  return { data, error, loading }
+  return { data, error, loading, reload: () => setReloadTick((n) => n + 1) }
 }
 
 async function downloadAttendance(rows: AttendanceRow[], from: string, to: string) {

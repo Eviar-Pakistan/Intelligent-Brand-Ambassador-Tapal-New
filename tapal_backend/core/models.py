@@ -9,6 +9,13 @@ class UserType(models.IntegerChoices):
     BRAND_AMBASSADOR = 4, 'Brand Ambassador'
 
 
+class HoRole(models.TextChoices):
+    """Head Office sub-role. Only meaningful when user_type is Head Office."""
+
+    STANDARD = 'standard', 'Standard'
+    MIS = 'mis', 'MIS'
+
+
 class AbstractCoreUser(AbstractUser):
     """
     Abstract base user for the Tapal Brand Ambassador ecosystem.
@@ -18,6 +25,10 @@ class AbstractCoreUser(AbstractUser):
         2 — Administrator
         3 — Store Manager
         4 — Brand Ambassador
+
+    ho_role (Head Office only):
+        standard — full Head Office UI
+        mis — Head Office with some pages hidden (Dashboard, Stock)
     """
 
     email = models.EmailField(unique=True)
@@ -26,6 +37,13 @@ class AbstractCoreUser(AbstractUser):
         default=UserType.BRAND_AMBASSADOR,
         db_index=True,
         help_text='1=Head Office, 2=Admin, 3=Store Manager, 4=Brand Ambassador',
+    )
+    ho_role = models.CharField(
+        max_length=20,
+        choices=HoRole.choices,
+        default=HoRole.STANDARD,
+        db_index=True,
+        help_text='Head Office only: standard (full UI) or mis (hides Dashboard & Stock).',
     )
     phone = models.CharField(max_length=20, blank=True)
     city = models.CharField(
@@ -52,6 +70,10 @@ class AbstractCoreUser(AbstractUser):
     @property
     def is_head_office(self):
         return self.user_type == UserType.HEAD_OFFICE
+
+    @property
+    def is_mis(self):
+        return self.is_head_office and self.ho_role == HoRole.MIS
 
     @property
     def is_admin_user(self):

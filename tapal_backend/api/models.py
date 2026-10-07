@@ -1130,3 +1130,38 @@ class CitySku(models.Model):
 
     def __str__(self):
         return f'{self.city} · {self.sku}'
+
+
+class MisAuditLog(models.Model):
+    """Immutable record of an action performed by an MIS Head Office user."""
+
+    class Action(models.TextChoices):
+        DAILY_REPORT_EDIT = 'daily_report.edit', 'Edit daily report'
+        ATTENDANCE_EDIT = 'attendance.edit', 'Edit attendance'
+        AMBASSADOR_EDIT = 'ambassador.edit', 'Edit ambassador'
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='mis_audit_logs',
+    )
+    actor_email = models.EmailField(blank=True, default='')
+    actor_name = models.CharField(max_length=200, blank=True, default='')
+    action = models.CharField(max_length=64, choices=Action.choices, db_index=True)
+    entity_type = models.CharField(max_length=64, blank=True, default='')
+    entity_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    summary = models.CharField(max_length=500, blank=True, default='')
+    before = models.JSONField(default=dict, blank=True)
+    after = models.JSONField(default=dict, blank=True)
+    meta = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        who = self.actor_email or self.actor_name or '?'
+        return f'{self.created_at:%Y-%m-%d %H:%M} · {who} · {self.action}'

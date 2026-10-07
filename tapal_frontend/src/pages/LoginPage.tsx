@@ -1,13 +1,13 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
 import { Navigate, useNavigate } from 'react-router-dom'
-import { roleMeta, useRole } from '../context/AppContext'
+import { useRole } from '../context/AppContext'
 import { useBrand } from '../context/BrandContext'
 import { DesktopShell } from '../components/AppShell'
 import { Button } from '../components/ui'
 import { authenticate, emailInUse, signIn as supervisorSignIn, signOut } from '../lib/supervisors'
 import { baEmailInUse, baSignOut } from '../lib/baAccounts'
-import { djangoLogin, djangoMe } from '../lib/djangoApi'
+import { djangoLogin, djangoMe, headOfficeHome } from '../lib/djangoApi'
 import { syncDjango } from '../lib/djangoSync'
 
 export function HeadOfficeGate() {
@@ -95,7 +95,7 @@ export function LoginPage({ initialTab = 'headOffice' }: { initialTab?: LoginTab
     baSignOut()
     setRole('headOffice')
     void syncDjango()
-    navigate(roleMeta.headOffice.home)
+    navigate(headOfficeHome(result.user))
   }
 
   return (

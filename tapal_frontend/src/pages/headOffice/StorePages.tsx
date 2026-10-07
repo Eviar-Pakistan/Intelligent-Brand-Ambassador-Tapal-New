@@ -656,9 +656,6 @@ function SchedulerPanel() {
             <Button size="sm" variant="secondary" onClick={() => shiftMonth(1)} aria-label="Next month">
               <ChevronRight size={15} />
             </Button>
-            <Button size="sm" onClick={() => openEditor()}>
-              <Plus size={14} /> Add shift
-            </Button>
             <Button
               size="sm"
               variant="secondary"
@@ -691,12 +688,7 @@ function SchedulerPanel() {
           <div className="py-10 text-center text-sm text-slate-500">Loading shifts…</div>
         ) : rows.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-500">
-            {schedule.length === 0 ? `No shifts for ${monthLabel || 'this month'}.` : 'No shifts match your search.'}{' '}
-            {schedule.length === 0 && (
-              <button className="font-semibold text-brand-600" onClick={() => openEditor()}>
-                Add one
-              </button>
-            )}
+            {schedule.length === 0 ? `No shifts for ${monthLabel || 'this month'}.` : 'No shifts match your search.'}
           </div>
         ) : (
           <TableScroll minWidth={720}>

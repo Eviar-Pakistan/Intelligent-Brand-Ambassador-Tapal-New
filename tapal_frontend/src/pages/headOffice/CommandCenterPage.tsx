@@ -13,15 +13,22 @@ import { aiRecommendations } from '../../data/mock'
 import { useBrand } from '../../context/BrandContext'
 import { LiveStoreMap, type StoreMapPin } from '../../components/LiveStoreMap'
 import { djangoFetch, djangoToken } from '../../lib/djangoApi'
-import { Button, Card, CardHeader, KpiCard, ProgressBar } from '../../components/ui'
+import { Button, Card, CardHeader, KpiCard, Modal, ProgressBar } from '../../components/ui'
 import {
   downloadReportExtract,
   labeledSales,
   labeledStock,
+  salesFieldEntries,
+  STOCK_OPTIONS,
+  stockFieldEntries,
+  updateDailyReportAsMis,
   useDailyReports,
   type ExtractKind,
+  type OtherBrandRow,
+  type StoredDailyReport,
 } from '../../lib/baReport'
-import { Download, Sparkles, Zap } from 'lucide-react'
+import { isMisUser, useDjangoUser } from '../../lib/djangoApi'
+import { Download, Search, Sparkles, Zap } from 'lucide-react'
 
 type MetricsPin = StoreMapPin & { status: string }
 
@@ -327,12 +334,24 @@ function MiniBars({ rows }: { rows: { label: string; value: number }[] }) {
 
 export function BaDailyReportsPage() {
   const reports = useDailyReports()
+  const officeUser = useDjangoUser()
+  const canEdit = isMisUser(officeUser)
   const [openId, setOpenId] = useState<string | null>(null)
+  const [nameQuery, setNameQuery] = useState('')
   const openReport = reports.find((report) => report.id === openId) ?? null
 
+  const query = nameQuery.trim().toLowerCase()
+  const filteredReports = query
+    ? reports.filter((report) => {
+        const name = (report.baName || '').toLowerCase()
+        const code = (report.baCode || '').toLowerCase()
+        return name.includes(query) || code.includes(query)
+      })
+    : reports
+
   function extract(kind: ExtractKind) {
-    if (reports.length === 0) return
-    void downloadReportExtract(kind, reports)
+    if (filteredReports.length === 0) return
+    void downloadReportExtract(kind, filteredReports)
   }
 
   return (
@@ -342,18 +361,21 @@ export function BaDailyReportsPage() {
           <h2 className="text-lg font-bold text-slate-900 sm:text-xl">BA daily reports</h2>
           <p className="text-sm text-slate-500">
             {reports.length
-              ? `${reports.length} received from BAs`
+              ? query
+                ? `${filteredReports.length} of ${reports.length} reports`
+                : `${reports.length} received from BAs`
               : 'Stock, daily sales, and competitor prices appear here when a BA submits'}
+            {canEdit ? ' · You can edit report values as MIS.' : ''}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="secondary" disabled={!reports.length} onClick={() => extract('stock')}>
+          <Button size="sm" variant="secondary" disabled={!filteredReports.length} onClick={() => extract('stock')}>
             <Download size={14} /> Stock Report
           </Button>
-          <Button size="sm" variant="secondary" disabled={!reports.length} onClick={() => extract('sales')}>
+          <Button size="sm" variant="secondary" disabled={!filteredReports.length} onClick={() => extract('sales')}>
             <Download size={14} /> Daily Sales
           </Button>
-          <Button size="sm" variant="secondary" disabled={!reports.length} onClick={() => extract('competitors')}>
+          <Button size="sm" variant="secondary" disabled={!filteredReports.length} onClick={() => extract('competitors')}>
             <Download size={14} /> Competitor data
           </Button>
         </div>
@@ -363,66 +385,255 @@ export function BaDailyReportsPage() {
         {reports.length === 0 ? (
           <p className="text-sm text-slate-500">No daily reports yet.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[36rem] text-left text-sm">
-              <thead className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                <tr>
-                  <th className="py-2 pr-3">BA</th>
-                  <th className="py-2 pr-3">Store</th>
-                  <th className="py-2 pr-3">City</th>
-                  <th className="py-2 pr-3">When</th>
-                  <th className="py-2 pr-3">Source</th>
-                  <th className="py-2"> </th>
-                </tr>
-              </thead>
-              <tbody>
-                {reports.map((report) => (
-                  <tr key={report.id} className="border-t border-slate-100">
-                    <td className="py-2.5 pr-3">
-                      <div className="font-semibold text-slate-900">{report.baName}</div>
-                      {report.baCode && <div className="font-mono text-xs text-slate-400">{report.baCode}</div>}
-                    </td>
-                    <td className="py-2.5 pr-3 text-slate-600">{report.storeName || '—'}</td>
-                    <td className="py-2.5 pr-3 text-slate-600">{report.city || '—'}</td>
-                    <td className="py-2.5 pr-3 text-slate-600">
-                      {new Date(report.submittedAt).toLocaleString('en-PK', {
-                        day: 'numeric',
-                        month: 'short',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </td>
-                    <td className="py-2.5 pr-3 capitalize text-slate-600">{report.source}</td>
-                    <td className="py-2.5 text-right">
-                      <button
-                        type="button"
-                        onClick={() => setOpenId(openId === report.id ? null : report.id)}
-                        className="text-xs font-semibold text-brand-600"
-                      >
-                        {openId === report.id ? 'Hide' : 'View'}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {openReport && (
-          <div className="mt-4 grid gap-4 lg:grid-cols-3">
-            <ReportSlice title="Stock Report" rows={labeledStock(openReport.stock)} />
-            <ReportSlice title="Daily Sales" rows={labeledSales(openReport.sales).filter((row) => row.value)} />
-            <ReportSlice
-              title="Competitor data"
-              rows={openReport.otherBrands.map((brand) => ({
-                section: 'Other Brands',
-                item: brand.name,
-                value: brand.price || '—',
-              }))}
-            />
-          </div>
+          <>
+            <label className="mb-4 flex max-w-md items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 focus-within:border-brand-500 focus-within:ring-2 focus-within:ring-brand-500/20">
+              <Search size={16} className="shrink-0 text-slate-400" />
+              <input
+                type="search"
+                value={nameQuery}
+                onChange={(e) => setNameQuery(e.target.value)}
+                placeholder="Search by BA name…"
+                className="w-full bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
+              />
+            </label>
+            {filteredReports.length === 0 ? (
+              <p className="text-sm text-slate-500">No reports match “{nameQuery.trim()}”.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[36rem] text-left text-sm">
+                  <thead className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                    <tr>
+                      <th className="py-2 pr-3">BA</th>
+                      <th className="py-2 pr-3">Store</th>
+                      <th className="py-2 pr-3">City</th>
+                      <th className="py-2 pr-3">When</th>
+                      <th className="py-2 pr-3">Source</th>
+                      <th className="py-2"> </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredReports.map((report) => (
+                      <tr key={report.id} className="border-t border-slate-100">
+                        <td className="py-2.5 pr-3">
+                          <div className="font-semibold text-slate-900">{report.baName}</div>
+                          {report.baCode && <div className="font-mono text-xs text-slate-400">{report.baCode}</div>}
+                        </td>
+                        <td className="py-2.5 pr-3 text-slate-600">{report.storeName || '—'}</td>
+                        <td className="py-2.5 pr-3 text-slate-600">{report.city || '—'}</td>
+                        <td className="py-2.5 pr-3 text-slate-600">
+                          {new Date(report.submittedAt).toLocaleString('en-PK', {
+                            day: 'numeric',
+                            month: 'short',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </td>
+                        <td className="py-2.5 pr-3 capitalize text-slate-600">{report.source}</td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setOpenId(report.id)}
+                            className="text-xs font-semibold text-brand-600"
+                          >
+                            {canEdit ? 'Edit' : 'View'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
         )}
       </Card>
+
+      <Modal
+        open={!!openReport}
+        onClose={() => setOpenId(null)}
+        wide
+        title={
+          openReport
+            ? `${openReport.baName}${openReport.storeName ? ` · ${openReport.storeName}` : ''}`
+            : 'Report'
+        }
+      >
+        {openReport &&
+          (canEdit ? (
+            <MisReportEditor report={openReport} onClose={() => setOpenId(null)} />
+          ) : (
+            <div className="space-y-3">
+              <p className="text-xs text-slate-500">
+                {[openReport.city, openReport.source, new Date(openReport.submittedAt).toLocaleString('en-PK')]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </p>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <ReportSlice title="Stock Report" rows={labeledStock(openReport.stock)} />
+                <ReportSlice title="Daily Sales" rows={labeledSales(openReport.sales).filter((row) => row.value)} />
+                <ReportSlice
+                  title="Competitor data"
+                  rows={openReport.otherBrands.map((brand) => ({
+                    section: 'Other Brands',
+                    item: brand.name,
+                    value: brand.price || '—',
+                  }))}
+                />
+              </div>
+            </div>
+          ))}
+      </Modal>
+    </div>
+  )
+}
+
+function MisReportEditor({ report, onClose }: { report: StoredDailyReport; onClose: () => void }) {
+  const [stock, setStock] = useState(() => ({ ...report.stock }))
+  const [sales, setSales] = useState(() => ({ ...report.sales }))
+  const [brands, setBrands] = useState<OtherBrandRow[]>(() =>
+    report.otherBrands.map((row) => ({ ...row })),
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    setStock({ ...report.stock })
+    setSales({ ...report.sales })
+    setBrands(report.otherBrands.map((row) => ({ ...row })))
+    setError(null)
+    setSaved(false)
+  }, [report.id, report.stock, report.sales, report.otherBrands])
+
+  const stockRows = stockFieldEntries(stock)
+  const salesRows = salesFieldEntries(sales)
+  const totalKg = sales.totalSalesKg
+
+  async function save() {
+    setBusy(true)
+    setError(null)
+    setSaved(false)
+    try {
+      const next = await updateDailyReportAsMis(report.id, { stock, sales, otherBrands: brands })
+      setStock({ ...next.stock })
+      setSales({ ...next.sales })
+      setBrands(next.otherBrands.map((row) => ({ ...row })))
+      setSaved(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the report.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-slate-500">
+        {[report.city, report.source, new Date(report.submittedAt).toLocaleString('en-PK')]
+          .filter(Boolean)
+          .join(' · ')}
+        {' · '}
+        <span className="font-semibold text-brand-700">Editable (MIS)</span>
+      </p>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="rounded-xl bg-slate-50 p-3">
+          <div className="text-xs font-bold tracking-wide text-slate-500 uppercase">Stock Report</div>
+          {stockRows.length === 0 ? (
+            <p className="mt-2 text-xs text-slate-500">Nothing submitted.</p>
+          ) : (
+            <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto text-xs">
+              {stockRows.map((row) => (
+                <li key={row.key} className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 flex-1 text-slate-600">{row.label}</span>
+                  <select
+                    value={STOCK_OPTIONS.includes(row.value as (typeof STOCK_OPTIONS)[number]) ? row.value : row.value || 'In Stock'}
+                    onChange={(e) => setStock((prev) => ({ ...prev, [row.key]: e.target.value }))}
+                    className="max-w-[9.5rem] rounded-lg border border-slate-200 bg-white px-2 py-1 font-semibold text-slate-900 outline-none focus:border-brand-500"
+                  >
+                    {!STOCK_OPTIONS.includes(row.value as (typeof STOCK_OPTIONS)[number]) && row.value ? (
+                      <option value={row.value}>{row.value}</option>
+                    ) : null}
+                    {STOCK_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="rounded-xl bg-slate-50 p-3">
+          <div className="text-xs font-bold tracking-wide text-slate-500 uppercase">Daily Sales</div>
+          {salesRows.length === 0 ? (
+            <p className="mt-2 text-xs text-slate-500">Nothing submitted.</p>
+          ) : (
+            <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto text-xs">
+              {salesRows.map((row) => (
+                <li key={row.key} className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 flex-1 text-slate-600">{row.label}</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={row.value}
+                    onChange={(e) => setSales((prev) => ({ ...prev, [row.key]: e.target.value }))}
+                    className="w-20 rounded-lg border border-slate-200 bg-white px-2 py-1 text-right font-semibold text-slate-900 outline-none focus:border-brand-500"
+                  />
+                </li>
+              ))}
+              {totalKg !== undefined && totalKg !== '' && (
+                <li className="flex justify-between gap-2 border-t border-slate-200 pt-2">
+                  <span className="text-slate-600">Total Sales (Kg)</span>
+                  <span className="font-semibold text-slate-900">{totalKg}</span>
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
+
+        <div className="rounded-xl bg-slate-50 p-3">
+          <div className="text-xs font-bold tracking-wide text-slate-500 uppercase">Competitor data</div>
+          {brands.length === 0 ? (
+            <p className="mt-2 text-xs text-slate-500">Nothing submitted.</p>
+          ) : (
+            <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto text-xs">
+              {brands.map((brand, index) => (
+                <li key={brand.id || `${brand.name}-${index}`} className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 flex-1 text-slate-600">{brand.name || '—'}</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={brand.price}
+                    onChange={(e) =>
+                      setBrands((prev) =>
+                        prev.map((row, i) => (i === index ? { ...row, price: e.target.value } : row)),
+                      )
+                    }
+                    className="w-20 rounded-lg border border-slate-200 bg-white px-2 py-1 text-right font-semibold text-slate-900 outline-none focus:border-brand-500"
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>}
+      {saved && !error && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+          Changes saved.
+        </div>
+      )}
+      <div className="flex flex-wrap justify-end gap-2 pt-1">
+        <Button type="button" size="sm" variant="secondary" onClick={onClose} disabled={busy}>
+          Close
+        </Button>
+        <Button type="button" size="sm" onClick={() => void save()} disabled={busy}>
+          {busy ? 'Saving…' : 'Save changes'}
+        </Button>
+      </div>
     </div>
   )
 }

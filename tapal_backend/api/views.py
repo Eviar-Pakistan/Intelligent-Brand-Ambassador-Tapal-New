@@ -24,6 +24,7 @@ from .models import (
     AmbassadorMonthTarget,
     BackupCoverage,
     Consumer,
+    MisAuditLog,
     MonthlyShift,
     PlatformSettings,
     ShiftAssignment,
@@ -543,6 +544,185 @@ def ba_attendance(request):
             store_id=request.query_params.get('store') or None,
             scope=viewer[0],
         )
+    )
+
+
+def _parse_optional_dt(raw):
+    """ISO datetime / null / '' → aware datetime or None. Missing key handled by caller."""
+    if raw is None or raw == '':
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError as exc:
+        raise ValueError('Use a valid date and time.') from exc
+    if timezone.is_naive(value):
+        value = timezone.make_aware(value)
+    return value
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def mis_audit_logs(request):
+    """
+    Standard Head Office (not MIS): list MIS action audit entries.
+    Query: ?date_from=&date_to=&action=&q=&limit=
+    """
+    user = request.user
+    if not getattr(user, 'is_head_office', False) and not getattr(user, 'is_staff', False):
+        return Response({'detail': 'Head Office only.'}, status=status.HTTP_403_FORBIDDEN)
+    if getattr(user, 'is_mis', False):
+        return Response({'detail': 'Audit log is not available for MIS accounts.'}, status=status.HTTP_403_FORBIDDEN)
+
+    qs = MisAuditLog.objects.all()
+    date_from = request.query_params.get('date_from')
+    date_to = request.query_params.get('date_to')
+    if date_from:
+        qs = qs.filter(created_at__date__gte=date_from)
+    if date_to:
+        qs = qs.filter(created_at__date__lte=date_to)
+    action = (request.query_params.get('action') or '').strip()
+    if action:
+        qs = qs.filter(action=action)
+    q = (request.query_params.get('q') or '').strip()
+    if q:
+        qs = qs.filter(
+            Q(actor_email__icontains=q)
+            | Q(actor_name__icontains=q)
+            | Q(summary__icontains=q)
+            | Q(entity_id__icontains=q)
+        )
+
+    try:
+        limit = min(max(int(request.query_params.get('limit') or 200), 1), 500)
+    except (TypeError, ValueError):
+        limit = 200
+
+    rows = [
+        {
+            'id': row.id,
+            'at': row.created_at.isoformat(),
+            'actorEmail': row.actor_email,
+            'actorName': row.actor_name,
+            'action': row.action,
+            'actionLabel': row.get_action_display(),
+            'entityType': row.entity_type,
+            'entityId': row.entity_id,
+            'summary': row.summary,
+            'before': row.before,
+            'after': row.after,
+            'meta': row.meta,
+            'ipAddress': row.ip_address,
+        }
+        for row in qs[:limit]
+    ]
+    return Response({'results': rows})
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def mis_edit_attendance(request):
+    """
+    MIS only: set or clear today's check-in / check-out for a BA.
+    Body: { ambassadorId, checkedInAt?: ISO|null, checkedOutAt?: ISO|null }
+    Pass null/'' to clear a time. Clearing check-in also clears check-out.
+    """
+    if not getattr(request.user, 'is_mis', False):
+        return Response({'detail': 'Only MIS can edit attendance times.'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        ambassador_id = int(request.data.get('ambassadorId'))
+    except (TypeError, ValueError):
+        return Response({'detail': 'ambassadorId is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    scope = scope_for(request.user)
+    if not scope.allows_ambassador(ambassador_id):
+        return Response({'detail': 'Ambassador not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    ambassador = Ambassador.objects.filter(pk=ambassador_id, is_active=True).first()
+    if not ambassador:
+        return Response({'detail': 'Ambassador not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    today = business_today()
+    ensure_daily_rows(today, ambassador)
+    shift = (
+        ShiftAssignment.objects.filter(
+            ambassador=ambassador,
+            date=today,
+            coverage_cancelled=False,
+            status__in=(ShiftAssignment.Status.SCHEDULED, ShiftAssignment.Status.CONFLICT),
+        )
+        .order_by('shift_label', 'id')
+        .first()
+    )
+    if not shift:
+        return Response({'detail': 'No shift scheduled for today.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    before = {
+        'checkedInAt': shift.checked_in_at.isoformat() if shift.checked_in_at else None,
+        'checkedOutAt': shift.checked_out_at.isoformat() if shift.checked_out_at else None,
+    }
+    data = request.data
+    try:
+        if 'checkedInAt' in data:
+            shift.checked_in_at = _parse_optional_dt(data.get('checkedInAt'))
+            if shift.checked_in_at is None:
+                shift.checked_out_at = None
+                shift.early_checkout_reason = ''
+        if 'checkedOutAt' in data:
+            if shift.checked_in_at is None and data.get('checkedOutAt') not in (None, ''):
+                return Response(
+                    {'detail': 'Set check-in before check-out.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            shift.checked_out_at = _parse_optional_dt(data.get('checkedOutAt'))
+            if shift.checked_out_at is None:
+                shift.early_checkout_reason = ''
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if shift.checked_in_at and shift.checked_out_at and shift.checked_out_at < shift.checked_in_at:
+        return Response(
+            {'detail': 'Check-out must be at or after check-in.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    shift.save(update_fields=['checked_in_at', 'checked_out_at', 'early_checkout_reason', 'updated_at'])
+    after = {
+        'checkedInAt': shift.checked_in_at.isoformat() if shift.checked_in_at else None,
+        'checkedOutAt': shift.checked_out_at.isoformat() if shift.checked_out_at else None,
+    }
+    from .audit import changed_fields, log_mis_action
+    from .models import MisAuditLog
+
+    diff = changed_fields(before, after)
+    if diff['before'] or diff['after']:
+        log_mis_action(
+            actor=request.user,
+            action=MisAuditLog.Action.ATTENDANCE_EDIT,
+            entity_type='shift',
+            entity_id=shift.id,
+            summary=f'Updated check-in/out for {ambassador.name} ({today.isoformat()})',
+            before=diff['before'],
+            after=diff['after'],
+            meta={
+                'ambassadorId': ambassador.id,
+                'baName': ambassador.name,
+                'date': today.isoformat(),
+                'storeId': shift.store_id,
+            },
+            request=request,
+        )
+    return Response(
+        {
+            'id': str(shift.id),
+            'ambassadorId': shift.ambassador_id,
+            'date': shift.date.isoformat(),
+            'checkedInAt': shift.checked_in_at.isoformat() if shift.checked_in_at else None,
+            'checkedOutAt': shift.checked_out_at.isoformat() if shift.checked_out_at else None,
+        }
     )
 
 

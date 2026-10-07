@@ -63,16 +63,29 @@ export async function syncEarlyCheckouts() {
   const portal = currentPortal()
   if (portal === 'ba' || portal === 'shopper' || (portal === 'office' && !djangoToken())) return
   const rows = resultsOf(await portalGet<{ results: EarlyCheckout[] }>('/api/early-checkouts/', portal))
-  if (rows) commit(rows)
+  if (!rows) return
+  // Normalize server rows (storeId may be null) so the card can always render them.
+  commit(
+    rows.map((row) => ({
+      id: String(row.id),
+      baId: String(row.baId ?? ''),
+      baName: String(row.baName ?? ''),
+      storeId: typeof row.storeId === 'number' ? row.storeId : Number(row.storeId) || 0,
+      storeName: String(row.storeName ?? '—'),
+      reason: String(row.reason ?? ''),
+      at: String(row.at ?? ''),
+    })),
+  )
+}
+
+function dayKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 function sameLocalDay(iso: string, now: Date) {
   const date = new Date(iso)
-  return (
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate()
-  )
+  if (Number.isNaN(date.getTime())) return false
+  return dayKey(date) === dayKey(now)
 }
 
 /** Remember a BA who left before shift end. One entry per ambassador per day. */
@@ -99,8 +112,9 @@ export function useEarlyCheckouts() {
   return useSyncExternalStore(subscribe, () => records, () => [])
 }
 
-export function earlyCheckoutsForToday(list: EarlyCheckout[], storeIds?: number[], now = new Date()) {
-  return list.filter(
-    (row) => sameLocalDay(row.at, now) && (storeIds ? storeIds.includes(row.storeId) : true),
-  )
+export function earlyCheckoutsForToday(list: EarlyCheckout[], storeIds?: number[]) {
+  // /api/early-checkouts/ already scopes by shift.date (business today). Do not
+  // re-filter on `at` — overnight checkouts can fall before 05:00 local and would
+  // be dropped even though the backend correctly included them.
+  return storeIds ? list.filter((row) => storeIds.includes(row.storeId)) : list
 }

@@ -345,11 +345,14 @@ export function Modal({
   onClose,
   title,
   children,
+  wide = false,
 }: {
   open: boolean
   onClose: () => void
   title: string
   children: ReactNode
+  /** Wider panel for multi-column content (e.g. daily report detail). */
+  wide?: boolean
 }) {
   useEffect(() => {
     if (!open) return
@@ -363,10 +366,14 @@ export function Modal({
     <ModalContext.Provider value={{ open, setOpen: onClose }}>
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
         <button className="absolute inset-0 bg-navy-950/50" onClick={onClose} aria-label="Close" />
-      <div className="relative z-10 w-full max-w-lg animate-fade-up rounded-2xl bg-white p-4 shadow-2xl sm:p-5 max-h-[min(90dvh,calc(100dvh-2rem))] overflow-y-auto">
-          <div className="mb-4 flex items-center justify-between">
+        <div
+          className={`relative z-10 w-full animate-fade-up rounded-2xl bg-white p-4 shadow-2xl sm:p-5 max-h-[min(90dvh,calc(100dvh-2rem))] overflow-y-auto ${
+            wide ? 'max-w-4xl' : 'max-w-lg'
+          }`}
+        >
+          <div className="mb-4 flex items-center justify-between gap-3">
             <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
-            <button onClick={onClose} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
+            <button onClick={onClose} className="shrink-0 rounded-lg p-1 text-slate-400 hover:bg-slate-100">
               <X size={18} />
             </button>
           </div>

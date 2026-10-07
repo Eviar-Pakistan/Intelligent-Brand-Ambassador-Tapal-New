@@ -210,6 +210,16 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         ambassador = self.get_object()
+        before = {
+            'name': ambassador.name,
+            'email': ambassador.email,
+            'city': ambassador.city,
+            'phone': ambassador.phone,
+            'is_active': ambassador.is_active,
+            'is_demo': ambassador.is_demo,
+            'is_backup': ambassador.is_backup,
+            'status': ambassador.status,
+        }
         changed = []
         for field in ('name', 'email', 'city', 'phone'):
             if field in request.data:
@@ -260,6 +270,34 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
                 )
             ambassador.status = new_status
             ambassador.save(update_fields=['status', 'updated_at'])
+            if 'status' not in changed:
+                changed.append('status')
+        after = {
+            'name': ambassador.name,
+            'email': ambassador.email,
+            'city': ambassador.city,
+            'phone': ambassador.phone,
+            'is_active': ambassador.is_active,
+            'is_demo': ambassador.is_demo,
+            'is_backup': ambassador.is_backup,
+            'status': ambassador.status,
+        }
+        from .audit import changed_fields, log_mis_action
+        from .models import MisAuditLog
+
+        diff = changed_fields(before, after)
+        if diff['before'] or diff['after']:
+            log_mis_action(
+                actor=request.user,
+                action=MisAuditLog.Action.AMBASSADOR_EDIT,
+                entity_type='ambassador',
+                entity_id=ambassador.id,
+                summary=f"Updated {', '.join(changed) or 'profile'} for {ambassador.name}",
+                before=diff['before'],
+                after=diff['after'],
+                meta={'baName': ambassador.name, 'baCode': ambassador.ba_code or '', 'fields': changed},
+                request=request,
+            )
         return Response(AmbassadorSerializer(ambassador, context={'request': request}).data)
 
     @action(detail=True, methods=['post'], url_path='deploy')

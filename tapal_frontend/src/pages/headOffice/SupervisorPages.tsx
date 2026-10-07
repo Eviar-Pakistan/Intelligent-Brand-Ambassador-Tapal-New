@@ -18,6 +18,7 @@ import {
   type JourneyVisit,
 } from '../../lib/journeyPlans'
 import { JourneyWeekPanel, VisitDetailModal } from '../supervisor/SupervisorJourney'
+import { isMisUser, useDjangoUser } from '../../lib/djangoApi'
 import { CITIES, useCreatedStores } from '../../lib/storeRegistry'
 import {
   assignStores,
@@ -513,6 +514,7 @@ export function SupervisorsPage() {
   const base = useRoleBase()
   const supervisors = useSupervisors()
   useCreatedStores()
+  const isMis = isMisUser(useDjangoUser())
   const [addOpen, setAddOpen] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [planning, setPlanning] = useState<string | null>(null)
@@ -595,12 +597,16 @@ export function SupervisorsPage() {
                         <Button size="sm" variant="secondary" onClick={() => setEditing(s.id)}>
                           <Pencil size={12} /> Stores
                         </Button>
-                        <Button size="sm" variant="secondary" onClick={() => setPlanning(s.id)}>
-                          <CalendarDays size={12} /> Plan
-                        </Button>
-                        <Button size="sm" variant="secondary" onClick={() => preview(s.id)}>
-                          <Eye size={12} /> Preview
-                        </Button>
+                        {!isMis && (
+                          <>
+                            <Button size="sm" variant="secondary" onClick={() => setPlanning(s.id)}>
+                              <CalendarDays size={12} /> Plan
+                            </Button>
+                            <Button size="sm" variant="secondary" onClick={() => preview(s.id)}>
+                              <Eye size={12} /> Preview
+                            </Button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

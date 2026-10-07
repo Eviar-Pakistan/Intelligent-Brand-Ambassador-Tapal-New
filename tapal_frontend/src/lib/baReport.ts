@@ -668,3 +668,55 @@ export function labeledSales(sales: Record<string, string>) {
     otherBrands: [],
   })
 }
+
+export type ReportFieldEntry = { key: string; label: string; value: string }
+
+/** Stock rows with storage keys (for MIS editing). */
+export function stockFieldEntries(stock: Record<string, string>): ReportFieldEntry[] {
+  const hasTargetSkus = Object.keys(stock).some((key) => !legacyStockKeys.has(key))
+  const legacy = defaultStockSections.flatMap((section) =>
+    section.fields
+      .filter((field) => !hasTargetSkus || field.key in stock)
+      .map((field) => ({ key: field.key, label: field.label, value: stock[field.key] ?? '' })),
+  )
+  const skus = Object.entries(stock)
+    .filter(([key]) => !legacyStockKeys.has(key))
+    .map(([key, value]) => ({ key, label: key.replace(STOCK_SKU_PREFIX, ''), value }))
+  return [...legacy, ...skus]
+}
+
+/** Sales rows with storage keys (for MIS editing). totalSalesKg is omitted — server recalculates it. */
+export function salesFieldEntries(sales: Record<string, string>): ReportFieldEntry[] {
+  const fixed = fixedSalesSections.flatMap((section) =>
+    section.fields.map((field) => ({ key: field.key, label: field.label, value: sales[field.key] ?? '' })),
+  )
+  const skus = Object.entries(sales)
+    .filter(([key]) => !fixedSalesKeys.has(key) && !derivedSalesKeys.has(key))
+    .map(([key, value]) => {
+      const legacy = legacySales.get(key)
+      const rawSkuName = key.startsWith(SALES_UNIT_PREFIX)
+        ? key.replace(SALES_UNIT_PREFIX, '')
+        : key.startsWith(SALES_SKU_PREFIX)
+          ? key.replace(SALES_SKU_PREFIX, '')
+          : legacy?.label ?? key
+      const label = canonicalSkuName(rawSkuName)
+      return { key, label, value }
+    })
+  return [...fixed, ...skus]
+}
+
+/** MIS Head Office: save corrections to an existing daily report. */
+export async function updateDailyReportAsMis(
+  id: string,
+  patch: { stock: Record<string, string>; sales: Record<string, string>; otherBrands: OtherBrandRow[] },
+): Promise<StoredDailyReport> {
+  const saved = await portalSend<StoredDailyReport>(
+    '/api/daily-reports/',
+    'PATCH',
+    { id, stock: patch.stock, sales: patch.sales, otherBrands: patch.otherBrands },
+    'office',
+  )
+  if (!saved) throw new Error('Could not save the report.')
+  commitReports(reports.map((item) => (item.id === id ? { ...item, ...saved } : item)))
+  return saved
+}

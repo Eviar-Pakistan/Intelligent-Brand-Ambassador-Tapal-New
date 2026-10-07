@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, type ReactNode } from 'react'
 import { ServerSync } from './components/ServerSync'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { DemoProvider, RoleProvider } from './context/AppContext'
@@ -9,6 +9,24 @@ import { DesktopShell } from './components/AppShell'
 import { BaShell, ShopperShell } from './components/RoleLayouts'
 import { ScreenHub } from './pages/ScreenHub'
 import { HeadOfficeGate, LoginPage } from './pages/LoginPage'
+import { headOfficeHome, isMisUser, useDjangoUser } from './lib/djangoApi'
+
+/** MIS cannot open Dashboard or Stock; send them to their HO home instead. */
+function MisBlocked({ children }: { children: ReactNode }) {
+  const user = useDjangoUser()
+  if (user && isMisUser(user)) return <Navigate to={headOfficeHome(user)} replace />
+  return <>{children}</>
+}
+
+function HoIndexRedirect() {
+  const user = useDjangoUser()
+  return <Navigate to={headOfficeHome(user).replace(/^\/ho\//, '')} replace />
+}
+
+function HoAppRedirect() {
+  const user = useDjangoUser()
+  return <Navigate to={headOfficeHome(user)} replace />
+}
 const BaDailyReportsPage = lazy(() => import('./pages/headOffice/CommandCenterPage').then((m) => ({ default: m.BaDailyReportsPage })))
 const OptimizationPage = lazy(() => import('./pages/headOffice/CommandCenterPage').then((m) => ({ default: m.OptimizationPage })))
 const BaPerformanceDashboardPage = lazy(() => import('./pages/headOffice/BaPerformanceDashboardPage').then((m) => ({ default: m.BaPerformanceDashboardPage })))
@@ -37,6 +55,7 @@ const SupervisorSubmissionsPage = lazy(() => SupervisorPortal().then((m) => ({ d
 const SupervisorJourneyPage = lazy(() => import('./pages/supervisor/SupervisorJourney').then((m) => ({ default: m.SupervisorJourneyPage })))
 import { RootEntry, ShopperStoreEntry } from './pages/shopper/ShopperStoreEntry'
 const InterceptionsPage = lazy(() => import('./pages/headOffice/InterceptionsPage').then((m) => ({ default: m.InterceptionsPage })))
+const MisAuditLogPage = lazy(() => import('./pages/headOffice/MisAuditLogPage').then((m) => ({ default: m.MisAuditLogPage })))
 const ConsumersPage = lazy(() => import('./pages/headOffice/IntelligencePages').then((m) => ({ default: m.ConsumersPage })))
 const LeaderboardPage = lazy(() => import('./pages/headOffice/IntelligencePages').then((m) => ({ default: m.LeaderboardPage })))
 const ReportPage = lazy(() => import('./pages/headOffice/IntelligencePages').then((m) => ({ default: m.ReportPage })))
@@ -68,14 +87,36 @@ const ShopperThanksPage = lazy(() => import('./pages/shopper/ShopperPages').then
 
 const hoPages = (
   <>
-    {/* The Dashboard (BA performance) is the landing page; the old Campaign Metrics page is not shown. */}
-    <Route index element={<Navigate to="ba-performance" replace />} />
-    <Route path="dashboard" element={<Navigate to="../ba-performance" replace />} />
-    <Route path="ba-performance" element={<BaPerformanceDashboardPage />} />
+    {/* Standard HO lands on Dashboard; MIS lands on Daily Reports (Dashboard & Stock blocked). */}
+    <Route index element={<HoIndexRedirect />} />
+    <Route
+      path="dashboard"
+      element={
+        <MisBlocked>
+          <Navigate to="../ba-performance" replace />
+        </MisBlocked>
+      }
+    />
+    <Route
+      path="ba-performance"
+      element={
+        <MisBlocked>
+          <BaPerformanceDashboardPage />
+        </MisBlocked>
+      }
+    />
     <Route path="daily-reports" element={<BaDailyReportsPage />} />
-    <Route path="stock" element={<StockBoardPage />} />
+    <Route
+      path="stock"
+      element={
+        <MisBlocked>
+          <StockBoardPage />
+        </MisBlocked>
+      }
+    />
     <Route path="attendance" element={<BaAttendancePage />} />
     <Route path="interceptions" element={<InterceptionsPage />} />
+    <Route path="audit-log" element={<MisAuditLogPage />} />
     <Route path="ambassadors" element={<AmbassadorsPage />} />
     <Route path="ambassadors/training" element={<TrainingManagerPage />} />
     <Route path="ambassadors/:id" element={<AmbassadorProfilePage />} />
@@ -186,7 +227,7 @@ export default function App() {
               <Route path=":storeSlug" element={<ShopperStoreEntry />} />
             </Route>
 
-            <Route path="/app/*" element={<Navigate to="/ho/ba-performance" replace />} />
+            <Route path="/app/*" element={<HoAppRedirect />} />
             <Route path="*" element={<Navigate to="/login" replace />} />
           </Routes>
           </Suspense>

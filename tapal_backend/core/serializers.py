@@ -17,6 +17,7 @@ class UserSerializer(serializers.ModelSerializer):
             'last_name',
             'user_type',
             'user_type_label',
+            'ho_role',
             'phone',
             'city',
             'is_staff',

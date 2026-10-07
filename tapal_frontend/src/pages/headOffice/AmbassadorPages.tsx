@@ -14,7 +14,9 @@ import {
   TableScroll,
   Tabs,
 } from '../../components/ui'
-import { Check, Copy, Download, ExternalLink, FileSpreadsheet, Upload, UserPlus, X } from 'lucide-react'
+import { Check, Copy, Download, ExternalLink, Eye, FileSpreadsheet, Upload, UserPlus, X } from 'lucide-react'
+import { djangoFetch, djangoToken, isMisUser, useDjangoUser } from '../../lib/djangoApi'
+import { CITIES } from '../../lib/storeRegistry'
 import {
   baAccessUrl,
   baEmailInUse,
@@ -28,7 +30,6 @@ import {
   type AmbassadorParseResult,
   type BaAccount,
 } from '../../lib/baAccounts'
-import { AssessmentReport } from '../ba/AssessmentReport'
 import {
   describeSkuUpload,
   isStoreSkuSheet,
@@ -375,45 +376,248 @@ function BulkAmbassadorModal({
   )
 }
 
+const misFieldClass =
+  'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500'
+
+/** datetime-local value from an ISO timestamp (device local clock). */
+function toLocalInput(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** ISO string from datetime-local, or null when cleared. */
+function fromLocalInput(local: string): string | null {
+  const text = local.trim()
+  if (!text) return null
+  const d = new Date(text)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toISOString()
+}
+
 function AmbassadorDetailModal({
   account,
   onClose,
+  extras,
+  onSaved,
 }: {
   account: BaAccount | null
   onClose: () => void
+  extras?: {
+    checkedInAt?: string | null
+    checkedOutAt?: string | null
+    coveringStore?: string
+  }
+  onSaved?: () => void
 }) {
+  const serverId = account ? serverAmbassadorId(account.id) : null
+  const [name, setName] = useState('')
+  const [city, setCity] = useState('')
+  const [email, setEmail] = useState('')
+  const [phone, setPhone] = useState('')
+  const [checkInLocal, setCheckInLocal] = useState('')
+  const [checkOutLocal, setCheckOutLocal] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    if (!account) return
+    setName(account.name)
+    setCity(account.city || '')
+    setEmail(account.email || '')
+    setPhone(account.phone || '')
+    setCheckInLocal(toLocalInput(extras?.checkedInAt))
+    setCheckOutLocal(toLocalInput(extras?.checkedOutAt))
+    setError(null)
+    setSaved(false)
+  }, [account, extras?.checkedInAt, extras?.checkedOutAt])
+
+  const cityOptions = useMemo(() => {
+    const list = [...CITIES]
+    if (city && !list.includes(city)) list.unshift(city)
+    return list
+  }, [city])
+
+  async function save() {
+    if (!account || serverId === null) {
+      setError('This ambassador cannot be edited.')
+      return
+    }
+    if (!name.trim()) {
+      setError('Name is required.')
+      return
+    }
+    if (!djangoToken()) {
+      setError('Sign in to continue.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setSaved(false)
+    try {
+      const profileRes = await djangoFetch(`/api/ambassadors/${serverId}/`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: name.trim(),
+          city: city.trim(),
+          email: email.trim(),
+          phone: phone.trim(),
+        }),
+      })
+      const profileData = (await profileRes.json().catch(() => ({}))) as { detail?: string }
+      if (!profileRes.ok) throw new Error(profileData.detail || 'Could not save profile details.')
+
+      const attendanceRes = await djangoFetch('/api/attendance/mis-edit/', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ambassadorId: serverId,
+          checkedInAt: fromLocalInput(checkInLocal),
+          checkedOutAt: fromLocalInput(checkOutLocal),
+        }),
+      })
+      const attendanceData = (await attendanceRes.json().catch(() => ({}))) as {
+        detail?: string
+        checkedInAt?: string | null
+        checkedOutAt?: string | null
+      }
+      const { syncDjango } = await import('../../lib/djangoSync')
+      await syncDjango()
+      onSaved?.()
+      if (!attendanceRes.ok) {
+        setSaved(true)
+        setError(
+          attendanceData.detail?.includes('No shift')
+            ? 'Profile saved. No shift today — check-in/out could not be updated.'
+            : `Profile saved, but attendance was not: ${attendanceData.detail || 'unknown error'}`,
+        )
+        return
+      }
+
+      setCheckInLocal(toLocalInput(attendanceData.checkedInAt))
+      setCheckOutLocal(toLocalInput(attendanceData.checkedOutAt))
+      setSaved(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save changes.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
-    <Modal open={!!account} onClose={onClose} title={account ? account.name : 'Ambassador'}>
+    <Modal open={!!account} onClose={onClose} wide title={account ? account.name : 'Ambassador'}>
       {account && (
         <div className="space-y-4 text-sm">
-          <div className="flex items-center gap-2">
-            <StatusBadge status={account.status} />
-            <span className="text-xs text-slate-500">
-              {[account.storeName, account.city, account.email, account.phone].filter(Boolean).join(' · ') || 'No contact details'}
-            </span>
+          <div className="flex flex-wrap items-center gap-3">
+            <Avatar name={name || account.name} />
+            <div>
+              <div className="font-semibold text-slate-900">{name || account.name}</div>
+              <p className="text-xs text-slate-500">
+                BA code <span className="font-mono">{account.baCode || '—'}</span>
+                {extras?.coveringStore ? ` · ${extras.coveringStore}` : account.storeName ? ` · ${account.storeName}` : ''}
+              </p>
+            </div>
           </div>
 
-          {account.result ? (
-            <AssessmentReport name={account.name} result={account.result} />
-          ) : (
-            <p className="text-slate-600">
-              {account.videoWatched
-                ? `Training video watched · ${account.answers.length} assessment answer${account.answers.length === 1 ? '' : 's'} submitted so far.`
-                : 'Has not finished the training video yet.'}
-            </p>
+          <div className="grid gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
+            <label className="block sm:col-span-2">
+              <span className="mb-1 block text-xs font-semibold tracking-wide text-slate-500 uppercase">Name</span>
+              <input value={name} onChange={(e) => setName(e.target.value)} className={misFieldClass} />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold tracking-wide text-slate-500 uppercase">City</span>
+              <select value={city} onChange={(e) => setCity(e.target.value)} className={misFieldClass}>
+                <option value="">Choose a city…</option>
+                {cityOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold tracking-wide text-slate-500 uppercase">Phone</span>
+              <input
+                type="tel"
+                inputMode="numeric"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value.replace(/[^\d+\-\s]/g, ''))}
+                className={misFieldClass}
+              />
+            </label>
+            <label className="block sm:col-span-2">
+              <span className="mb-1 block text-xs font-semibold tracking-wide text-slate-500 uppercase">Email</span>
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={misFieldClass} />
+            </label>
+
+            <div className="sm:col-span-2">
+              <span className="mb-1 block text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                Check-in today
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="datetime-local"
+                  value={checkInLocal}
+                  onChange={(e) => setCheckInLocal(e.target.value)}
+                  className={`${misFieldClass} max-w-xs`}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={!checkInLocal}
+                  onClick={() => {
+                    setCheckInLocal('')
+                    setCheckOutLocal('')
+                  }}
+                >
+                  Clear
+                </Button>
+              </div>
+            </div>
+
+            <div className="sm:col-span-2">
+              <span className="mb-1 block text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                Check-out today
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="datetime-local"
+                  value={checkOutLocal}
+                  onChange={(e) => setCheckOutLocal(e.target.value)}
+                  className={`${misFieldClass} max-w-xs`}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={!checkOutLocal}
+                  onClick={() => setCheckOutLocal('')}
+                >
+                  Clear
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {error && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>
+          )}
+          {saved && !error && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              Changes saved.
+            </div>
           )}
 
-          <div>
-            <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">BA code</div>
-            <div className="mb-4 font-mono text-lg font-semibold text-slate-900">{account.baCode || '—'}</div>
-            <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">Account link</div>
-            <AccountLinkPanel account={account} />
-            <Link
-              to={`/ho/ambassadors/${account.id}`}
-              className="mt-4 inline-block text-sm font-semibold text-brand-600 hover:text-brand-700"
-            >
-              Open profile — scores, deploy, edit, deactivate →
-            </Link>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" size="sm" variant="secondary" onClick={onClose} disabled={busy}>
+              Close
+            </Button>
+            <Button type="button" size="sm" onClick={() => void save()} disabled={busy || !name.trim()}>
+              {busy ? 'Saving…' : 'Save changes'}
+            </Button>
           </div>
         </div>
       )}
@@ -438,10 +642,12 @@ export function AmbassadorsPage() {
   const [tab, setTab] = useState('All')
   const [q, setQ] = useState('')
   const accounts = useBaAccounts()
+  const officeUser = useDjangoUser()
+  const isMis = isMisUser(officeUser)
   const monthTargets = useBaTargets()
   const targetMonth = currentMonthKey()
   const today = localDay(new Date())
-  const { data: todayAttendance } = useAttendance(today, today)
+  const { data: todayAttendance, reload: reloadAttendance } = useAttendance(today, today)
   const reports = useDailyReports()
   // Today's attendance per BA (a BA with two shifts: the one they checked in to first).
   const attendanceByBa = useMemo(() => {
@@ -538,6 +744,7 @@ export function AmbassadorsPage() {
               <th className="px-4 py-3">Check-in</th>
               <th className="px-4 py-3">Check-out</th>
               <th className="px-4 py-3">Data filled</th>
+              {isMis && <th className="px-4 py-3">View</th>}
               <th className="px-4 py-3">Open link</th>
             </tr>
           </thead>
@@ -546,14 +753,18 @@ export function AmbassadorsPage() {
               <tr key={a.id} className="border-t border-slate-100 hover:bg-slate-50/70">
                 <td className="px-4 py-3 font-mono text-sm font-semibold text-slate-800">{a.baCode || '—'}</td>
                 <td className="px-4 py-3">
-                  <button type="button" onClick={() => setDetailId(a.id)} className="flex items-center gap-3 text-left">
+                  <div className="flex items-center gap-3">
                     <Avatar name={a.name} />
-                    <span className="flex flex-wrap items-center gap-2 font-medium text-slate-900 hover:text-brand-600">
+                    <span className="flex flex-wrap items-center gap-2 font-medium text-slate-900">
                       {a.name}
-                      {a.isDemoAccount && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">Demo</span>}
+                      {a.isDemoAccount && (
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                          Demo
+                        </span>
+                      )}
                     </span>
                     {a.isActive === false && <StatusBadge status="Inactive" />}
-                  </button>
+                  </div>
                 </td>
                 <td className="px-4 py-3 text-slate-600">{a.city || '—'}</td>
                 <td className="px-4 py-3 font-semibold">{a.result ? `${a.result.quality}%` : '—'}</td>
@@ -594,6 +805,13 @@ export function AmbassadorsPage() {
                     </span>
                   )}
                 </td>
+                {isMis && (
+                  <td className="px-4 py-3">
+                    <Button variant="secondary" size="sm" onClick={() => setDetailId(a.id)}>
+                      <Eye size={13} /> View
+                    </Button>
+                  </td>
+                )}
                 <td className="px-4 py-3">
                   <Button
                     variant="secondary"
@@ -607,7 +825,7 @@ export function AmbassadorsPage() {
             ))}
             {filteredAccounts.length === 0 && (
               <tr>
-                <td colSpan={11} className="px-4 py-8 text-center text-sm text-slate-500">
+                <td colSpan={isMis ? 12 : 11} className="px-4 py-8 text-center text-sm text-slate-500">
                   No ambassadors yet. Add one to create an account link.
                 </td>
               </tr>
@@ -694,6 +912,25 @@ export function AmbassadorsPage() {
       <AmbassadorDetailModal
         account={accounts.find((a) => a.id === detailId) ?? null}
         onClose={() => setDetailId(null)}
+        onSaved={() => reloadAttendance()}
+        extras={
+          detailId
+            ? (() => {
+                const account = accounts.find((a) => a.id === detailId)
+                if (!account) return undefined
+                const attendance = attendanceByBa.get(account.id)
+                const serverId = serverAmbassadorId(account.id)
+                const coverage = serverId == null ? undefined : coverageByBa.get(serverId)
+                return {
+                  checkedInAt: attendance?.checkedInAt ?? null,
+                  checkedOutAt: attendance?.checkedOutAt ?? null,
+                  coveringStore: coverage
+                    ? `Covering ${coverage.storeName} (for ${coverage.coverageOfName})`
+                    : undefined,
+                }
+              })()
+            : undefined
+        }
       />
 
       <SetTargetModal open={targetOpen} onClose={() => setTargetOpen(false)} />

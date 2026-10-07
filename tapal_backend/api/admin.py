@@ -10,6 +10,7 @@ from .models import (
     AssessmentSession,
     CitySku,
     Consumer,
+    MisAuditLog,
     PlatformSettings,
     MonthlyShift,
     ShiftAssignment,
@@ -274,3 +275,24 @@ class CitySkuAdmin(admin.ModelAdmin):
     list_display = ('sku', 'brand', 'city')
     list_filter = ('city',)
     search_fields = ('sku', 'brand', 'city')
+
+
+@admin.register(MisAuditLog)
+class MisAuditLogAdmin(admin.ModelAdmin):
+    list_display = ('id', 'created_at', 'actor_email', 'action', 'entity_type', 'entity_id', 'summary')
+    list_filter = ('action', 'entity_type', 'created_at')
+    search_fields = ('actor_email', 'actor_name', 'summary', 'entity_id')
+    readonly_fields = (
+        'actor',
+        'actor_email',
+        'actor_name',
+        'action',
+        'entity_type',
+        'entity_id',
+        'summary',
+        'before',
+        'after',
+        'meta',
+        'ip_address',
+        'created_at',
+    )

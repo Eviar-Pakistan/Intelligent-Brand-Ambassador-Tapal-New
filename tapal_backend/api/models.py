@@ -354,6 +354,14 @@ class Ambassador(models.Model):
         default=True,
         help_text='Deactivated BAs keep their history but cannot open the app or be scheduled.',
     )
+    is_backup = models.BooleanField(
+        default=False,
+        help_text='Available in the backup BA pool for covering another BA’s scheduled shift.',
+    )
+    is_demo = models.BooleanField(
+        default=False,
+        help_text='Demo account metadata only. Demo activity is session-only and is not stored in the database.',
+    )
     overall_score = models.FloatField(null=True, blank=True)
     report_json = models.JSONField(default=dict, blank=True)
     certified_at = models.DateTimeField(null=True, blank=True)
@@ -394,8 +402,9 @@ class Ambassador(models.Model):
     def ensure_ba_code(self) -> None:
         if self.ba_code:
             return
+        prefix = 'DEMO-' if self.is_demo else 'BA-'
         for _ in range(12):
-            code = 'BA-' + ''.join(secrets.choice(_BA_CODE_ALPHABET) for _ in range(6))
+            code = prefix + ''.join(secrets.choice(_BA_CODE_ALPHABET) for _ in range(6))
             if not Ambassador.objects.filter(ba_code=code).exists():
                 self.ba_code = code
                 return
@@ -614,6 +623,39 @@ class MonthlyShift(models.Model):
         return f'{self.month} {self.shift_label} · {self.store_id} · {who}'
 
 
+class BackupCoverage(models.Model):
+    """Persistent backup assignment for a BA's monthly store shift."""
+
+    monthly_shift = models.ForeignKey(
+        MonthlyShift, on_delete=models.SET_NULL, null=True, blank=True, related_name='backup_coverages'
+    )
+    original_ba = models.ForeignKey(
+        Ambassador, on_delete=models.SET_NULL, null=True, blank=True, related_name='backup_coverage_absences'
+    )
+    backup_ba = models.ForeignKey(
+        Ambassador, on_delete=models.SET_NULL, null=True, blank=True, related_name='backup_coverage_assignments'
+    )
+    store = models.ForeignKey(Store, on_delete=models.SET_NULL, null=True, blank=True, related_name='ba_coverages')
+    starts_on = models.DateField()
+    ends_on = models.DateField(null=True, blank=True, help_text='Last day the backup covers; blank means ongoing.')
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='ba_backup_coverages'
+    )
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    ended_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='ended_ba_coverages'
+    )
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-starts_on', '-id']
+        indexes = [models.Index(fields=['original_ba', 'store', 'starts_on', 'ends_on'], name='api_bacov_orig_store_dates')]
+
+    def __str__(self):
+        backup = self.backup_ba.name if self.backup_ba_id else 'Backup BA'
+        return f'{backup} covers monthly shift {self.monthly_shift_id} from {self.starts_on}'
+
+
 class ShiftAssignment(models.Model):
     """One day of a monthly shift: the attendance record BAs check in and out against."""
 
@@ -637,6 +679,50 @@ class ShiftAssignment(models.Model):
         blank=True,
         related_name='shifts',
     )
+    covered_by = models.ForeignKey(
+        Ambassador,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='covered_absences',
+        help_text='Backup BA assigned to cover this absent BA’s scheduled shift.',
+    )
+    coverage_of = models.OneToOneField(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='backup_assignment',
+        help_text='The absent BA’s daily shift covered by this backup attendance record.',
+    )
+    report_owner = models.ForeignKey(
+        Ambassador,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='credited_shift_reports',
+        help_text='BA whose targets and reports receive credit for this covered shift.',
+    )
+    coverage_assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_ba_coverages',
+    )
+    coverage_assigned_at = models.DateTimeField(null=True, blank=True)
+    coverage_assignment = models.ForeignKey(
+        BackupCoverage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='daily_assignments',
+        help_text='Persistent coverage assignment that produced this daily attendance row.',
+    )
+    coverage_cancelled = models.BooleanField(
+        default=False,
+        help_text='The planned backup attendance row was ended before the BA checked in; keep it as an audit record.',
+    )
     date = models.DateField(help_text='Calendar date of the shift')
     day_key = models.CharField(max_length=3, help_text='Mon…Sun for UI week board')
     shift_label = models.CharField(max_length=64)
@@ -649,6 +735,11 @@ class ShiftAssignment(models.Model):
         default=Status.OPEN,
     )
     checked_in_at = models.DateTimeField(null=True, blank=True)
+    attendance_type = models.CharField(
+        max_length=12,
+        choices=(('store', 'Store'), ('training', 'Training')),
+        default='store',
+    )
     checked_out_at = models.DateTimeField(null=True, blank=True)
     check_in_lat = models.FloatField(null=True, blank=True)
     check_in_lng = models.FloatField(null=True, blank=True)
@@ -835,6 +926,9 @@ class DailyReport(models.Model):
     ambassador = models.ForeignKey(
         Ambassador, on_delete=models.SET_NULL, null=True, blank=True, related_name='daily_reports'
     )
+    submitted_by = models.ForeignKey(
+        Ambassador, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_daily_reports'
+    )
     ba_name = models.CharField(max_length=120)
     store = models.ForeignKey(Store, on_delete=models.SET_NULL, null=True, blank=True, related_name='daily_reports')
     city = models.CharField(max_length=100, blank=True)
@@ -849,6 +943,36 @@ class DailyReport(models.Model):
 
     class Meta:
         ordering = ['-submitted_at']
+
+
+class CompetitorFieldConfig(models.Model):
+    """A competitor field shown on BA checkout, scoped globally, by city or by store."""
+
+    class FieldType(models.TextChoices):
+        TEXT = 'text', 'Text'
+        NUMBER = 'number', 'Number'
+        SELECT = 'select', 'Select'
+        BOOLEAN = 'boolean', 'Boolean'
+
+    class Scope(models.TextChoices):
+        ALL = 'ALL', 'All'
+        CITY = 'CITY', 'City'
+        STORE = 'STORE', 'Store'
+
+    key = models.CharField(max_length=100)
+    label = models.CharField(max_length=200)
+    field_type = models.CharField(max_length=20, choices=FieldType.choices, default=FieldType.TEXT)
+    options = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    scope = models.CharField(max_length=10, choices=Scope.choices, default=Scope.ALL)
+    city = models.CharField(max_length=100, blank=True, null=True)
+    store = models.ForeignKey(Store, null=True, blank=True, on_delete=models.CASCADE, related_name='competitor_fields')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='created_competitor_fields')
+
+    class Meta:
+        ordering = ['created_at', 'id']
 
 
 class UserInterception(models.Model):
@@ -997,6 +1121,7 @@ class CitySku(models.Model):
     """A SKU the BAs of a city report on (Stock Report and Daily Sales)."""
 
     sku = models.CharField(max_length=200)
+    brand = models.CharField(max_length=100, blank=True, default='')
     city = models.CharField(max_length=100)
 
     class Meta:

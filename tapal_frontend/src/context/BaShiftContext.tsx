@@ -44,6 +44,9 @@ type TodayShift = {
   checkedInAt: string | null
   checkedOutAt: string | null
   reportSubmitted?: boolean
+  coveredByName?: string | null
+  isCovering?: boolean
+  reportOwner?: { id: number; name: string; baCode: string } | null
 }
 
 /** Where today's shift is, and who supervises that store (for check-in / check-out notices). */
@@ -59,6 +62,8 @@ export type BaShiftState = {
   /** Today's shift from the database, or null when none is scheduled. */
   hasShift: boolean
   storeLabel: string
+  coveredByName: string | null
+  reportingFor: string | null
   shiftStore: ShiftStore | null
   shiftLabel: string
   shiftEndLabel: string
@@ -145,8 +150,31 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     setShiftStatus(needsServer(token) ? 'loading' : 'ready')
   }, [token])
 
+  // Demo / sample accounts: session-only state (no localStorage). Refresh always shows Check In again.
   useEffect(() => {
-    if (!token || token.startsWith('demo-')) {
+    if (needsServer(token)) return
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+        const key = localStorage.key(i)
+        if (key?.startsWith('ba-demo-shift-v1:')) localStorage.removeItem(key)
+      }
+    } catch {
+      // ignore
+    }
+    setTodayShift(null)
+    setCheckedIn(false)
+    setAttendanceType('store')
+    setCheckInAt(null)
+    setCheckedOut(false)
+    setCheckOutAt(null)
+    setReportSubmitted(false)
+    setAssistShiftEnded(false)
+    setEarlyCheckoutReason(null)
+    setShiftStatus('ready')
+  }, [account?.id, token])
+
+  useEffect(() => {
+    if (!needsServer(token)) {
       setTodayShift(null)
       return
     }
@@ -210,30 +238,31 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   const checkIn = useCallback(
     async (selfie?: string, attendance: 'store' | 'training' = 'store') => {
       if (doneForToday) return 'You have already checked in and out today. Check-in opens again tomorrow.'
-      // No check-in without the server: every account, sample ones included, must be recorded there.
       if (!token) return 'Your account is not linked to the server, so you cannot check in. Please sign in again.'
       let t = new Date()
-      try {
-        // The BA's position goes with the check-in. Without it there is no check-in.
-        const location = await getBaLocation()
-        if (!location) return LOCATION_REQUIRED_MESSAGE
-        const response = await fetch('/api/ba/check-in/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token, attendance_type: attendance, ...location, ...(selfie ? { selfie } : {}) }),
-        })
-        const data = (await response.json().catch(() => ({}))) as {
-          detail?: string
-          shift?: { checkedIn?: boolean; checkedInAt?: string | null; attendanceType?: 'store' | 'training' } | null
+      if (needsServer(token)) {
+        try {
+          // The BA's position goes with the check-in. Without it there is no check-in.
+          const location = await getBaLocation()
+          if (!location) return LOCATION_REQUIRED_MESSAGE
+          const response = await fetch('/api/ba/check-in/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token, attendance_type: attendance, ...location, ...(selfie ? { selfie } : {}) }),
+          })
+          const data = (await response.json().catch(() => ({}))) as {
+            detail?: string
+            shift?: { checkedIn?: boolean; checkedInAt?: string | null; attendanceType?: 'store' | 'training' } | null
+          }
+          // Only the server's own confirmation counts: anything else leaves the BA not checked in.
+          if (!response.ok || !data.shift?.checkedIn) {
+            return data.detail || 'Your check-in could not be saved. Please try again.'
+          }
+          if (data.shift.checkedInAt) t = new Date(data.shift.checkedInAt)
+          attendance = data.shift.attendanceType === 'training' ? 'training' : 'store'
+        } catch {
+          return 'No connection. You are not checked in — please try again.'
         }
-        // Only the server's own confirmation counts: anything else leaves the BA not checked in.
-        if (!response.ok || !data.shift?.checkedIn) {
-          return data.detail || 'Your check-in could not be saved. Please try again.'
-        }
-        if (data.shift.checkedInAt) t = new Date(data.shift.checkedInAt)
-        attendance = data.shift.attendanceType === 'training' ? 'training' : 'store'
-      } catch {
-        return 'No connection. You are not checked in — please try again.'
       }
       setCheckedIn(true)
       setAttendanceType(attendance)
@@ -252,8 +281,9 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const checkOut = useCallback(() => {
+    const time = new Date()
     setCheckedOut(true)
-    setCheckOutAt(new Date())
+    setCheckOutAt(time)
   }, [])
 
   const markReportSubmitted = useCallback(() => {
@@ -262,7 +292,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
 
   const submitCheckoutReport = useCallback(
     async (report: ParsedBaReport, earlyReason?: string | null) => {
-      if (token && !token.startsWith('demo-')) {
+      if (needsServer(token)) {
         try {
           // The BA's position goes with the check-out. Without it there is no check-out.
           const location = await getBaLocation()
@@ -281,7 +311,8 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
         }
       }
       setCheckedOut(true)
-      setCheckOutAt(new Date())
+      const time = new Date()
+      setCheckOutAt(time)
       setReportSubmitted(true)
       return null
     },
@@ -289,7 +320,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   )
 
   const submitTrainingCheckout = useCallback(async () => {
-    if (token && !token.startsWith('demo-')) {
+    if (needsServer(token)) {
       try {
         const location = await getBaLocation()
         if (!location) return LOCATION_REQUIRED_MESSAGE
@@ -306,8 +337,9 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
         return 'No connection. Your training check-out was not saved — please try again.'
       }
     }
+    const time = new Date()
     setCheckedOut(true)
-    setCheckOutAt(new Date())
+    setCheckOutAt(time)
     setReportSubmitted(true)
     return null
   }, [token])
@@ -324,16 +356,23 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const shiftEndLabel = todayShift?.endTime ? formatTime12(todayShift.endTime) : ''
+  const demoSession = !needsServer(token)
+  const demoStoreLabel = 'Demo Store — Tapal Showcase'
+  const demoCity = account?.city || 'Lahore'
 
   const value = useMemo(
     () => ({
-      city: todayShift?.city || account?.city || '',
-      hasShift: !!todayShift,
-      storeLabel: todayShift?.storeLabel ?? '',
+      city: todayShift?.city || (demoSession ? demoCity : account?.city || ''),
+      hasShift: !!todayShift || demoSession,
+      storeLabel: todayShift?.storeLabel ?? (demoSession ? demoStoreLabel : ''),
+      coveredByName: todayShift?.coveredByName ?? null,
+      reportingFor: todayShift?.isCovering ? todayShift.reportOwner?.name ?? null : null,
       shiftStore: todayShift
         ? { id: todayShift.storeId, name: todayShift.storeName, supervisorId: todayShift.supervisorId ?? null }
-        : null,
-      shiftLabel: todayShift?.shift ?? 'No shift scheduled today',
+        : demoSession
+          ? { id: 9001, name: demoStoreLabel, supervisorId: null }
+          : null,
+      shiftLabel: todayShift?.shift ?? (demoSession ? 'Demo shift (session only)' : 'No shift scheduled today'),
       shiftEndLabel,
       checkedIn,
       attendanceType,
@@ -361,6 +400,9 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     [
       todayShift,
       account?.city,
+      demoSession,
+      demoCity,
+      demoStoreLabel,
       shiftEndLabel,
       checkedIn,
       attendanceType,

@@ -111,6 +111,7 @@ urlpatterns = [
     path('early-checkouts/', portal.early_checkouts, name='early-checkouts'),
     path('kpi-config/', portal.kpi_config, name='kpi-config'),
     path('ba/stores/', portal.ba_stores, name='ba-stores'),
+    path('competitor-fields/', portal.competitor_fields, name='competitor-fields'),
     path('ba/me/', portal.ba_me, name='ba-me'),
     path('ba/training/practice/', portal.training_practice, name='ba-training-practice'),
     path('shopper/sessions/', portal.shopper_session, name='shopper-session'),

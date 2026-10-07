@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { currentBaAccountId } from './baAccounts'
+import { currentBaAccountId, isDemoBa } from './baAccounts'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
@@ -48,6 +48,7 @@ function load(): UserInterception[] {
         !!row &&
         typeof row.id === 'string' &&
         typeof row.baId === 'string' &&
+        !isDemoBa(row.baId) &&
         typeof row.name === 'string' &&
         typeof row.contact === 'string' &&
         typeof row.cityArea === 'string' &&
@@ -72,7 +73,8 @@ const listeners = new Set<() => void>()
 function commit(next: UserInterception[]) {
   records = next
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(records))
+    // Demo interceptions stay in memory only for this session.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(records.filter((r) => !isDemoBa(r.baId))))
   } catch {
     // keep the in-memory list
   }
@@ -85,7 +87,7 @@ function subscribe(listener: () => void) {
 }
 
 async function sendInterception(entry: UserInterception) {
-  if (currentPortal() !== 'ba') return
+  if (currentPortal() !== 'ba' || isDemoBa(entry.baId)) return
   try {
     const { unsent: _unsent, ...body } = entry
     void _unsent
@@ -100,6 +102,7 @@ async function sendInterception(entry: UserInterception) {
 export async function syncInterceptions() {
   const portal = currentPortal()
   if (portal === 'shopper' || (portal === 'office' && !djangoToken())) return
+  if (portal === 'ba' && isDemoBa(currentBaAccountId() ?? '')) return
   let rows = resultsOf(await portalGet<{ results: UserInterception[] }>('/api/interceptions/', portal))
   if (!rows) return
   if (portal === 'ba') {
@@ -113,7 +116,10 @@ export async function syncInterceptions() {
   }
   const onServer = new Set(rows.map((row) => row.id))
   // Keep what the server does not have yet (never drop a record before it is saved there).
-  commit([...records.filter((r) => !onServer.has(r.id) && (portal === 'ba' || r.unsent)), ...rows])
+  commit([
+    ...records.filter((r) => !onServer.has(r.id) && (portal === 'ba' || r.unsent || isDemoBa(r.baId))),
+    ...rows,
+  ])
 }
 
 export function useUserInterceptions() {
@@ -133,8 +139,9 @@ export function submitUserInterception(input: Omit<UserInterception, 'id' | 'cre
     id: `int-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     createdAt: new Date().toISOString(),
   }
-  commit([{ ...entry, unsent: true }, ...records].slice(0, 1000))
-  void sendInterception(entry)
+  const localOnly = isDemoBa(entry.baId)
+  commit([{ ...entry, ...(localOnly ? {} : { unsent: true }) }, ...records].slice(0, 1000))
+  if (!localOnly) void sendInterception(entry)
   return entry
 }
 

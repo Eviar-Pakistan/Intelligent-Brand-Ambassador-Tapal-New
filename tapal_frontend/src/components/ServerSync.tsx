@@ -13,17 +13,33 @@ import { syncSupervisors } from '../lib/supervisors'
 import { syncInterceptions } from '../lib/userInterceptions'
 
 const REFRESH_MS = 60_000
+let syncActive = false
 
 /** Everything that mirrors server data, for whichever part of the app is open. */
 async function syncEverything() {
   const portal = currentPortal()
-  await syncKpiConfig()
   if (portal === 'shopper') return
-  if (portal === 'ba') await syncBaStores()
-  if (portal !== 'ba') await syncSupervisors()
-  await Promise.all([syncJourney(), syncDailyReports(), syncInterceptions(), syncEarlyCheckouts()])
-  if (portal === 'supervisor') await syncSupervisorNotifications()
-  requestServerSync()
+  if (portal === 'office' && !djangoToken()) return
+  if (portal === 'ba' && !baServerToken()) return
+  if (portal === 'supervisor' && !supervisorToken() && !djangoToken()) return
+  if (syncActive) return
+  syncActive = true
+
+  try {
+    const tasks: Promise<unknown>[] = [syncKpiConfig()]
+    if (portal === 'ba') tasks.push(syncBaStores())
+    // Supervisor overview sync calculates rankings and store metrics. Keep it off the
+    // general dashboard refresh; fetch it only in supervisor workflows.
+    const path = window.location.pathname
+    const supervisorWorkflow = portal === 'supervisor' || /^\/(ho|admin)\/supervisors(?:\/|$)/.test(path)
+    if (supervisorWorkflow) tasks.push(syncSupervisors())
+    tasks.push(syncJourney(), syncDailyReports(), syncInterceptions(), syncEarlyCheckouts())
+    if (portal === 'supervisor') tasks.push(syncSupervisorNotifications())
+    await Promise.all(tasks)
+    requestServerSync()
+  } finally {
+    syncActive = false
+  }
 }
 
 /**
@@ -42,8 +58,15 @@ export function ServerSync() {
   }, [pathname])
 
   useEffect(() => {
-    const id = window.setInterval(() => void syncEverything(), REFRESH_MS)
-    return () => window.clearInterval(id)
+    const syncWhenVisible = () => {
+      if (document.visibilityState === 'visible') void syncEverything()
+    }
+    const id = window.setInterval(syncWhenVisible, REFRESH_MS)
+    document.addEventListener('visibilitychange', syncWhenVisible)
+    return () => {
+      window.clearInterval(id)
+      document.removeEventListener('visibilitychange', syncWhenVisible)
+    }
   }, [])
 
   return null

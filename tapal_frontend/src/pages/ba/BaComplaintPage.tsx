@@ -4,10 +4,11 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, MessageSquareWarning, UserRound } from 'lucide-react'
 import { ambassadors, stores } from '../../data/mock'
-import { useBaSession } from '../../lib/baAccounts'
+import { isDemoBa, useBaSession } from '../../lib/baAccounts'
 import {
   COMPLAINT_BRAND,
   complaintCategories,
+  isSampleComplaint,
   loadComplaintSkus,
   type SkuRange,
   formatComplaintDate,
@@ -21,6 +22,13 @@ import { baCurrentStore, baStoreIds, syncBaStores, useCreatedStores } from '../.
 const fieldClass =
   'w-full rounded-xl border border-slate-200 bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-brand-500 focus:bg-white focus:ring-2 focus:ring-brand-500/15'
 
+/** Demo accounts always use this store — no assignment or API lookup required. */
+const DEMO_COMPLAINT_STORE = {
+  id: 9001,
+  name: 'Demo Store — Tapal Showcase',
+  city: 'Lahore',
+}
+
 export function BaComplaintPage() {
   const navigate = useNavigate()
   const { submitComplaint } = useComplaints()
@@ -28,26 +36,36 @@ export function BaComplaintPage() {
   const ba = ambassadors.find((a) => a.id === account?.id)
   const baId = account?.id ?? ba?.id ?? 'ayesha'
   const baName = account?.name ?? ba?.name ?? 'Ayesha Khan'
+  const demoMode = isDemoBa(baId) || account?.isDemoAccount === true || !!account?.accessToken?.startsWith('demo-')
 
   // Only the BA's own stores (shifts and deployment); refreshes when the list arrives from the server.
   const knownStores = useCreatedStores()
   useEffect(() => {
-    void syncBaStores()
-  }, [])
+    if (!demoMode) void syncBaStores()
+  }, [demoMode])
   const storeOptions = useMemo(() => {
+    if (demoMode) return [DEMO_COMPLAINT_STORE]
     const own = new Set<number>(baStoreIds())
     if (ba?.storeId) own.add(ba.storeId)
     return stores
       .filter((s) => own.has(s.id))
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((s) => ({ id: s.id, name: s.name, city: s.city }))
-  }, [knownStores, ba?.storeId])
+  }, [knownStores, ba?.storeId, demoMode])
 
   const [kind, setKind] = useState<ComplaintKind>('customer')
-  const [customerStoreId, setCustomerStoreId] = useState(ba?.storeId ? String(ba.storeId) : '')
-  const [storeId, setStoreId] = useState('')
+  const [customerStoreId, setCustomerStoreId] = useState(
+    demoMode ? String(DEMO_COMPLAINT_STORE.id) : ba?.storeId ? String(ba.storeId) : '',
+  )
+  const [storeId, setStoreId] = useState(demoMode ? String(DEMO_COMPLAINT_STORE.id) : '')
   // Pre-select today's store (or the only one) on both forms.
   useEffect(() => {
+    if (demoMode) {
+      const id = String(DEMO_COMPLAINT_STORE.id)
+      setCustomerStoreId(id)
+      setStoreId(id)
+      return
+    }
     const current = baCurrentStore()
     const pick =
       current != null && storeOptions.some((s) => s.id === current)
@@ -58,7 +76,7 @@ export function BaComplaintPage() {
     if (!pick) return
     setCustomerStoreId((prev) => (prev && storeOptions.some((s) => String(s.id) === prev) ? prev : pick))
     setStoreId((prev) => (prev && storeOptions.some((s) => String(s.id) === prev) ? prev : pick))
-  }, [storeOptions])
+  }, [storeOptions, demoMode])
 
   const brand = COMPLAINT_BRAND
   const [sku, setSku] = useState('')
@@ -146,8 +164,10 @@ export function BaComplaintPage() {
         <CheckCircle2 className="text-brand-600" size={48} strokeWidth={1.75} />
         <h2 className="mt-4 text-xl font-bold text-slate-900">Complaint submitted</h2>
         <p className="mt-2 max-w-xs text-sm text-slate-500">
-          Head Office can now review this {kind === 'customer' ? 'customer' : 'BA'} complaint.
-          Reference ID <span className="font-semibold text-slate-700">{submittedId}</span>.
+          {demoMode
+            ? 'Demo complaint recorded for this session only (not saved to the database).'
+            : `Head Office can now review this ${kind === 'customer' ? 'customer' : 'BA'} complaint.`}
+          {' '}Reference ID <span className="font-semibold text-slate-700">{submittedId}</span>.
         </p>
         <button
           type="button"
@@ -216,6 +236,9 @@ export function BaComplaintPage() {
                 </option>
               ))}
             </select>
+            {demoMode && (
+              <p className="mt-1 text-[11px] text-amber-700">Demo store — complaint stays on this device for this session only.</p>
+            )}
           </label>
 
           <label className="mt-3 block">
@@ -338,6 +361,9 @@ export function BaComplaintPage() {
                   </option>
                 ))}
               </select>
+              {demoMode && (
+                <p className="mt-1 text-[11px] text-amber-700">Demo store — complaint stays on this device for this session only.</p>
+              )}
             </label>
           </section>
 
@@ -398,7 +424,7 @@ export function BaComplaintPage() {
         Submit to Head Office
       </button>
     </form>
-    <MyComplaints />
+    <MyComplaints baId={baId} demoMode={demoMode} />
     </>
   )
 }
@@ -460,10 +486,15 @@ function TypeButton({
   )
 }
 
-/** The BA's own complaints with Head Office's status and note. */
-function MyComplaints() {
-  const [rows, setRows] = useState<Complaint[] | null>(null)
+/** The BA's own complaints with Head Office's status and note. Demo uses in-memory list only. */
+function MyComplaints({ baId, demoMode }: { baId: string; demoMode: boolean }) {
+  const { complaints } = useComplaints()
+  const [rows, setRows] = useState<Complaint[] | null>(demoMode ? [] : null)
   useEffect(() => {
+    if (demoMode) {
+      setRows(complaints.filter((c) => c.baId === baId && !isSampleComplaint(c.id)))
+      return
+    }
     let cancelled = false
     void portalGet<{ results: Complaint[] }>('/api/complaints/', 'ba').then((data) => {
       if (!cancelled && data) setRows(data.results)
@@ -471,7 +502,7 @@ function MyComplaints() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [baId, demoMode, complaints])
   if (!rows) return null
   return (
     <section className="space-y-2 bg-[#f7f4ec] px-4 pb-8">

@@ -268,7 +268,8 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
   }
 
   const cell = (row: unknown[], header: string) => row[columns.get(header) ?? -1]
-  const catalogue = await loadSkuCatalogue()
+  // Always re-fetch so a newly deployed catalogue (e.g. Multan SKUs) is used, not a stale tab cache.
+  const catalogue = await loadSkuCatalogue({ force: true })
   if (catalogue.length === 0) {
     return { rows: [], errors: ['The SKU list could not be loaded from the server. Try again.'] }
   }

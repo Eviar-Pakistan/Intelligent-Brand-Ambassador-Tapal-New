@@ -10,8 +10,9 @@ import type { AnswerMetrics, AssessmentResult } from './baAssessment'
  * A newly created BA can only use Training — video, then verbal assessment — until they
  * are certified; after that the same link opens the full BA app.
  *
- * There is no backend, so accounts and the signed-in session live in this browser's
- * localStorage. Anyone with the link can open that account on this browser.
+ * The signed-in session may live in this browser's localStorage. Demo check-ins, reports,
+ * interceptions, and complaints are session-only (memory) and never written to the database.
+ * Demo account metadata is marked in Django for identification only.
  */
 
 export type BaStatus = 'Invited' | 'Training' | 'Certified'
@@ -39,6 +40,10 @@ export type BaAccount = {
   serverStatus?: string
   /** False when Head Office deactivated this BA */
   isActive?: boolean
+  /** Included in the designated backup pool. */
+  isBackup?: boolean
+  /** Demo activity is session-only (no browser persist / no DB); metadata has a Django is_demo marker. */
+  isDemoAccount?: boolean
 }
 
 function newAccessToken() {
@@ -74,10 +79,15 @@ function demoAccounts(): BaAccount[] {
     answers: [],
     result: null,
     accessToken: DEMO_ACCESS_TOKENS[a.id] ?? `demo-${a.id}`,
+    isDemoAccount: true,
   }))
 }
 
 export function isDemoBa(id: string) {
+  return ambassadors.some((a) => a.id === id) || accounts.some((account) => account.id === id && account.isDemoAccount === true)
+}
+
+export function isBuiltInDemoBa(id: string) {
   return ambassadors.some((a) => a.id === id)
 }
 
@@ -106,6 +116,12 @@ function normalizeAccount(raw: Partial<BaAccount> & { passwordHash?: string }): 
     answers: Array.isArray(raw.answers) ? raw.answers : [],
     result: raw.result ?? null,
     accessToken: raw.accessToken || newAccessToken(),
+    isBackup: raw.isBackup === true,
+    isDemoAccount: raw.isDemoAccount === true,
+    storeName: raw.storeName,
+    storeId: raw.storeId,
+    serverStatus: raw.serverStatus,
+    isActive: raw.isActive,
   }
 }
 
@@ -198,22 +214,32 @@ export function baEmailInUse(email: string, exceptId?: string) {
   return !!e && accounts.some((a) => a.id !== exceptId && normEmail(a.email) === e)
 }
 
-export type BaAccountFields = { name: string; city: string; email: string; phone: string }
+export type BaAccountFields = {
+  name: string
+  city: string
+  email: string
+  phone: string
+  isBackup?: boolean
+  isDemoAccount?: boolean
+}
 
 function toAccount(fields: BaAccountFields): BaAccount {
+  const accessToken = newAccessToken()
   return {
     id: `ba-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-    baCode: '',
+    baCode: fields.isDemoAccount ? `DEMO-${accessToken.slice(0, 8).toUpperCase()}` : '',
     name: fields.name.trim(),
     city: fields.city.trim(),
     email: fields.email.trim(),
     phone: fields.phone.trim(),
+    isBackup: fields.isBackup === true,
+    isDemoAccount: fields.isDemoAccount === true,
     createdAt: new Date().toISOString(),
     status: 'Invited',
     videoWatched: false,
     answers: [],
     result: null,
-    accessToken: newAccessToken(),
+    accessToken: fields.isDemoAccount ? `demo-${accessToken}` : accessToken,
   }
 }
 
@@ -250,6 +276,8 @@ export function adoptApiAmbassador(row: {
   store?: number | null
   store_name?: string | null
   is_active?: boolean
+  is_backup?: boolean
+  is_demo?: boolean
   report_json?: EngineReport | null
 }): BaAccount | null {
   if (!row?.id || !row.name) return null
@@ -262,12 +290,17 @@ export function adoptApiAmbassador(row: {
   const saved = analysisFromReport(row.report_json)
   if (saved && (row.status === 'Certified' || row.status === 'Deployed')) saved.result.certified = true
   if (existing) {
+    const isDemoAccount = row.is_demo === true || existing.isDemoAccount === true
     const next: BaAccount = {
       ...existing,
       id: `api-${row.id}`,
       baCode: row.ba_code || existing.baCode,
       storeName: row.store_name || existing.storeName || '',
-      accessToken: token || existing.accessToken,
+      isBackup: row.is_backup === true,
+      isDemoAccount,
+      accessToken: isDemoAccount
+        ? (existing.accessToken.startsWith('demo-') ? existing.accessToken : `demo-api-${row.id}`)
+        : token || existing.accessToken,
       status: saved?.result.certified ? 'Certified' : existing.status,
       videoWatched: existing.videoWatched || !!saved,
       answers: saved?.answers.length ? saved.answers : existing.answers,
@@ -289,7 +322,9 @@ export function adoptApiAmbassador(row: {
     videoWatched: !!saved,
     answers: saved?.answers ?? [],
     result: saved?.result ?? null,
-    accessToken: token || `api-${row.id}`,
+    accessToken: row.is_demo ? `demo-api-${row.id}` : token || `api-${row.id}`,
+    isBackup: row.is_backup === true,
+    isDemoAccount: row.is_demo === true,
   }
   if (saved?.result.certified) account.status = 'Certified'
   commit([account, ...accounts])
@@ -305,6 +340,7 @@ export function replaceAmbassadorsFromApi(rows: Parameters<typeof adoptApiAmbass
     const token = row.invite_token || ''
     const existing = accounts.find((account) => account.id === id || (token && account.accessToken === token))
     const status = uiStatus(row.status)
+    const isDemoAccount = row.is_demo === true || existing?.isDemoAccount === true
     const saved = analysisFromReport(row.report_json)
     if (saved && (row.status === 'Certified' || row.status === 'Deployed')) saved.result.certified = true
     next.push({
@@ -318,14 +354,20 @@ export function replaceAmbassadorsFromApi(rows: Parameters<typeof adoptApiAmbass
       storeId: row.store ?? null,
       serverStatus: row.status,
       isActive: row.is_active !== false,
+      isBackup: row.is_backup === true,
+      isDemoAccount,
       createdAt: row.created_at || existing?.createdAt || new Date().toISOString(),
-      status: saved?.result.certified ? 'Certified' : status,
+      status: isDemoAccount ? existing?.status ?? status : saved?.result.certified ? 'Certified' : status,
       videoWatched: existing?.videoWatched || !!saved,
       answers: saved?.answers.length ? saved.answers : existing?.answers ?? [],
       result: saved?.result ?? existing?.result ?? null,
-      accessToken: token || existing?.accessToken || id,
+      accessToken: row.is_demo === true || existing?.isDemoAccount === true
+        ? (existing?.accessToken?.startsWith('demo-') ? existing.accessToken : `demo-api-${row.id}`)
+        : token || existing?.accessToken || id,
     })
   }
+  // Browser-only demo activity stays local even though the demo account marker is in the API roster.
+  next.push(...accounts.filter((account) => account.isDemoAccount && !next.some((row) => row.id === account.id)))
   commit(next)
 }
 
@@ -339,6 +381,7 @@ function beginAtVideo(account: BaAccount | null): BaAccount | null {
 
 export async function resolveBaAccessToken(token: string): Promise<BaAccount | null> {
   const local = findBaByAccessToken(token)
+  if (local?.isDemoAccount || token.startsWith('demo-')) return local
   try {
     const response = await fetch(`/api/ba/invite/${encodeURIComponent(token)}/`)
     if (!response.ok) return beginAtVideo(local)
@@ -351,6 +394,17 @@ export async function resolveBaAccessToken(token: string): Promise<BaAccount | n
 
 export async function createBaAccount(fields: BaAccountFields): Promise<BaAccount> {
   const account = toAccount(fields)
+  if (account.isDemoAccount) {
+    const { pushAmbassador } = await import('./djangoSync')
+    const remote = await pushAmbassador(account)
+    if (!remote?.invite_token || !remote.ba_code || remote.id == null) {
+      throw new Error('Sign in to Head Office before creating a demo account so its demo flag can be saved in the database.')
+    }
+    account.id = `api-${remote.id}`
+    account.baCode = remote.ba_code
+    commit([account, ...accounts])
+    return account
+  }
   const { pushAmbassador } = await import('./djangoSync')
   const remote = await pushAmbassador(account)
   if (!remote?.invite_token || !remote.ba_code || remote.id == null) {

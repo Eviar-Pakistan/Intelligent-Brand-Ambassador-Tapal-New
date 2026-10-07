@@ -79,6 +79,8 @@ export function BaHomePage() {
   const {
     city,
     storeLabel,
+    coveredByName,
+    reportingFor,
     shiftLabel,
     shiftEndLabel,
     checkedIn,
@@ -346,7 +348,7 @@ export function BaHomePage() {
             >
               Retry
             </button>
-          ) : !checkedIn && !doneForToday ? (
+          ) : !checkedIn && !doneForToday && !coveredByName ? (
             <button
               type="button"
               onClick={() => { setCheckInMode('store'); setFaceCheckOpen(true) }}
@@ -357,10 +359,26 @@ export function BaHomePage() {
           ) : (
             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-brand-50 px-3 py-1.5 text-xs font-bold text-brand-700">
               <CheckCircle2 size={14} />
-              {doneForToday ? 'Done for today' : attendanceType === 'training' ? 'Checked in for training' : 'Checked in at store'}
+              {coveredByName
+                ? 'Marked Absent'
+                : doneForToday
+                  ? 'Done for today'
+                  : attendanceType === 'training'
+                    ? 'Checked in for training'
+                    : 'Checked in at store'}
             </span>
           )}
         </div>
+        {coveredByName && (
+          <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            This shift is marked Absent and covered by {coveredByName}.
+          </p>
+        )}
+        {reportingFor && (
+          <p className="mt-3 rounded-xl bg-violet-50 px-3 py-2 text-xs text-violet-800">
+            You are covering {reportingFor}. Your attendance is recorded for you; reports and target credit go to {reportingFor}.
+          </p>
+        )}
 
         {shiftStatus === 'error' && (
           <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2.5 text-sm font-medium text-amber-800">

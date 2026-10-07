@@ -27,7 +27,6 @@ import {
   formatTargetMonth,
   useBaTargets,
 } from '../../lib/baTargets'
-import { syncBaTargets } from '../../lib/djangoSync'
 import { isDemoBa, useBaAccounts } from '../../lib/baAccounts'
 import { useDjangoUser } from '../../lib/djangoApi'
 import { useCreatedStores } from '../../lib/storeRegistry'
@@ -290,7 +289,6 @@ export function BaPerformanceDashboardPage() {
   const [customTo, setCustomTo] = useState('')
   const baTargets = useBaTargets()
   useEffect(() => {
-    void syncBaTargets()
     void import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())
   }, [])
   // Totals for the signed-in user: the server only sends their city's BAs and stores (all cities

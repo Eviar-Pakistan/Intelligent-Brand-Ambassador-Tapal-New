@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { useLocation } from 'react-router-dom'
 import { djangoFetch, djangoToken } from '../lib/djangoApi'
 
 /** A BA at a store at the same hours for a whole month (from /api/shifts/). No dates. */
@@ -28,6 +29,14 @@ export type MonthlyShift = {
   baId: string | null
   baName: string | null
   baCode: string | null
+  backupCoverage?: {
+    id: number
+    baId: number
+    baName: string
+    startsOn: string
+    endsOn: string | null
+    endedAt: string | null
+  } | null
   status: 'Scheduled' | 'Open' | 'Conflict'
 }
 
@@ -51,6 +60,7 @@ type ScheduleContextValue = {
   shiftMonth: (months: number) => void
   reload: () => Promise<void>
   saveShift: (input: ShiftInput, id?: string) => Promise<string | null>
+  swapShifts: (firstId: string, secondId: string) => Promise<string | null>
   clearBaFromSlot: (id: string) => Promise<string | null>
   deleteShift: (id: string) => Promise<string | null>
 }
@@ -94,6 +104,7 @@ async function readError(response: Response) {
 }
 
 export function ScheduleProvider({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation()
   const [month, setMonth] = useState(() => monthKey(new Date()))
   const [schedule, setSchedule] = useState<MonthlyShift[]>([])
   const [monthLabel, setMonthLabel] = useState('')
@@ -122,8 +133,10 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
   }, [month])
 
   useEffect(() => {
-    void reload()
-  }, [reload])
+    // The shift board is the only screen that needs this data. Avoid a shift API call
+    // during login and while unrelated portals are open.
+    if (/^\/(ho|manager)\/deployment\/?$/.test(pathname)) void reload()
+  }, [pathname, reload])
 
   const shiftMonth = useCallback((months: number) => {
     setMonth((current) => {
@@ -157,6 +170,23 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
 
   const clearBaFromSlot = useCallback((id: string) => saveShift({ ambassadorId: null }, id), [saveShift])
 
+  const swapShifts = useCallback(
+    async (firstId: string, secondId: string) => {
+      try {
+        const response = await djangoFetch('/api/shifts/swap/', {
+          method: 'POST',
+          body: JSON.stringify({ shift_ids: [Number(firstId), Number(secondId)] }),
+        })
+        if (!response.ok) return await readError(response)
+      } catch {
+        return 'The server is not available. Start it, then try again.'
+      }
+      await reload()
+      return null
+    },
+    [reload],
+  )
+
   const deleteShift = useCallback(
     async (id: string) => {
       try {
@@ -172,8 +202,8 @@ export function ScheduleProvider({ children }: { children: ReactNode }) {
   )
 
   const value = useMemo(
-    () => ({ schedule, month, monthLabel, loading, error, shiftMonth, reload, saveShift, clearBaFromSlot, deleteShift }),
-    [schedule, month, monthLabel, loading, error, shiftMonth, reload, saveShift, clearBaFromSlot, deleteShift],
+    () => ({ schedule, month, monthLabel, loading, error, shiftMonth, reload, saveShift, swapShifts, clearBaFromSlot, deleteShift }),
+    [schedule, month, monthLabel, loading, error, shiftMonth, reload, saveShift, swapShifts, clearBaFromSlot, deleteShift],
   )
 
   return <ScheduleContext.Provider value={value}>{children}</ScheduleContext.Provider>

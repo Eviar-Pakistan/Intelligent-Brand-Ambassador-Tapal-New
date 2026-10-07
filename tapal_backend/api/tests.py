@@ -131,7 +131,9 @@ class DailyAttendanceTests(ShiftTestBase):
         res = self.client.post('/api/ba/check-in/', {**GPS, 'token': self.ba.invite_token}, format='json')
         self.assertIn(res.status_code, (200, 201), res.data)
         row = ShiftAssignment.objects.get()
-        self.assertEqual(row.date, timezone.localdate())
+        from .shifts import business_today
+
+        self.assertEqual(row.date, business_today())
         self.assertIsNotNone(row.checked_in_at)
 
     def test_editing_hours_updates_today_before_check_in(self):

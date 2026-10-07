@@ -112,7 +112,13 @@ DATABASES = {
             'PASSWORD': os.environ.get('DB_PASSWORD', ''),
             'HOST': os.environ['DB_HOST'],
             'PORT': os.environ.get('DB_PORT', '3306'),
-   
+            # Reuse MySQL connections during local development instead of paying the
+            # TCP/authentication setup cost for every API request.
+            'CONN_MAX_AGE': int(os.environ.get('DJANGO_DB_CONN_MAX_AGE', '60')),
+            'CONN_HEALTH_CHECKS': True,
+            'OPTIONS': {
+                'connect_timeout': int(os.environ.get('DB_CONNECT_TIMEOUT', '8')),
+            },
         }
     }
 

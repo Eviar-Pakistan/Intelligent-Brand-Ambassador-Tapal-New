@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { isDemoBa } from '../lib/baAccounts'
 import { djangoToken } from '../lib/djangoApi'
 import { baServerToken, currentPortal, portalGet, portalSend, resultsOf } from '../lib/serverApi'
 import { SERVER_SYNC_EVENT } from '../lib/serverSyncEvent'
@@ -70,7 +71,8 @@ function loadComplaints(): Complaint[] {
         typeof c === 'object' &&
         typeof c.id === 'string' &&
         typeof c.storeId === 'number' &&
-        !isSampleComplaint(c.id),
+        !isSampleComplaint(c.id) &&
+        !isDemoBa(c.baId),
     )
     const ids = new Set(stored.map((c) => c.id))
     return [...stored, ...initialComplaints.filter((c) => !ids.has(c.id))]
@@ -84,7 +86,11 @@ export function ComplaintsProvider({ children }: { children: ReactNode }) {
 
   const persist = useCallback((next: Complaint[]) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+      // Demo complaints are session-only — never write them to the browser or the API.
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(next.filter((c) => !isSampleComplaint(c.id) && !isDemoBa(c.baId))),
+      )
     } catch {
       // keep the in-memory list for this session
     }
@@ -125,6 +131,7 @@ export function ComplaintsProvider({ children }: { children: ReactNode }) {
 
   const submitComplaint = useCallback((input: SubmitComplaintInput) => {
     const now = new Date().toISOString()
+    const demoOnly = isDemoBa(input.baId)
     let created!: Complaint
     setComplaints((prev) => {
       created = {
@@ -134,9 +141,10 @@ export function ComplaintsProvider({ children }: { children: ReactNode }) {
         createdAt: now,
         updatedAt: now,
       }
-      return persist([{ ...created, unsent: true }, ...prev])
+      // Demo: keep in React state for "My complaints" this session; no localStorage / no API.
+      return persist([{ ...created, ...(demoOnly ? {} : { unsent: true }) }, ...prev])
     })
-    void sendComplaint(created).then((saved) => saved && replaceWith(saved))
+    if (!demoOnly) void sendComplaint(created).then((saved) => saved && replaceWith(saved))
     return created
   }, [persist, replaceWith])
 

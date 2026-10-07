@@ -14,6 +14,12 @@ export type AttendanceRow = {
   baId: number
   baName: string
   baCode: string
+  coveredByName?: string | null
+  coverageOfName?: string | null
+  reportOwnerName?: string | null
+  coverageAssignedByName?: string | null
+  coverageAssignedAt?: string | null
+  coverageCancelled?: boolean
   storeId: number
   storeName: string
   storeCode: string
@@ -133,6 +139,7 @@ async function downloadAttendance(rows: AttendanceRow[], from: string, to: strin
   const sheet = XLSX.utils.aoa_to_sheet([
     [
       'Date', 'BA code', 'BA name', 'Store code', 'Store', 'City',
+      'Coverage details',
       'Check-in', 'Check-in latitude', 'Check-in longitude',
       'Check-out', 'Check-out latitude', 'Check-out longitude',
       'Report submitted', 'Status', 'Early checkout reason',
@@ -144,6 +151,13 @@ async function downloadAttendance(rows: AttendanceRow[], from: string, to: strin
       r.storeCode,
       r.storeName,
       r.city,
+      r.coverageCancelled && r.coverageOfName
+        ? `Coverage cancelled for ${r.coverageOfName}`
+        : r.coveredByName
+        ? `Absent; covered by ${r.coveredByName} at ${r.storeName}`
+        : r.coverageOfName
+          ? `Covering ${r.coverageOfName} at ${r.storeName}; report credit to ${r.reportOwnerName || r.coverageOfName}`
+          : '',
       timeOf(r.checkedInAt),
       r.checkInLat ?? '',
       r.checkInLng ?? '',
@@ -155,7 +169,7 @@ async function downloadAttendance(rows: AttendanceRow[], from: string, to: strin
       r.earlyCheckoutReason ?? '',
     ]),
   ])
-  sheet['!cols'] = [12, 12, 22, 12, 24, 12, 10, 12, 12, 10, 12, 12, 14, 14, 36].map((wch) => ({ wch }))
+  sheet['!cols'] = [12, 12, 22, 12, 24, 12, 55, 10, 12, 12, 10, 12, 12, 14, 14, 36].map((wch) => ({ wch }))
   const book = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(book, sheet, 'Attendance')
   XLSX.writeFile(book, `BA_Attendance_${from}_to_${to}.xlsx`)
@@ -300,6 +314,22 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                       <div className="text-[11px] text-slate-400">
                         {dateLabel(r.date)} · {r.day}
                       </div>
+                      {r.coveredByName && (
+                        <div className="mt-1 text-xs font-medium text-amber-700">Absent · covered by {r.coveredByName}</div>
+                      )}
+                      {r.coverageOfName && (
+                        <div className="mt-1 text-xs font-medium text-violet-700">
+                          {r.coverageCancelled
+                            ? `Planned cover cancelled for ${r.coverageOfName}`
+                            : `Covering ${r.coverageOfName}; report credit to ${r.reportOwnerName || r.coverageOfName}`}
+                        </div>
+                      )}
+                      {r.coveredByName && r.coverageAssignedByName && (
+                        <div className="mt-1 text-[11px] text-slate-400">
+                          Cover assigned by {r.coverageAssignedByName}
+                          {r.coverageAssignedAt ? ` · ${new Date(r.coverageAssignedAt).toLocaleString()}` : ''}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <StatusBadge status={r.status} />
@@ -344,6 +374,7 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                   <th className="px-4 py-3">Date</th>
                   <th className="px-4 py-3">Ambassador</th>
                   <th className="px-4 py-3">Store</th>
+                  <th className="px-4 py-3">Coverage details</th>
                   <th className="px-4 py-3">Check-in</th>
                   <th className="px-4 py-3">Check-out</th>
                   <th className="px-4 py-3">Report</th>
@@ -370,6 +401,26 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                     <td className="px-4 py-3">
                       <div>{r.storeName}</div>
                       <div className="text-xs text-slate-400">{[r.storeCode, r.city].filter(Boolean).join(' · ')}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {r.coveredByName ? (
+                        <div className="max-w-[16rem] text-xs font-medium text-amber-700">
+                          {r.baName} absent · covered by {r.coveredByName} at {r.storeName}
+                        </div>
+                      ) : r.coverageOfName ? (
+                        <div className="max-w-[16rem] text-xs font-medium text-violet-700">
+                          {r.coverageCancelled ? (
+                            `Planned cover cancelled for ${r.coverageOfName}`
+                          ) : (
+                            <>
+                              Covering for {r.coverageOfName} at {r.storeName}
+                              <div className="mt-0.5 font-normal text-slate-500">
+                                Report and target credit: {r.reportOwnerName || r.coverageOfName}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      ) : <span className="text-slate-300">—</span>}
                     </td>
                     <td className="px-4 py-3 tabular-nums whitespace-nowrap">
                       {timeOf(r.checkedInAt)}
@@ -407,7 +458,7 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                 ))}
                 {data && rows.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
+                    <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-500">
                       {data.results.length === 0
                         ? 'No BAs have shifts in this period.'
                         : 'No attendance matches these filters.'}
@@ -416,7 +467,7 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                 )}
                 {!data && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
+                    <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-500">
                       Loading attendance…
                     </td>
                   </tr>

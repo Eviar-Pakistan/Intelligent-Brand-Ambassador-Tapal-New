@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { useLocation } from 'react-router-dom'
 import { SERVER_SYNC_EVENT } from '../lib/serverSyncEvent'
 
 /** Modules from the server (the active training video) have ids starting with this. */
@@ -87,10 +88,13 @@ function readStoredModules(): StoredModule[] | null {
 }
 
 export function TrainingContentProvider({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation()
   const [modules, setModules] = useState<TrainingModule[]>([])
   const hydrated = useRef(false)
 
   useEffect(() => {
+    const trainingArea = pathname.startsWith('/ba') || /\/(ho|admin)\/ambassadors\/training\/?$/.test(pathname)
+    if (!trainingArea || hydrated.current) return
     let cancelled = false
     const stored = readStoredModules()?.filter((m) => !isRemovedSample(m)) ?? null
     if (!stored) {
@@ -118,10 +122,12 @@ export function TrainingContentProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [pathname])
 
   // The active training video Head Office uploaded, with its questions, on every device.
   useEffect(() => {
+    const trainingArea = pathname.startsWith('/ba') || /\/(ho|admin)\/ambassadors\/training\/?$/.test(pathname)
+    if (!trainingArea) return
     let cancelled = false
     async function sync() {
       try {
@@ -145,7 +151,7 @@ export function TrainingContentProvider({ children }: { children: ReactNode }) {
       cancelled = true
       window.removeEventListener(SERVER_SYNC_EVENT, sync)
     }
-  }, [])
+  }, [pathname])
 
   useEffect(() => {
     if (!hydrated.current) return

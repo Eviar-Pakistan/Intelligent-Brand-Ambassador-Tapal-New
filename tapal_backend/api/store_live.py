@@ -20,17 +20,19 @@ from django.utils import timezone
 
 
 def reset_stale_footfall() -> None:
-    """Footfall is for today only: clear any store whose figure is from an earlier day."""
+    """Footfall is for today only: clear any store whose figure is from an earlier business day."""
     from .models import Store
+    from .shifts import business_today
 
-    today = timezone.localdate()
+    today = business_today()
     Store.objects.exclude(footfall_date=today).exclude(today_footfall=0).update(today_footfall=0)
 
 
 def record_footfall(store, count: int, entered_by: str = '') -> None:
     from .models import Store, StoreFootfall
+    from .shifts import business_today
 
-    today = timezone.localdate()
+    today = business_today()
     StoreFootfall.objects.update_or_create(
         store=store, date=today, defaults={'count': count, 'entered_by': entered_by[:120]}
     )
@@ -85,10 +87,10 @@ def interception_counts(store_ids=None, start: date | None = None, end: date | N
 def live_store_stats(store_ids) -> dict[int, dict]:
     """For each store: its BAs this month (with On shift / Offline), today's coverage and a status."""
     from .models import Ambassador, MonthlyShift, ShiftAssignment, Store
-    from .shifts import ensure_daily_rows
+    from .shifts import business_today, ensure_daily_rows
 
     store_ids = list(store_ids)
-    today = timezone.localdate()
+    today = business_today()
     ensure_daily_rows(today)
 
     people: dict[int, dict[int, str]] = defaultdict(dict)  # store -> {ba id: name}

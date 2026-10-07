@@ -229,6 +229,23 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
         if 'is_active' in request.data:
             ambassador.is_active = str(request.data.get('is_active')).lower() in ('true', '1', 'yes')
             changed.append('is_active')
+        if 'is_demo' in request.data:
+            is_demo = str(request.data.get('is_demo')).lower() in ('true', '1', 'yes')
+            ambassador.is_demo = is_demo
+            changed.append('is_demo')
+            # Demo accounts cannot be backups.
+            if is_demo and ambassador.is_backup:
+                ambassador.is_backup = False
+                changed.append('is_backup')
+        if 'is_backup' in request.data:
+            is_backup = str(request.data.get('is_backup')).lower() in ('true', '1', 'yes')
+            if is_backup and (not ambassador.is_active or ambassador.is_demo):
+                return Response(
+                    {'detail': 'Only available non-demo ambassadors can join the backup pool.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            ambassador.is_backup = is_backup
+            changed.append('is_backup')
         if changed:
             ambassador.save(update_fields=[*changed, 'updated_at'])
         new_status = request.data.get('status')

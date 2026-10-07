@@ -1,6 +1,7 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect
@@ -21,6 +22,7 @@ from .models import (
     Ambassador,
     AmbassadorComplaint,
     AmbassadorMonthTarget,
+    BackupCoverage,
     Consumer,
     MonthlyShift,
     PlatformSettings,
@@ -33,6 +35,7 @@ from .serializers import (
     ConsumerCreateSerializer,
     ConsumerSerializer,
     AmbassadorComplaintSerializer,
+    BackupCoverageSerializer,
     PlatformSettingsSerializer,
     MonthlyShiftSerializer,
     ShiftAssignmentSerializer,
@@ -41,9 +44,13 @@ from .serializers import (
     SurveyQuestionSerializer,
 )
 from .shifts import (
+    assign_ba_stores,
     build_attendance,
+    business_today,
     create_month_shifts,
+    day_key_for,
     drop_pending_daily_rows,
+    ensure_daily_rows,
     parse_month,
     sync_daily_rows,
 )
@@ -199,6 +206,107 @@ class MonthlyShiftViewSet(viewsets.ModelViewSet):
         drop_pending_daily_rows(instance)
         instance.delete()
 
+    @action(detail=False, methods=['post'], url_path='swap')
+    def swap(self, request):
+        """Atomically swap the BAs assigned to two monthly shifts."""
+        from .models import ShiftAssignment
+
+        raw_ids = request.data.get('shift_ids')
+        if not isinstance(raw_ids, list) or len(raw_ids) != 2:
+            return Response({'detail': 'Choose exactly two shifts to swap.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            shift_ids = [int(value) for value in raw_ids]
+        except (TypeError, ValueError):
+            return Response({'detail': 'Shift IDs must be valid.'}, status=status.HTTP_400_BAD_REQUEST)
+        if shift_ids[0] == shift_ids[1]:
+            return Response({'detail': 'Choose two different shifts.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            shifts = list(
+                self.get_queryset().select_for_update().filter(id__in=shift_ids).order_by('id')
+            )
+            if len(shifts) != 2:
+                return Response({'detail': 'One or both shifts were not found.'}, status=status.HTTP_404_NOT_FOUND)
+            first, second = shifts
+            if first.month != second.month:
+                return Response({'detail': 'Both shifts must be in the same month.'}, status=status.HTTP_400_BAD_REQUEST)
+            if first.month < timezone.localdate().strftime('%Y-%m'):
+                return Response({'detail': 'Past month assignments cannot be changed.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not first.ambassador_id or not second.ambassador_id:
+                return Response({'detail': 'Both shifts must already have an assigned BA.'}, status=status.HTTP_400_BAD_REQUEST)
+            if first.ambassador_id == second.ambassador_id:
+                return Response({'detail': 'These shifts are already assigned to the same BA.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            today = business_today()
+            preserve_today = first.month == today.strftime('%Y-%m') and ShiftAssignment.objects.filter(
+                monthly_shift_id__in=shift_ids,
+                date=today,
+            ).filter(
+                Q(checked_in_at__isnull=False)
+                | Q(checked_out_at__isnull=False)
+                | Q(report_submitted_at__isnull=False)
+            ).exists()
+
+            # Validate the projected assignments before changing either row.
+            moved = [(first, second.ambassador_id), (second, first.ambassador_id)]
+            from .shifts import _overlaps
+
+            for shift, new_ambassador_id in moved:
+                other_shifts = list(
+                    MonthlyShift.objects.filter(ambassador_id=new_ambassador_id, month=shift.month).exclude(
+                        id__in=shift_ids
+                    )
+                )
+                conflict = next(
+                    (
+                        other
+                        for other in other_shifts
+                        if _overlaps(shift.start_time, shift.end_time, other.start_time, other.end_time)
+                    ),
+                    None,
+                )
+                if conflict:
+                    return Response(
+                        {'detail': f'{new_ambassador_id} has overlapping hours at another store in this month.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+            first_ba, second_ba = first.ambassador_id, second.ambassador_id
+            first.ambassador_id, second.ambassador_id = second_ba, first_ba
+            first.status = MonthlyShift.Status.SCHEDULED
+            second.status = MonthlyShift.Status.SCHEDULED
+            MonthlyShift.objects.filter(id=first.id).update(
+                ambassador_id=first.ambassador_id, status=first.status, updated_at=timezone.now()
+            )
+            MonthlyShift.objects.filter(id=second.id).update(
+                ambassador_id=second.ambassador_id, status=second.status, updated_at=timezone.now()
+            )
+
+            if first.month == timezone.localdate().strftime('%Y-%m'):
+                # Once either BA has started today, keep both today's assignments as they were.
+                # The swap then applies to later unchecked-in attendance rows.
+                effective_date = today + timedelta(days=1) if preserve_today else today
+                first_pending = first.days.filter(
+                    date__gte=effective_date,
+                    checked_in_at__isnull=True,
+                )
+                second_pending = second.days.filter(
+                    date__gte=effective_date,
+                    checked_in_at__isnull=True,
+                )
+                first_pending.update(ambassador_id=first.ambassador_id, status=first.status)
+                second_pending.update(ambassador_id=second.ambassador_id, status=second.status)
+                assign_ba_stores(first.month, [first_ba, second_ba])
+                for store_id in {first.store_id, second.store_id}:
+                    store = Store.objects.filter(pk=store_id).first()
+                    if store:
+                        store.bas = Ambassador.objects.filter(
+                            store_id=store_id, status=Ambassador.Status.DEPLOYED
+                        ).count()
+                        store.save(update_fields=['bas', 'updated_at'])
+
+        return Response({'detail': 'BA assignments swapped successfully.'})
+
     @action(detail=False, methods=['post'], url_path='bulk')
     def bulk(self, request):
         """POST {rows: [{ba_code, store_code, start_time, end_time, month}]}. One row = one monthly shift."""
@@ -225,7 +333,9 @@ class ShiftDayViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = scope_for(self.request.user).stores(
-            ShiftAssignment.objects.select_related('store', 'ambassador').order_by('-date', 'shift_label', 'id')
+            ShiftAssignment.objects.select_related(
+                'store', 'ambassador', 'covered_by', 'coverage_of__ambassador', 'report_owner', 'coverage_assigned_by'
+            ).order_by('-date', 'shift_label', 'id')
         )
         params = self.request.query_params
         if params.get('ambassador'):
@@ -238,6 +348,138 @@ class ShiftDayViewSet(viewsets.ReadOnlyModelViewSet):
             except (KeyError, ValueError):
                 pass
         return qs
+
+    @action(detail=False, methods=['post'], url_path='cover')
+    def cover(self, request):
+        """Create ongoing backup coverage for an absent BA at their assigned store."""
+
+        try:
+            monthly_shift_id = int(request.data.get('monthly_shift_id'))
+            backup_id = int(request.data.get('backup_ambassador_id'))
+            starts_on = datetime.strptime(
+                str(request.data.get('start_date') or request.data.get('date') or ''), '%Y-%m-%d'
+            ).date()
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'Choose a scheduled shift, backup BA, and valid coverage start date (YYYY-MM-DD).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        today = timezone.localdate()
+        if starts_on < today:
+            return Response({'detail': 'Coverage cannot start on a past date.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        scope = scope_for(request.user)
+        monthly = scope.stores(
+            MonthlyShift.objects.select_related('store', 'ambassador').all()
+        ).filter(pk=monthly_shift_id, month=starts_on.strftime('%Y-%m')).first()
+        if not monthly or not monthly.ambassador_id:
+            return Response({'detail': 'The selected monthly shift is not assigned to a BA.'}, status=status.HTTP_404_NOT_FOUND)
+        absent_ba = monthly.ambassador
+        backup = Ambassador.objects.filter(
+            pk=backup_id,
+            is_active=True,
+            is_backup=True,
+            is_demo=False,
+        ).first()
+        if not backup:
+            return Response({'detail': 'Choose an available BA marked as a backup.'}, status=status.HTTP_400_BAD_REQUEST)
+        if backup.id == absent_ba.id:
+            return Response({'detail': 'A BA cannot cover their own shift.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not scope.allows_ambassador(backup.id):
+            return Response({'detail': 'The selected backup BA is outside your city scope.'}, status=status.HTTP_403_FORBIDDEN)
+        with transaction.atomic():
+            active_absence = BackupCoverage.objects.select_for_update().filter(
+                original_ba=absent_ba,
+                store=monthly.store,
+            ).filter(Q(ends_on__isnull=True) | Q(ends_on__gte=starts_on)).first()
+            if active_absence:
+                return Response(
+                    {'detail': f'{absent_ba.name} already has backup coverage at this store from {active_absence.starts_on}.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            backup_conflict = BackupCoverage.objects.select_for_update().filter(
+                backup_ba=backup
+            ).filter(Q(ends_on__isnull=True) | Q(ends_on__gte=starts_on)).first()
+            if backup_conflict:
+                return Response(
+                    {'detail': f'{backup.name} is already covering another BA at {backup_conflict.store.name}.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if MonthlyShift.objects.filter(ambassador=backup, month__gte=starts_on.strftime('%Y-%m')).exists():
+                return Response(
+                    {'detail': 'The backup BA has a monthly shift during this coverage period. Resolve that assignment first.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if ShiftAssignment.objects.filter(ambassador=backup, date=starts_on, coverage_cancelled=False).exists():
+                return Response({'detail': 'The backup BA already has a shift on the start date.'}, status=status.HTTP_409_CONFLICT)
+            if starts_on == today:
+                original = ShiftAssignment.objects.filter(monthly_shift=monthly, date=starts_on).first()
+                if original and (original.checked_in_at or original.checked_out_at or original.report_submitted_at):
+                    return Response(
+                        {'detail': 'The original BA has already started or completed today’s shift.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            coverage = BackupCoverage.objects.create(
+                monthly_shift=monthly,
+                original_ba=absent_ba,
+                backup_ba=backup,
+                store=monthly.store,
+                starts_on=starts_on,
+                assigned_by=request.user if request.user.is_authenticated else None,
+            )
+        ensure_daily_rows(starts_on, absent_ba)
+        return Response(BackupCoverageSerializer(coverage).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='end-coverage')
+    def end_coverage(self, request):
+        """End ongoing coverage after its final covered day; keep all prior daily records."""
+        try:
+            coverage_id = int(request.data.get('coverage_id'))
+            resume_on = datetime.strptime(
+                str(request.data.get('resume_on') or (timezone.localdate() + timedelta(days=1)).isoformat()),
+                '%Y-%m-%d',
+            ).date()
+        except (TypeError, ValueError):
+            return Response({'detail': 'Choose a valid date for the original BA to resume (YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
+        today = timezone.localdate()
+        if resume_on < today:
+            return Response({'detail': 'The original BA cannot resume on a past date.'}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            coverage = scope_for(request.user).stores(
+                BackupCoverage.objects.select_for_update().select_related('store', 'original_ba', 'backup_ba')
+            ).filter(pk=coverage_id).first()
+            if not coverage:
+                return Response({'detail': 'Coverage assignment was not found.'}, status=status.HTTP_404_NOT_FOUND)
+            if resume_on <= coverage.starts_on:
+                return Response(
+                    {'detail': f'Choose a resume date after {coverage.starts_on.isoformat()} so the backup’s first covered day is retained.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            ends_on = resume_on - timedelta(days=1)
+            if coverage.ended_at or (coverage.ends_on and coverage.ends_on < today):
+                return Response({'detail': 'This coverage assignment has already ended.'}, status=status.HTTP_409_CONFLICT)
+            worked_after_end = coverage.daily_assignments.filter(
+                coverage_of__isnull=False, date__gt=ends_on, checked_in_at__isnull=False
+            ).exists()
+            if worked_after_end:
+                return Response(
+                    {'detail': 'The backup BA has already checked in on or after the selected return date. Choose a later return date so their attendance is preserved.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            coverage.ends_on = ends_on
+            coverage.ended_by = request.user if request.user.is_authenticated else None
+            coverage.ended_at = timezone.now()
+            coverage.save(update_fields=['ends_on', 'ended_by', 'ended_at'])
+            for backup_day in coverage.daily_assignments.filter(
+                coverage_of__isnull=False, date__gt=ends_on, checked_in_at__isnull=True
+            ).select_related('coverage_of'):
+                original_day = backup_day.coverage_of
+                if original_day and original_day.covered_by_id == coverage.backup_ba_id:
+                    original_day.covered_by = None
+                    original_day.save(update_fields=['covered_by', 'updated_at'])
+                backup_day.coverage_cancelled = True
+                backup_day.save(update_fields=['coverage_cancelled', 'updated_at'])
+        return Response(BackupCoverageSerializer(coverage).data)
 
 
 class ConsumerViewSet(viewsets.ReadOnlyModelViewSet):
@@ -290,7 +532,7 @@ def ba_attendance(request):
     viewer = viewer_scope(request)  # Head Office, or a supervisor for their own stores
     if viewer is None:
         return Response({'detail': 'Sign in to continue.'}, status=status.HTTP_401_UNAUTHORIZED)
-    today = timezone.localdate()
+    today = business_today()
     date_to = parse('date_to') or today
     date_from = parse('date_from') or date_to
     return Response(

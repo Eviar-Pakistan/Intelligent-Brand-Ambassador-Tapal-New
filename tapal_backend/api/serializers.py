@@ -2,11 +2,13 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
+from django.db.models import Q
 from rest_framework import serializers
 
 from .models import (
     Ambassador,
     AmbassadorComplaint,
+    BackupCoverage,
     AssessmentAnswer,
     AssessmentQuestion,
     AssessmentSession,
@@ -486,6 +488,8 @@ class AmbassadorSerializer(serializers.ModelSerializer):
             'status',
             'invite_token',
             'is_active',
+            'is_backup',
+            'is_demo',
             'training_url',
             'overall_score',
             'report_json',
@@ -569,7 +573,12 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
 class AmbassadorCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ambassador
-        fields = ('name', 'email', 'city', 'phone')
+        fields = ('name', 'email', 'city', 'phone', 'is_backup', 'is_demo')
+
+    def validate(self, attrs):
+        if attrs.get('is_demo') and attrs.get('is_backup'):
+            raise serializers.ValidationError({'is_backup': 'A demo account cannot be a backup BA.'})
+        return attrs
 
     def validate_name(self, value):
         value = (value or '').strip()
@@ -627,6 +636,12 @@ class ShiftAssignmentSerializer(serializers.ModelSerializer):
     peakRecommended = serializers.BooleanField(source='peak_recommended', required=False)
     baId = serializers.SerializerMethodField()
     baName = serializers.SerializerMethodField()
+    coveredByName = serializers.SerializerMethodField()
+    coverageOfName = serializers.SerializerMethodField()
+    reportOwnerName = serializers.SerializerMethodField()
+    coverageAssignedByName = serializers.SerializerMethodField()
+    coverageAssignedAt = serializers.DateTimeField(source='coverage_assigned_at', read_only=True)
+    coverageCancelled = serializers.BooleanField(source='coverage_cancelled', read_only=True)
     checkedIn = serializers.SerializerMethodField()
     checkedOut = serializers.SerializerMethodField()
     checkedInAt = serializers.DateTimeField(source='checked_in_at', read_only=True)
@@ -665,6 +680,12 @@ class ShiftAssignmentSerializer(serializers.ModelSerializer):
             'peakRecommended',
             'baId',
             'baName',
+            'coveredByName',
+            'coverageOfName',
+            'reportOwnerName',
+            'coverageAssignedByName',
+            'coverageAssignedAt',
+            'coverageCancelled',
             'status',
             'checkedIn',
             'checkedOut',
@@ -693,6 +714,20 @@ class ShiftAssignmentSerializer(serializers.ModelSerializer):
     def get_baName(self, obj):
         return obj.ambassador.name if obj.ambassador_id else None
 
+    def get_coveredByName(self, obj):
+        return obj.covered_by.name if obj.covered_by_id else None
+
+    def get_coverageOfName(self, obj):
+        return obj.coverage_of.ambassador.name if obj.coverage_of_id and obj.coverage_of.ambassador_id else None
+
+    def get_reportOwnerName(self, obj):
+        return obj.report_owner.name if obj.report_owner_id else (obj.ambassador.name if obj.ambassador_id else None)
+
+    def get_coverageAssignedByName(self, obj):
+        if obj.coverage_assigned_by_id:
+            return obj.coverage_assigned_by.get_full_name() or obj.coverage_assigned_by.get_username()
+        return None
+
     def get_checkedIn(self, obj):
         return bool(obj.checked_in_at)
 
@@ -702,8 +737,7 @@ class ShiftAssignmentSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         start = attrs.get('start_time', getattr(self.instance, 'start_time', None))
         end = attrs.get('end_time', getattr(self.instance, 'end_time', None))
-        if start and end and end <= start:
-            raise serializers.ValidationError({'endTime': 'End time must be after start time.'})
+        # Overnight shifts allowed: end before/equal start means the shift ends next morning.
         if ('start_time' in attrs or 'end_time' in attrs) and start and end:
             attrs['shift_label'] = label_from_times(start.strftime('%H:%M'), end.strftime('%H:%M'))
         if self.instance is None and not attrs.get('shift_label'):
@@ -784,6 +818,7 @@ class MonthlyShiftSerializer(serializers.ModelSerializer):
     baId = serializers.SerializerMethodField()
     baName = serializers.SerializerMethodField()
     baCode = serializers.SerializerMethodField()
+    backupCoverage = serializers.SerializerMethodField()
     store_id = serializers.PrimaryKeyRelatedField(queryset=Store.objects.all(), source='store', write_only=True)
     ambassador_id = serializers.PrimaryKeyRelatedField(
         queryset=Ambassador.objects.all(),
@@ -810,6 +845,7 @@ class MonthlyShiftSerializer(serializers.ModelSerializer):
             'baId',
             'baName',
             'baCode',
+            'backupCoverage',
             'status',
             'store_id',
             'ambassador_id',
@@ -832,6 +868,38 @@ class MonthlyShiftSerializer(serializers.ModelSerializer):
     def get_baCode(self, obj):
         return obj.ambassador.ba_code if obj.ambassador_id else None
 
+    def validate_ambassador_id(self, value):
+        if value and value.is_demo:
+            raise serializers.ValidationError('Demo accounts cannot be assigned to monthly shifts.')
+        return value
+
+    def get_backupCoverage(self, obj):
+        if not obj.ambassador_id:
+            return None
+        month_start = date.fromisoformat(f'{obj.month}-01')
+        month_end = date(month_start.year, month_start.month, 1)
+        if month_start.month == 12:
+            month_end = date(month_start.year + 1, 1, 1)
+        else:
+            month_end = date(month_start.year, month_start.month + 1, 1)
+        coverage = (
+            BackupCoverage.objects.filter(original_ba_id=obj.ambassador_id, store_id=obj.store_id, starts_on__lt=month_end)
+            .filter(Q(ends_on__isnull=True) | Q(ends_on__gte=month_start))
+            .select_related('backup_ba')
+            .order_by('-starts_on', '-id')
+            .first()
+        )
+        if not coverage:
+            return None
+        return {
+            'id': coverage.id,
+            'baId': coverage.backup_ba_id,
+            'baName': coverage.backup_ba.name if coverage.backup_ba_id else 'Backup BA',
+            'startsOn': coverage.starts_on.isoformat(),
+            'endsOn': coverage.ends_on.isoformat() if coverage.ends_on else None,
+            'endedAt': coverage.ended_at.isoformat() if coverage.ended_at else None,
+        }
+
     def validate_month(self, value):
         parsed = parse_month(value)
         if not parsed:
@@ -841,8 +909,23 @@ class MonthlyShiftSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         start = attrs.get('start_time', getattr(self.instance, 'start_time', None))
         end = attrs.get('end_time', getattr(self.instance, 'end_time', None))
-        if start and end and end <= start:
-            raise serializers.ValidationError({'endTime': 'End time must be after start time.'})
+        # Overnight shifts allowed: end before/equal start means the shift ends next morning.
+        if ('start_time' in attrs or 'end_time' in attrs) and start and end:
+            attrs['shift_label'] = label_from_times(start.strftime('%H:%M'), end.strftime('%H:%M'))
+        ambassador = attrs.get('ambassador', getattr(self.instance, 'ambassador', None))
+        month = attrs.get('month', getattr(self.instance, 'month', None))
+        if ambassador and month:
+            parsed = parse_month(month)
+            if parsed:
+                first_day = date(parsed[0], parsed[1], 1)
+                next_month = date(parsed[0] + (1 if parsed[1] == 12 else 0), 1 if parsed[1] == 12 else parsed[1] + 1, 1)
+                has_backup_coverage = BackupCoverage.objects.filter(
+                    backup_ba=ambassador, starts_on__lt=next_month
+                ).filter(Q(ends_on__isnull=True) | Q(ends_on__gte=first_day)).exists()
+                if has_backup_coverage:
+                    raise serializers.ValidationError(
+                        {'ambassador_id': 'This BA has an active backup assignment during that month. End coverage before scheduling them elsewhere.'}
+                    )
         return attrs
 
     def _finish(self, shift):
@@ -862,3 +945,22 @@ class MonthlyShiftSerializer(serializers.ModelSerializer):
         for field, value in validated_data.items():
             setattr(instance, field, value)
         return self._finish(instance)
+
+
+class BackupCoverageSerializer(serializers.ModelSerializer):
+    monthlyShiftId = serializers.IntegerField(source='monthly_shift_id', read_only=True)
+    originalBaId = serializers.IntegerField(source='original_ba_id', read_only=True)
+    originalBaName = serializers.CharField(source='original_ba.name', read_only=True)
+    backupBaId = serializers.IntegerField(source='backup_ba_id', read_only=True)
+    backupBaName = serializers.CharField(source='backup_ba.name', read_only=True)
+    storeId = serializers.IntegerField(source='store_id', read_only=True)
+    storeName = serializers.CharField(source='store.name', read_only=True)
+    startsOn = serializers.DateField(source='starts_on', read_only=True)
+    endsOn = serializers.DateField(source='ends_on', read_only=True, allow_null=True)
+
+    class Meta:
+        model = BackupCoverage
+        fields = (
+            'id', 'monthlyShiftId', 'originalBaId', 'originalBaName', 'backupBaId', 'backupBaName',
+            'storeId', 'storeName', 'startsOn', 'endsOn', 'assigned_at', 'ended_at',
+        )

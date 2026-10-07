@@ -12,7 +12,7 @@ from rest_framework.response import Response
 
 from .models import Ambassador, AmbassadorComplaint, MonthlyShift, ShiftAssignment, Store
 from .portal_views import notify_supervisor
-from .shifts import ensure_daily_rows
+from .shifts import business_today, ensure_daily_rows
 
 
 def _ambassador_from_token(token: str | None) -> Ambassador | None:
@@ -42,23 +42,56 @@ def _past_shift_end(shift: ShiftAssignment) -> bool:
     return end_at is None or _server_now() >= end_at
 
 
-def _today_shift_for(ambassador: Ambassador) -> ShiftAssignment | None:
-    today = timezone.localdate()
-    ensure_daily_rows(today, ambassador)
-    qs = (
+_ACTIVE_STATUSES = (
+    ShiftAssignment.Status.SCHEDULED,
+    ShiftAssignment.Status.CONFLICT,
+)
+
+
+def _shift_qs(ambassador: Ambassador, day: date):
+    return (
         ShiftAssignment.objects.filter(
             ambassador=ambassador,
-            date=today,
-            status__in=(
-                ShiftAssignment.Status.SCHEDULED,
-                ShiftAssignment.Status.CONFLICT,
-            ),
+            date=day,
+            coverage_cancelled=False,
+            status__in=_ACTIVE_STATUSES,
         )
-        .select_related('store', 'ambassador')
+        .select_related('store', 'ambassador', 'covered_by', 'report_owner', 'coverage_of__ambassador')
         .order_by('shift_label', 'id')
     )
-    # One check-in and one check-out per day: the shift the BA is on, else the one they already
-    # finished today (so a second shift cannot be started), else the earliest not started.
+
+
+def _open_checked_in_shift(ambassador: Ambassador) -> ShiftAssignment | None:
+    """Incomplete check-in (any date) — used to keep overnight work on the check-in business day."""
+    return (
+        ShiftAssignment.objects.filter(
+            ambassador=ambassador,
+            checked_in_at__isnull=False,
+            checked_out_at__isnull=True,
+            coverage_cancelled=False,
+            status__in=_ACTIVE_STATUSES,
+        )
+        .select_related('store', 'ambassador', 'covered_by', 'report_owner', 'coverage_of__ambassador')
+        .order_by('-date', '-id')
+        .first()
+    )
+
+
+def _today_shift_for(ambassador: Ambassador) -> ShiftAssignment | None:
+    """
+    Today's shift for attendance: business day rolls at 05:00 Asia/Karachi.
+    Prefer an open checked-in shift while its business day is still open (until 05:00).
+    After 05:00, a new daily row is created and incomplete prior days count as Absent.
+    """
+    today = business_today()
+    open_shift = _open_checked_in_shift(ambassador)
+    if open_shift and open_shift.date == today:
+        return open_shift
+
+    ensure_daily_rows(today, ambassador)
+    qs = _shift_qs(ambassador, today)
+    # One check-in and one check-out per business day: the shift the BA is on, else the one they
+    # already finished today (so a second shift cannot be started), else the earliest not started.
     active = qs.filter(checked_in_at__isnull=False, checked_out_at__isnull=True).first()
     if active:
         return active
@@ -73,7 +106,7 @@ def _today_shift_for(ambassador: Ambassador) -> ShiftAssignment | None:
 
 def _upcoming_rows(ambassador: Ambassador) -> list[dict]:
     """This month's and later monthly shifts."""
-    this_month = timezone.localdate().strftime('%Y-%m')
+    this_month = business_today().strftime('%Y-%m')
     upcoming = (
         MonthlyShift.objects.filter(ambassador=ambassador, month__gte=this_month)
         .select_related('store')
@@ -153,11 +186,19 @@ def serialize_ba_shift(shift: ShiftAssignment | None, ambassador: Ambassador) ->
             'peakRecommended': shift.peak_recommended,
             'status': shift.status,
             'checkedIn': bool(shift.checked_in_at),
+            'attendanceType': shift.attendance_type,
             'checkedOut': bool(shift.checked_out_at),
             'isLive': shift.is_checked_in,
             'checkedInAt': shift.checked_in_at.isoformat() if shift.checked_in_at else None,
             'checkedOutAt': shift.checked_out_at.isoformat() if shift.checked_out_at else None,
             'reportSubmitted': bool(shift.report_submitted_at),
+            'coveredByName': shift.covered_by.name if shift.covered_by_id else None,
+            'isCovering': bool(shift.coverage_of_id),
+            'reportOwner': {
+                'id': shift.report_owner_id or ambassador.id,
+                'name': shift.report_owner.name if shift.report_owner_id else ambassador.name,
+                'baCode': shift.report_owner.ba_code if shift.report_owner_id else ambassador.ba_code,
+            },
             'checkInLat': shift.check_in_lat,
             'checkInLng': shift.check_in_lng,
             'storeLat': store.latitude,
@@ -229,19 +270,34 @@ def ba_check_in(request):
             {'detail': 'No shift scheduled for today.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    if shift.covered_by_id:
+        return Response(
+            {'detail': f'This shift is marked absent and covered by {shift.covered_by.name}.'},
+            status=status.HTTP_409_CONFLICT,
+        )
     if shift.checked_out_at:
         return Response(
-            {'detail': 'You have already checked in and out today. Check-in opens again tomorrow.'},
+            {
+                'detail': (
+                    'You have already checked in and out today. '
+                    'Check-in opens again after 5:00 AM.'
+                ),
+            },
             status=status.HTTP_400_BAD_REQUEST,
         )
     if shift.checked_in_at:
         return Response(serialize_ba_shift(shift, ambassador))
+
+    attendance_type = str(request.data.get('attendance_type') or 'store').strip().lower()
+    if attendance_type not in {'store', 'training'}:
+        return Response({'detail': 'Choose store or training check-in.'}, status=status.HTTP_400_BAD_REQUEST)
 
     lat, lng, accuracy = _location(request.data)
     if lat is None:
         return Response({'detail': LOCATION_REQUIRED.format('check in')}, status=status.HTTP_400_BAD_REQUEST)
 
     shift.checked_in_at = timezone.now()
+    shift.attendance_type = attendance_type
     shift.check_in_lat, shift.check_in_lng, shift.check_in_accuracy_m = lat, lng, accuracy
     from .portal_views import _image_from_data_url
 
@@ -251,6 +307,7 @@ def ba_check_in(request):
     shift.save(
         update_fields=[
             'checked_in_at',
+            'attendance_type',
             'check_in_lat',
             'check_in_lng',
             'check_in_accuracy_m',
@@ -312,12 +369,43 @@ def ba_check_out(request):
     if not ambassador:
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
 
+    today = business_today()
+    stale = _open_checked_in_shift(ambassador)
+    if stale and stale.date < today:
+        return Response(
+            {
+                'detail': (
+                    'Checkout closed at 5:00 AM. That work day is marked Absent. '
+                    "Check in for today's shift."
+                ),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     shift = _today_shift_for(ambassador)
     if not shift:
         return Response({'detail': 'No shift scheduled for today.'}, status=status.HTTP_400_BAD_REQUEST)
     if not shift.checked_in_at:
         return Response({'detail': 'Check in before ending the shift.'}, status=status.HTTP_400_BAD_REQUEST)
     if shift.checked_out_at and shift.report_submitted_at:
+        return Response(serialize_ba_shift(shift, ambassador))
+
+    # Training attendance uses the same location-verified shift but has no store report.
+    if shift.attendance_type == 'training':
+        lat, lng, accuracy = _location(request.data)
+        if lat is None:
+            return Response({'detail': LOCATION_REQUIRED.format('check out')}, status=status.HTTP_400_BAD_REQUEST)
+        now = timezone.now()
+        shift.checkout_report = {'attendanceType': 'training'}
+        shift.report_submitted_at = now
+        shift.checked_out_at = now
+        shift.early_checkout_reason = ''
+        shift.check_out_lat, shift.check_out_lng, shift.check_out_accuracy_m = lat, lng, accuracy
+        shift.save(update_fields=[
+            'checkout_report', 'report_submitted_at', 'checked_out_at', 'early_checkout_reason',
+            'check_out_lat', 'check_out_lng', 'check_out_accuracy_m', 'updated_at',
+        ])
+        notify_supervisor(shift, 'check-out')
         return Response(serialize_ba_shift(shift, ambassador))
 
     report = _clean_report(request.data.get('report'))

@@ -17,6 +17,7 @@ export type BaMe = {
   conversion: number
   weekSessions: number
   monthTarget: BaMonthTarget | null
+  reportOwner?: { id: number; name: string; baCode: string; isCovering: boolean }
   daysWorked: number
   rating: number | null
   ratingCount: number

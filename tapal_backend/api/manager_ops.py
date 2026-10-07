@@ -43,8 +43,10 @@ def _attendance_status(shift: ShiftAssignment) -> str:
 def build_manager_overview(scope=None) -> dict:
     from .city_scope import ALL
 
+    from .shifts import business_today
+
     scope = scope or ALL
-    today = timezone.localdate()
+    today = business_today()
 
     stores_qs = scope.stores(Store.objects.all(), 'id').annotate(
         shopper_count_ann=Count('consumers', distinct=True),

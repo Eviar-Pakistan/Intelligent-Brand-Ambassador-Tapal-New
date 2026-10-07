@@ -22,7 +22,7 @@ import {
   createBaAccounts,
   downloadAmbassadorTemplate,
   downloadBaLinks,
-  isDemoBa,
+  isBuiltInDemoBa,
   parseAmbassadorFile,
   useBaAccounts,
   type AmbassadorParseResult,
@@ -125,9 +125,13 @@ function AccountLinkModal({
       {live && (
         <div className="space-y-4 text-sm">
           <p className="text-slate-600">
-            Share this link with {live.name}. Opening it takes them straight into their account. There is no
-            password.
+            Share this link with {live.name}. Opening it takes them straight into their account. There is no password.
           </p>
+          {live.isDemoAccount && (
+            <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Demo check-ins, reports, and complaints stay in this session only (not saved to the database or browser storage).
+            </p>
+          )}
           <div className="rounded-xl bg-slate-50 px-4 py-3">
             <div className="text-xs font-semibold tracking-wide text-slate-500 uppercase">BA code</div>
             <div className="mt-1 font-mono text-lg font-semibold text-slate-900">{live.baCode || '—'}</div>
@@ -151,7 +155,7 @@ function CreateAmbassadorModal({
   onClose: () => void
   onCreated: (account: BaAccount) => void
 }) {
-  const fresh = () => ({ name: '', city: '', email: '', phone: '' })
+  const fresh = () => ({ name: '', city: '', email: '', phone: '', isBackup: false, isDemoAccount: false })
   const [form, setForm] = useState(fresh)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -204,6 +208,35 @@ function CreateAmbassadorModal({
         <label className="block text-sm">
           <span className="mb-1 block font-medium text-slate-700">Phone</span>
           <input type="tel" value={form.phone} onChange={set('phone')} className={modalFieldClass} />
+        </label>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm">
+          <input
+            type="checkbox"
+            checked={form.isBackup}
+            disabled={form.isDemoAccount}
+            onChange={(e) => setForm({ ...form, isBackup: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+          />
+          <span>
+            <span className="block font-medium text-slate-800">Designate as backup BA</span>
+            <span className="mt-0.5 block text-xs text-slate-500">
+              This BA can cover shifts after becoming active and certified. Demo accounts cannot be backups.
+            </span>
+          </span>
+        </label>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-amber-200 bg-amber-50/60 p-3 text-sm">
+          <input
+            type="checkbox"
+            checked={form.isDemoAccount}
+            onChange={(e) => setForm({ ...form, isDemoAccount: e.target.checked, isBackup: e.target.checked ? false : form.isBackup })}
+            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+          />
+          <span>
+            <span className="block font-medium text-slate-800">Demo Account</span>
+            <span className="mt-0.5 block text-xs text-slate-600">
+              Saves a demo marker in the database. Demo check-ins, reports, interceptions, and complaints are session-only (no browser storage, no activity in the database).
+            </span>
+          </span>
         </label>
         <p className="text-xs text-slate-500">
           A unique BA code is created automatically. After you save, you get that code and a personal link.
@@ -426,6 +459,10 @@ export function AmbassadorsPage() {
     }
     return map
   }, [todayAttendance])
+  const coverageByBa = useMemo(
+    () => new Map((todayAttendance?.results ?? []).filter((row) => row.coverageOfName && !row.coverageCancelled).map((row) => [row.baId, row])),
+    [todayAttendance],
+  )
   const reportedToday = useMemo(
     () => new Set(reports.filter((r) => localDay(new Date(r.submittedAt)) === today).map((r) => r.baId)),
     [reports, today],
@@ -443,7 +480,7 @@ export function AmbassadorsPage() {
   }, [])
 
   const filteredAccounts = accounts.filter((a) => {
-    if (isDemoBa(a.id)) return false
+    if (isBuiltInDemoBa(a.id)) return false
     const matchTab = tab === 'All' || (a.status === 'Invited' ? tab === 'Pending' : a.status === tab)
     const query = q.toLowerCase()
     return matchTab && (a.name.toLowerCase().includes(query) || (a.storeName ?? '').toLowerCase().includes(query))
@@ -511,7 +548,10 @@ export function AmbassadorsPage() {
                 <td className="px-4 py-3">
                   <button type="button" onClick={() => setDetailId(a.id)} className="flex items-center gap-3 text-left">
                     <Avatar name={a.name} />
-                    <span className="font-medium text-slate-900 hover:text-brand-600">{a.name}</span>
+                    <span className="flex flex-wrap items-center gap-2 font-medium text-slate-900 hover:text-brand-600">
+                      {a.name}
+                      {a.isDemoAccount && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">Demo</span>}
+                    </span>
                     {a.isActive === false && <StatusBadge status="Inactive" />}
                   </button>
                 </td>
@@ -522,7 +562,18 @@ export function AmbassadorsPage() {
                     status={a.result ? (a.result.certified ? 'Certified' : 'Rejected') : a.status}
                   />
                 </td>
-                <td className="px-4 py-3 text-slate-600">{a.storeName || '—'}</td>
+                <td className="px-4 py-3 text-slate-600">
+                  {(() => {
+                    const serverId = serverAmbassadorId(a.id)
+                    const coverage = serverId == null ? undefined : coverageByBa.get(serverId)
+                    return coverage ? (
+                      <div>
+                        <div className="font-medium text-violet-700">Covering {coverage.storeName}</div>
+                        <div className="text-xs text-violet-600">For {coverage.coverageOfName}</div>
+                      </div>
+                    ) : a.storeName || '—'
+                  })()}
+                </td>
                 <td className="px-4 py-3 tabular-nums text-slate-700">
                   {targetForBa(a.id, targetMonth, monthTargets)?.targetKg.toLocaleString() ?? '—'}
                 </td>

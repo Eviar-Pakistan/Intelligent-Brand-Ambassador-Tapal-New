@@ -104,6 +104,9 @@ export function LoginPage({ initialTab = 'headOffice' }: { initialTab?: LoginTab
         <img
           src={brand.sidebar}
           alt=""
+          loading="lazy"
+          decoding="async"
+          fetchPriority="low"
           className="pointer-events-none absolute inset-0 h-full w-full object-cover object-center opacity-55"
         />
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black via-black/70 to-black/40" />

@@ -20,9 +20,11 @@ import { serverAmbassadorId, useSchedule, type MonthlyShift } from '../../contex
 import { Time12Select } from '../../components/Time12Select'
 import { StoreQrCard } from '../../components/StoreQrCard'
 import { useBaAccounts } from '../../lib/baAccounts'
+import { useAttendance } from './BaAttendancePage'
 import { findCreatedStore, shopperPath, useCreatedStores } from '../../lib/storeRegistry'
 import { BulkStoreModal, useRoleBase } from './StoreCreation'
 import { portalGet, portalSend } from '../../lib/serverApi'
+import { djangoFetch } from '../../lib/djangoApi'
 
 type CompetitorField = { id?: number; key: string; label: string; fieldType: 'text' | 'number'; scope: 'ALL' | 'CITY' | 'STORE'; city: string; storeId: number | null }
 
@@ -190,7 +192,13 @@ export function StoreDetailPage() {
   const { id } = useParams()
   const base = useRoleBase()
   useCreatedStores()
+  const today = new Date()
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+  const { data: todayAttendance } = useAttendance(todayKey, todayKey)
   const store = stores.find((s) => String(s.id) === id)
+  const backupCoverage = (todayAttendance?.results ?? []).filter(
+    (row) => row.storeId === store?.id && !!row.coverageOfName && !row.coverageCancelled,
+  )
   if (!store) {
     return (
       <div className="space-y-4">
@@ -266,7 +274,7 @@ export function StoreDetailPage() {
       <div className="grid gap-5 lg:grid-cols-2">
         <Card>
           <h3 className="mb-3 font-semibold">Assigned Ambassadors</h3>
-          {store.assigned.length === 0 ? (
+          {store.assigned.length === 0 && backupCoverage.length === 0 ? (
             <p className="text-sm text-slate-500">No BA has a shift here this month or is deployed here.</p>
           ) : (
             <div className="space-y-2">
@@ -281,6 +289,22 @@ export function StoreDetailPage() {
                     <span className="text-sm font-medium">{a.name}</span>
                   </div>
                   <StatusBadge status={a.state === 'Active' ? 'On shift' : a.state} />
+                </Link>
+              ))}
+              {backupCoverage.map((row) => (
+                <Link
+                  key={`coverage-${row.id}`}
+                  to={`/ho/ambassadors/api-${row.baId}`}
+                  className="flex items-center justify-between rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 hover:bg-violet-100"
+                >
+                  <div className="flex items-center gap-2">
+                    <Avatar name={row.baName} size="sm" />
+                    <div>
+                      <div className="text-sm font-medium text-violet-900">{row.baName} · Backup BA</div>
+                      <div className="text-xs text-violet-700">Covering for {row.coverageOfName} today</div>
+                    </div>
+                  </div>
+                  <StatusBadge status="Covering" />
                 </Link>
               ))}
             </div>
@@ -353,6 +377,21 @@ export function DeploymentPage() {
 
 function SchedulerPanel() {
   const accounts = useBaAccounts()
+  const now = new Date()
+  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const { data: todayAttendance } = useAttendance(todayKey, todayKey)
+  const [backupPoolLoading, setBackupPoolLoading] = useState(true)
+  useEffect(() => {
+    let mounted = true
+    void import('../../lib/djangoSync')
+      .then(({ syncDjango }) => syncDjango())
+      .finally(() => {
+        if (mounted) setBackupPoolLoading(false)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [])
   const assignable = useMemo(
     () =>
       accounts
@@ -361,14 +400,44 @@ function SchedulerPanel() {
         .sort((a, b) => a.name.localeCompare(b.name)),
     [accounts],
   )
-  const { schedule, month, monthLabel, loading, error, shiftMonth, reload, saveShift, clearBaFromSlot, deleteShift } =
-    useSchedule()
+  const backupPool = useMemo(
+    () => assignable.filter((a) => a.isBackup && !a.isDemoAccount && a.isActive !== false),
+    [assignable],
+  )
+  const {
+    schedule,
+    month,
+    monthLabel,
+    loading,
+    error,
+    shiftMonth,
+    reload,
+    saveShift,
+    swapShifts,
+    clearBaFromSlot,
+    deleteShift,
+  } = useSchedule()
   const [query, setQuery] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  const [swapOpen, setSwapOpen] = useState(false)
+  const [swapFirst, setSwapFirst] = useState('')
+  const [swapSecond, setSwapSecond] = useState('')
+  const [swapSaving, setSwapSaving] = useState(false)
+  const [swapError, setSwapError] = useState<string | null>(null)
+  const [coverOpen, setCoverOpen] = useState(false)
+  const [coverShift, setCoverShift] = useState<MonthlyShift | null>(null)
+  const [coverStartDate, setCoverStartDate] = useState('')
+  const [coverBackupId, setCoverBackupId] = useState('')
+  const [coverSaving, setCoverSaving] = useState(false)
+  const [endingCoverageId, setEndingCoverageId] = useState<number | null>(null)
+  const [coverageToEnd, setCoverageToEnd] = useState<MonthlyShift | null>(null)
+  const [coverageResumeDate, setCoverageResumeDate] = useState(todayKey)
+  const [coverageEndError, setCoverageEndError] = useState<string | null>(null)
+  const [coverError, setCoverError] = useState<string | null>(null)
 
   const [form, setForm] = useState({
     storeId: '',
@@ -414,10 +483,7 @@ function SchedulerPanel() {
       setFormError('Choose a store.')
       return
     }
-    if (form.endTime <= form.startTime) {
-      setFormError('End time must be after start time.')
-      return
-    }
+    // Overnight shifts allowed (e.g. 5:00 PM → 1:00 AM).
     setSaving(true)
     const problem = await saveShift(
       {
@@ -452,6 +518,105 @@ function SchedulerPanel() {
   }
 
   const selectedStore = stores.find((s) => String(s.id) === form.storeId)
+  const assignedShifts = schedule.filter((slot) => slot.baId)
+
+  async function confirmSwap() {
+    if (!swapFirst || !swapSecond || swapFirst === swapSecond) {
+      setSwapError('Choose two different assigned shifts.')
+      return
+    }
+    setSwapSaving(true)
+    setSwapError(null)
+    const problem = await swapShifts(swapFirst, swapSecond)
+    setSwapSaving(false)
+    if (problem) {
+      setSwapError(problem)
+      return
+    }
+    setSwapOpen(false)
+    flash('BA assignments swapped successfully')
+  }
+
+  function openCoverage(slot: MonthlyShift) {
+    const now = new Date()
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    setCoverShift(slot)
+    setCoverStartDate(slot.month === today.slice(0, 7) ? today : `${slot.month}-01`)
+    setCoverBackupId('')
+    setCoverError(null)
+    setCoverOpen(true)
+  }
+
+  async function saveCoverage() {
+    if (!coverShift || !coverStartDate || !coverBackupId) {
+      setCoverError('Choose a start date and a backup BA.')
+      return
+    }
+    setCoverSaving(true)
+    setCoverError(null)
+    try {
+      const response = await djangoFetch('/api/shift-days/cover/', {
+        method: 'POST',
+        body: JSON.stringify({
+          monthly_shift_id: Number(coverShift.id),
+          start_date: coverStartDate,
+          backup_ambassador_id: Number(coverBackupId),
+        }),
+      })
+      const data = (await response.json().catch(() => ({}))) as { detail?: string }
+      if (!response.ok) throw new Error(data.detail || 'Coverage could not be assigned.')
+      const backup = backupPool.find((item) => String(item.serverId) === coverBackupId)
+      setCoverOpen(false)
+      flash(`${backup?.name ?? 'Backup BA'} is covering ${coverShift.baName} at ${coverShift.storeName} until coverage is ended`)
+      await reload()
+    } catch (error) {
+      setCoverError(error instanceof Error ? error.message : 'Coverage could not be assigned.')
+    } finally {
+      setCoverSaving(false)
+    }
+  }
+
+  async function endCoverage(slot: MonthlyShift) {
+    if (!slot.backupCoverage) return
+    setCoverageToEnd(slot)
+    const firstAllowedResume = new Date(`${slot.backupCoverage.startsOn}T00:00:00`)
+    firstAllowedResume.setDate(firstAllowedResume.getDate() + 1)
+    const firstAllowedKey = `${firstAllowedResume.getFullYear()}-${String(firstAllowedResume.getMonth() + 1).padStart(2, '0')}-${String(firstAllowedResume.getDate()).padStart(2, '0')}`
+    setCoverageResumeDate(firstAllowedKey > todayKey ? firstAllowedKey : todayKey)
+    setCoverageEndError(null)
+  }
+
+  const coverageResumeMin = coverageToEnd?.backupCoverage
+    ? (() => {
+        const firstAllowedResume = new Date(`${coverageToEnd.backupCoverage.startsOn}T00:00:00`)
+        firstAllowedResume.setDate(firstAllowedResume.getDate() + 1)
+        const firstAllowedKey = `${firstAllowedResume.getFullYear()}-${String(firstAllowedResume.getMonth() + 1).padStart(2, '0')}-${String(firstAllowedResume.getDate()).padStart(2, '0')}`
+        return firstAllowedKey > todayKey ? firstAllowedKey : todayKey
+      })()
+    : todayKey
+
+  async function confirmEndCoverage() {
+    const slot = coverageToEnd
+    const coverage = slot?.backupCoverage
+    if (!slot || !coverage || !coverageResumeDate) return
+    setEndingCoverageId(coverage.id)
+    setCoverageEndError(null)
+    try {
+      const response = await djangoFetch('/api/shift-days/end-coverage/', {
+        method: 'POST',
+        body: JSON.stringify({ coverage_id: coverage.id, resume_on: coverageResumeDate }),
+      })
+      const data = (await response.json().catch(() => ({}))) as { detail?: string }
+      if (!response.ok) throw new Error(data.detail || 'Coverage could not be ended.')
+      setCoverageToEnd(null)
+      flash(`Coverage ended. ${slot.baName} resumes on ${coverageResumeDate}; backup history is retained.`)
+      await reload()
+    } catch (error) {
+      setCoverageEndError(error instanceof Error ? error.message : 'Coverage could not be ended.')
+    } finally {
+      setEndingCoverageId(null)
+    }
+  }
 
   return (
     <div className="space-y-5">
@@ -493,6 +658,19 @@ function SchedulerPanel() {
             </Button>
             <Button size="sm" onClick={() => openEditor()}>
               <Plus size={14} /> Add shift
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={assignedShifts.length < 2}
+              onClick={() => {
+                setSwapFirst('')
+                setSwapSecond('')
+                setSwapError(null)
+                setSwapOpen(true)
+              }}
+            >
+              Swap BAs
             </Button>
           </div>
         </div>
@@ -548,6 +726,23 @@ function SchedulerPanel() {
                           <div>
                             <div>{slot.baName}</div>
                             {slot.baCode && <div className="font-mono text-xs text-slate-400">{slot.baCode}</div>}
+                            {slot.backupCoverage && (
+                              <div className="mt-1 rounded-md border border-violet-200 bg-violet-50 px-2 py-1 text-xs font-semibold text-violet-800">
+                                Backup covering: {slot.backupCoverage.baName} · since {slot.backupCoverage.startsOn}
+                                {slot.backupCoverage.endsOn && slot.backupCoverage.endsOn < slot.backupCoverage.startsOn
+                                  ? ' · cancelled before start'
+                                  : slot.backupCoverage.endsOn
+                                    ? ` · through ${slot.backupCoverage.endsOn}`
+                                    : ' · ongoing'}
+                              </div>
+                            )}
+                            {(todayAttendance?.results ?? [])
+                              .filter((day) => day.storeId === slot.storeId && day.coverageOfName === slot.baName && !day.coverageCancelled)
+                              .map((day) => (
+                                <div key={day.id} className="mt-1 rounded-md bg-violet-50 px-2 py-1 text-xs font-semibold text-violet-700">
+                                  Backup working here today: {day.baName}
+                                </div>
+                              ))}
                           </div>
                         </div>
                       ) : (
@@ -570,9 +765,30 @@ function SchedulerPanel() {
                         <Button size="sm" variant="secondary" onClick={() => openEditor(slot)}>
                           {slot.baId ? 'Edit' : 'Assign'}
                         </Button>
+                        {slot.baId && (!slot.backupCoverage || !!slot.backupCoverage.endedAt) && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={slot.month < new Date().toISOString().slice(0, 7)}
+                            onClick={() => openCoverage(slot)}
+                            title={backupPool.length ? 'Assign ongoing backup coverage' : 'View backup eligibility and assign a backup'}
+                          >
+                            Cover
+                          </Button>
+                        )}
                         {slot.baId && (
                           <Button size="sm" variant="ghost" onClick={() => void clearSlot(slot.id)}>
                             Clear
+                          </Button>
+                        )}
+                        {slot.backupCoverage && !slot.backupCoverage.endedAt && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={endingCoverageId === slot.backupCoverage.id}
+                            onClick={() => void endCoverage(slot)}
+                          >
+                            {endingCoverageId === slot.backupCoverage.id ? 'Ending…' : 'End cover'}
                           </Button>
                         )}
                         <Button size="sm" variant="ghost" onClick={() => void removeSlot(slot)}>
@@ -661,6 +877,130 @@ function SchedulerPanel() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      <Modal open={swapOpen} onClose={() => setSwapOpen(false)} title={`Swap BAs · ${monthLabel || month}`}>
+        <div className="space-y-3">
+          <p className="text-sm text-slate-600">
+            Select the two assigned shifts. The BAs will exchange stores for this month. Past and checked-in attendance
+            records are preserved. If either BA has started a shift today, both assignments for today stay as scheduled
+            and the swap applies from tomorrow.
+          </p>
+          {[{ label: 'First shift', value: swapFirst, set: setSwapFirst }, { label: 'Second shift', value: swapSecond, set: setSwapSecond }].map((item) => (
+            <label key={item.label} className="block text-sm">
+              <span className="mb-1 block font-medium text-slate-700">{item.label}</span>
+              <Select className="w-full" value={item.value} onChange={(e) => item.set(e.target.value)}>
+                <option value="">Choose an assigned shift…</option>
+                {assignedShifts.map((slot) => (
+                  <option key={slot.id} value={slot.id}>
+                    {slot.baName} · {slot.storeName} · {slot.shift}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          ))}
+          <p className="text-xs text-slate-500">The swap will be blocked if it creates overlapping BA shift hours.</p>
+          {swapError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{swapError}</p>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="secondary" onClick={() => setSwapOpen(false)} disabled={swapSaving}>
+              Cancel
+            </Button>
+            <Button onClick={() => void confirmSwap()} disabled={swapSaving || !swapFirst || !swapSecond || swapFirst === swapSecond}>
+              {swapSaving ? 'Swapping…' : 'Confirm swap'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={coverOpen}
+        onClose={() => setCoverOpen(false)}
+        title={coverShift ? `Assign backup · ${coverShift.storeName}` : 'Assign backup'}
+      >
+        <div className="space-y-3">
+          {coverShift && (
+            <p className="text-sm text-slate-600">
+              {coverShift.baName} will remain marked Absent. The backup will record their own attendance, while reports
+              and target credit go to {coverShift.baName}. Coverage continues across scheduled days and months until you end it.
+            </p>
+          )}
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium text-slate-700">Coverage starts on</span>
+            <input
+              type="date"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              value={coverStartDate}
+              min={new Date().toISOString().slice(0, 10)}
+              max={coverShift ? `${coverShift.month}-${String(new Date(Number(coverShift.month.slice(0, 4)), Number(coverShift.month.slice(5, 7)), 0).getDate()).padStart(2, '0')}` : undefined}
+              onChange={(event) => setCoverStartDate(event.target.value)}
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium text-slate-700">Backup BA</span>
+            <Select className="w-full" value={coverBackupId} onChange={(event) => setCoverBackupId(event.target.value)}>
+              <option value="">{backupPoolLoading ? 'Loading backup BAs…' : 'Choose a backup BA…'}</option>
+              {backupPool.map((ba) => (
+                <option key={ba.serverId} value={ba.serverId}>{ba.name}{ba.baCode ? ` · ${ba.baCode}` : ''}</option>
+              ))}
+            </Select>
+            {backupPoolLoading && (
+              <span className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-brand-600" />
+                Loading the BA roster…
+              </span>
+            )}
+            {!backupPoolLoading && backupPool.length === 0 && (
+              <span className="mt-1 block text-xs text-amber-700">
+                No available backup BAs yet. Mark an available BA as a backup from their profile or when creating the BA.
+              </span>
+            )}
+          </label>
+          {coverError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{coverError}</p>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="secondary" onClick={() => setCoverOpen(false)} disabled={coverSaving}>Cancel</Button>
+            <Button onClick={() => void saveCoverage()} disabled={coverSaving || backupPoolLoading || !coverStartDate || !coverBackupId}>
+              {coverSaving ? 'Assigning…' : backupPoolLoading ? 'Loading…' : 'Assign backup'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={!!coverageToEnd}
+        onClose={() => !endingCoverageId && setCoverageToEnd(null)}
+        title="End backup coverage"
+      >
+        {coverageToEnd?.backupCoverage && (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-600">
+              {coverageToEnd.backupCoverage.baName} is covering {coverageToEnd.baName} at {coverageToEnd.storeName}.
+              Coverage will end the day before the original BA resumes. The backup’s first covered day is retained. Past attendance and reports stay saved.
+            </p>
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium text-slate-700">Original BA resumes on</span>
+              <input
+                type="date"
+                min={coverageResumeMin}
+                value={coverageResumeDate}
+                onChange={(event) => setCoverageResumeDate(event.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              />
+            </label>
+            {coverageEndError && (
+              <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{coverageEndError}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setCoverageToEnd(null)} disabled={!!endingCoverageId}>Cancel</Button>
+              <Button onClick={() => void confirmEndCoverage()} disabled={!!endingCoverageId || !coverageResumeDate}>
+                {endingCoverageId ? 'Ending…' : 'End coverage'}
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   )

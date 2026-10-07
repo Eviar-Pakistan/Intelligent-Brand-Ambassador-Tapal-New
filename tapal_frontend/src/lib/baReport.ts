@@ -3,7 +3,7 @@
  * template, and the dashboard inbox.
  */
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { currentBaAccountId } from './baAccounts'
+import { currentBaAccountId, isDemoBa } from './baAccounts'
 import type { BaMonthTarget } from './baTargets'
 import { canonicalSkuName } from './skuNames'
 import { djangoToken } from './djangoApi'
@@ -195,8 +195,8 @@ export function sectionsFromCityList(list: CityReportSku[]): ReportSections {
 let cachedSections: ReportSections | null = null
 
 /**
- * The signed-in BA's report SKUs from /api/ba/me/: their city's SKU list when the city has one
- * (Lahore, Multan), else the SKUs of their target this month, else the default list.
+ * The signed-in BA's report SKUs from /api/ba/me/: this month's target SKUs when present,
+ * else their city's SKU list, else the default list.
  */
 export async function loadReportSections(): Promise<ReportSections> {
   const me = await portalGet<{ monthTarget: BaMonthTarget | null; reportSkus?: CityReportSku[] | null }>(
@@ -204,7 +204,12 @@ export async function loadReportSections(): Promise<ReportSections> {
     'ba',
   )
   if (me) {
-    cachedSections = me.reportSkus?.length ? sectionsFromCityList(me.reportSkus) : sectionsFromTarget(me.monthTarget)
+    const targetSections = sectionsFromTarget(me.monthTarget)
+    cachedSections = targetSections.fromTarget
+      ? targetSections
+      : me.reportSkus?.length
+        ? sectionsFromCityList(me.reportSkus)
+        : DEFAULT_SECTIONS
   }
   return cachedSections ?? DEFAULT_SECTIONS
 }
@@ -403,6 +408,8 @@ export type StoredDailyReport = {
   baName: string
   /** Filled by the server */
   baCode?: string
+  submittedById?: string
+  submittedByName?: string
   storeId?: number | null
   storeName?: string
   city: string
@@ -423,7 +430,17 @@ function loadReports(): StoredDailyReport[] {
   try {
     const raw = localStorage.getItem(REPORTS_KEY)
     const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    // Demo activity is session-only — never restore it from the browser.
+    const cleaned = parsed.filter((row) => row && typeof row === 'object' && !isDemoBa(String(row.baId ?? '')))
+    if (cleaned.length !== parsed.length) {
+      try {
+        localStorage.setItem(REPORTS_KEY, JSON.stringify(cleaned))
+      } catch {
+        // ignore
+      }
+    }
+    return cleaned
   } catch {
     return []
   }
@@ -436,7 +453,9 @@ function subscribeReports(listener: () => void) {
   reportListeners.add(listener)
   const onStorage = (event: StorageEvent) => {
     if (event.key !== REPORTS_KEY) return
-    reports = loadReports()
+    // Keep this tab's in-memory demo reports; refresh only non-demo rows from storage.
+    const demoKeep = reports.filter((r) => isDemoBa(r.baId))
+    reports = [...demoKeep, ...loadReports()]
     listener()
   }
   window.addEventListener('storage', onStorage)
@@ -449,7 +468,8 @@ function subscribeReports(listener: () => void) {
 function commitReports(next: StoredDailyReport[]) {
   reports = next.slice(0, 500)
   try {
-    localStorage.setItem(REPORTS_KEY, JSON.stringify(reports))
+    // Persist real BA reports only. Demo sales stay in memory for Rewards this session.
+    localStorage.setItem(REPORTS_KEY, JSON.stringify(reports.filter((r) => !isDemoBa(r.baId))))
   } catch {
     // keep the in-memory list
   }
@@ -457,7 +477,7 @@ function commitReports(next: StoredDailyReport[]) {
 }
 
 async function sendReport(entry: StoredDailyReport) {
-  if (currentPortal() !== 'ba') return
+  if (currentPortal() !== 'ba' || isDemoBa(entry.baId)) return
   try {
     const { unsent: _unsent, ...body } = entry
     void _unsent
@@ -486,7 +506,10 @@ export async function syncDailyReports() {
     if (missing.length) rows = resultsOf(await portalGet<{ results: StoredDailyReport[] }>('/api/daily-reports/', portal)) ?? rows
   }
   const onServer = new Set(rows.map((row) => row.id))
-  commitReports([...reports.filter((r) => !onServer.has(r.id) && (portal === 'ba' || r.unsent)), ...rows])
+  commitReports([
+    ...reports.filter((r) => !onServer.has(r.id) && (portal === 'ba' || r.unsent || isDemoBa(r.baId))),
+    ...rows,
+  ])
 }
 
 /** Sends a completed daily report to the head-office dashboard inbox. */
@@ -506,8 +529,9 @@ export function recordDailyReport(
     otherBrands: data.otherBrands,
     ...(meta.noSalesConfirmed ? { noSalesConfirmed: true } : {}),
   }
-  commitReports([{ ...entry, unsent: true }, ...reports])
-  void sendReport(entry)
+  const localOnly = isDemoBa(meta.baId)
+  commitReports([{ ...entry, ...(localOnly ? {} : { unsent: true }) }, ...reports])
+  if (!localOnly) void sendReport(entry)
   return entry
 }
 

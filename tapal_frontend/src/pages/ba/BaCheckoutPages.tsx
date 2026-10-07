@@ -37,6 +37,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
+function CoverReportNotice({ name }: { name: string | null }) {
+  if (!name) return null
+  return (
+    <p className="rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-800">
+      You are submitting this report for {name}. Sales and target credit will go to {name}; your attendance remains under your account.
+    </p>
+  )
+}
+
 function NumberField({
   label,
   value,
@@ -171,7 +180,7 @@ export function BaDailySalesPage() {
 
 function DailySalesForm({ sections, anytime }: { sections: ReportSections; anytime: boolean }) {
   const navigate = useNavigate()
-  const { city } = useBaShift()
+  const { city, reportingFor } = useBaShift()
   const all = [...fixedSalesSections, ...sections.skuSales]
   const [values, setValues] = useState(() => emptyNumeric(all.flatMap((section) => section.fields)))
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -218,6 +227,8 @@ function DailySalesForm({ sections, anytime }: { sections: ReportSections; anyti
         }
         onBack={() => navigate(reportPath('/ba/stock-report', anytime))}
       />
+
+      <CoverReportNotice name={reportingFor} />
 
       {all.map((section) => (
         <Section key={section.title} title={section.title}>
@@ -280,7 +291,7 @@ export function BaStockReportPage() {
 
 function StockReportForm({ sections, anytime }: { sections: ReportSections; anytime: boolean }) {
   const navigate = useNavigate()
-  const { city } = useBaShift()
+  const { city, reportingFor } = useBaShift()
   const { account } = useBaSession()
   const [submitted, setSubmitted] = useState(false)
 
@@ -346,6 +357,8 @@ function StockReportForm({ sections, anytime }: { sections: ReportSections; anyt
         onBack={() => navigate('/ba/home')}
       />
 
+      <CoverReportNotice name={reportingFor} />
+
       {sections.stock.map((section) => (
         <Section key={section.title} title={section.title}>
           {section.fields.map((f) => (
@@ -369,7 +382,7 @@ export function BaOtherBrandsPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
-  const { submitCheckoutReport, earlyCheckoutReason, city } = useBaShift()
+  const { submitCheckoutReport, earlyCheckoutReason, city, reportingFor } = useBaShift()
   const { account } = useBaSession()
   const [rows, setRows] = useState<OtherBrandRow[]>(DEFAULT_OTHER_BRANDS)
   const [submitted, setSubmitted] = useState(false)
@@ -466,6 +479,8 @@ export function BaOtherBrandsPage() {
         subtitle="Optional. Leave prices blank if you do not have competitor prices."
         onBack={() => navigate(reportPath('/ba/daily-sales', anytime))}
       />
+
+      <CoverReportNotice name={reportingFor} />
 
       <Section title="Competitor prices">
         {rows.map((row, index) => (

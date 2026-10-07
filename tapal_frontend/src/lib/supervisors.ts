@@ -123,7 +123,21 @@ export async function syncSupervisors() {
   const list = resultsOf(await portalGet<{ results: Supervisor[] }>('/api/supervisors/', 'office'))
   if (!list) return
   commit(list)
-  await Promise.all(list.map((s) => syncSupervisorOverview(s.id)))
+  const overviews = resultsOf(
+    await portalGet<{ results: ApiSupervisorOverview[] }>('/api/supervisors/overviews/', 'office'),
+  )
+  if (!overviews) return
+  upsertApiStores(overviews.flatMap((overview) => overview.stores))
+  for (const overview of overviews) {
+    const storeIds = new Set(overview.stores.map((store) => store.id))
+    overviewCache.set(String(overview.supervisor_id), {
+      stores: stores.filter((store) => storeIds.has(store.id)),
+      bas: overview.bas,
+      teamConversion: overview.teamConversion,
+      coverage: overview.coverage,
+      todayFootfall: overview.todayFootfall,
+    })
+  }
 }
 
 /** A store belongs to one supervisor, so assigning it here takes it from anyone else. */
@@ -392,6 +406,8 @@ type ApiOverview = {
   todayFootfall: number
 }
 
+type ApiSupervisorOverview = ApiOverview & { supervisor_id: number }
+
 const overviewCache = new Map<string, SupervisorOverview>()
 
 /**
@@ -408,7 +424,7 @@ export async function syncSupervisorOverview(supervisorId: string) {
   if (!data) return
   upsertApiStores(data.stores)
   const ids = new Set(data.stores.map((row) => row.id))
-  overviewCache.set(supervisorId, {
+  overviewCache.set(String(supervisorId), {
     stores: stores.filter((store) => ids.has(store.id)),
     bas: data.bas,
     teamConversion: data.teamConversion,
@@ -420,7 +436,7 @@ export async function syncSupervisorOverview(supervisorId: string) {
 
 /** The stores assigned to a supervisor, the BAs working in them, and their headline numbers. */
 export function supervisorOverview(supervisor: Supervisor): SupervisorOverview {
-  const loaded = overviewCache.get(supervisor.id)
+  const loaded = overviewCache.get(String(supervisor.id))
   if (loaded) return loaded
   return localOverview(supervisor)
 }

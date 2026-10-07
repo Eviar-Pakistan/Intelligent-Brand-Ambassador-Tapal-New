@@ -4,6 +4,7 @@ from .models import (
     Ambassador,
     AmbassadorComplaint,
     AmbassadorMonthTarget,
+    BackupCoverage,
     AssessmentAnswer,
     AssessmentQuestion,
     AssessmentSession,
@@ -128,12 +129,14 @@ class AmbassadorAdmin(admin.ModelAdmin):
         'name',
         'city',
         'status',
+        'is_backup',
+        'is_demo',
         'store',
         'overall_score',
         'invite_token',
         'created_at',
     )
-    list_filter = ('status', 'city', 'store')
+    list_filter = ('status', 'city', 'store', 'is_backup', 'is_demo')
     search_fields = ('name', 'email', 'phone', 'ba_code', 'invite_token')
     readonly_fields = ('ba_code', 'invite_token', 'created_at', 'updated_at', 'certified_at', 'deployed_at')
     raw_id_fields = ('store', 'created_by')
@@ -182,13 +185,23 @@ class ShiftAssignmentAdmin(admin.ModelAdmin):
         'store',
         'shift_label',
         'ambassador',
+        'covered_by',
+        'report_owner',
         'status',
         'peak_recommended',
     )
     list_filter = ('status', 'day_key', 'peak_recommended', 'date')
     search_fields = ('store__name', 'ambassador__name', 'shift_label')
-    raw_id_fields = ('store', 'ambassador', 'created_by')
+    raw_id_fields = ('store', 'ambassador', 'covered_by', 'coverage_of', 'report_owner', 'coverage_assigned_by', 'created_by')
     readonly_fields = ('checked_in_at', 'checked_out_at', 'check_in_lat', 'check_in_lng', 'check_in_accuracy_m')
+
+
+@admin.register(BackupCoverage)
+class BackupCoverageAdmin(admin.ModelAdmin):
+    list_display = ('id', 'original_ba', 'backup_ba', 'store', 'starts_on', 'ends_on', 'assigned_by', 'ended_by')
+    list_filter = ('store__city', 'store', 'starts_on', 'ends_on')
+    search_fields = ('original_ba__name', 'backup_ba__name', 'store__name', 'store__store_code')
+    raw_id_fields = ('monthly_shift', 'original_ba', 'backup_ba', 'store', 'assigned_by', 'ended_by')
 
 
 from .models import (  # noqa: E402
@@ -228,7 +241,7 @@ class SupervisorNotificationAdmin(admin.ModelAdmin):
 
 @admin.register(DailyReport)
 class DailyReportAdmin(admin.ModelAdmin):
-    list_display = ('id', 'ba_name', 'store', 'source', 'submitted_at')
+    list_display = ('id', 'ba_name', 'submitted_by', 'store', 'source', 'submitted_at')
     list_filter = ('source',)
     search_fields = ('ba_name',)
     exclude = ('no_sales_confirmed',)  # for checking in the database only, not shown anywhere
@@ -258,6 +271,6 @@ class SupervisorPushEventAdmin(admin.ModelAdmin):
 
 @admin.register(CitySku)
 class CitySkuAdmin(admin.ModelAdmin):
-    list_display = ('sku', 'city')
+    list_display = ('sku', 'brand', 'city')
     list_filter = ('city',)
-    search_fields = ('sku', 'city')
+    search_fields = ('sku', 'brand', 'city')

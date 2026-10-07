@@ -109,9 +109,7 @@ export function checkShiftRow(input: ShiftPlanRow): string[] {
   if (!input.storeCode) problems.push('Store code is required')
   if (!input.startTime) problems.push('Start time must be like 10:00 AM')
   if (!input.endTime) problems.push('End time must be like 6:00 PM')
-  if (input.startTime && input.endTime && input.endTime <= input.startTime) {
-    problems.push('End time must be after start time')
-  }
+  // Overnight shifts allowed (e.g. 5:00 PM → 1:00 AM).
   if (!input.month) problems.push('Month must be YYYY-MM, for example 2026-10')
   return problems
 }

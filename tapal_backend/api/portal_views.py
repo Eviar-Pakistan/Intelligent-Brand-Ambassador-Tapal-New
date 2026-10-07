@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import math
 import re
 import secrets
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from .models import (
     Ambassador,
     AmbassadorComplaint,
     Consumer,
+    CompetitorFieldConfig,
     DailyReport,
     JourneyPlan,
     JourneyVisit,
@@ -345,17 +347,27 @@ def _store_status_label(status_value: str) -> str:
     return 'Covered' if status_value == 'LIVE' else 'PARTIAL' if status_value == 'PARTIAL' else 'NEEDS BA'
 
 
-def build_supervisor_overview(sup: Supervisor, request=None) -> dict:
+def build_supervisor_overview(sup: Supervisor, request=None, *, shared=None) -> dict:
     """Stores assigned to the supervisor, the BAs working in them today, and their headline numbers."""
     from .intelligence import build_ba_leaderboard, build_store_map_pins
     from .shifts import ensure_daily_rows
 
     today = timezone.localdate()
-    ensure_daily_rows(today)
+    if shared is None:
+        ensure_daily_rows(today)
+        shared = {
+            'pins': {p['id']: p for p in build_store_map_pins()},
+            'ranked': {row['id']: row for row in build_ba_leaderboard()['results']},
+            'sessions': dict(
+                UserInterception.objects.filter(created_at__date__gte=today - timedelta(days=today.weekday()), ambassador__isnull=False)
+                .values_list('ambassador_id')
+                .annotate(n=Count('id'))
+            ),
+        }
     stores = list(Store.objects.filter(supervisor=sup).order_by('name'))
     store_ids = [s.id for s in stores]
-    pins = {p['id']: p for p in build_store_map_pins() if p['id'] in store_ids}
-    ranked = {row['id']: row for row in build_ba_leaderboard()['results']}
+    pins = {store_id: shared['pins'][store_id] for store_id in store_ids if store_id in shared['pins']}
+    ranked = shared['ranked']
 
     # Who works where: this month's monthly shifts, plus BAs deployed to the store.
     pairs: dict[tuple[int, int], Ambassador] = {}
@@ -376,11 +388,7 @@ def build_supervisor_overview(sup: Supervisor, request=None) -> dict:
             checked_in[r.store_id] = checked_in.get(r.store_id, 0) + 1
 
     week_start = today - timedelta(days=today.weekday())
-    sessions = dict(
-        UserInterception.objects.filter(created_at__date__gte=week_start, ambassador__isnull=False)
-        .values_list('ambassador_id')
-        .annotate(n=Count('id'))
-    )
+    sessions = shared['sessions']
 
     bas = []
     assigned_by_store: dict[int, list] = {sid: [] for sid in store_ids}
@@ -454,13 +462,31 @@ def supervisor_overviews(request):
     """Head Office: every supervisor's headline numbers (for supervisor incentives)."""
     if not _is_head_office(request):
         return _denied()
+    from .intelligence import build_ba_leaderboard, build_store_map_pins
+    from .shifts import ensure_daily_rows
+
+    today = timezone.localdate()
+    ensure_daily_rows(today)
+    shared = {
+        'pins': {p['id']: p for p in build_store_map_pins()},
+        'ranked': {row['id']: row for row in build_ba_leaderboard()['results']},
+        'sessions': dict(
+            UserInterception.objects.filter(created_at__date__gte=today - timedelta(days=today.weekday()), ambassador__isnull=False)
+            .values_list('ambassador_id')
+            .annotate(n=Count('id'))
+        ),
+    }
     rows = []
     for sup in _visible_supervisors(scope_for(request.user)):
-        data = build_supervisor_overview(sup, request)
-        rows.append({key: data[key] for key in ('supervisor', 'teamConversion', 'coverage', 'todayFootfall')} | {
-            'storeCount': len(data['stores']),
-            'baCount': len({b['id'] for b in data['bas']}),
-        })
+        data = build_supervisor_overview(sup, request, shared=shared)
+        rows.append(
+            {
+                'supervisor_id': sup.id,
+                **data,
+                'storeCount': len(data['stores']),
+                'baCount': len({b['id'] for b in data['bas']}),
+            }
+        )
     return Response({'results': rows})
 
 
@@ -807,6 +833,8 @@ def report_payload(r: DailyReport) -> dict:
         'baId': _ba_id(r.ambassador_id),
         'baName': r.ba_name,
         'baCode': r.ambassador.ba_code if r.ambassador_id else '',
+        'submittedById': _ba_id(r.submitted_by_id),
+        'submittedByName': r.submitted_by.name if r.submitted_by_id else r.ba_name,
         'storeId': r.store_id,
         'storeName': r.store.name if r.store_id else '',
         'city': r.city,
@@ -843,6 +871,28 @@ def _ba_visible(qs, scope: Scope, store_field='store'):
     return qs
 
 
+def _total_sales_kg(sales: dict) -> float:
+    """Calculate total kg from SKU quantities in the sales JSON."""
+    from .target_sheet import GRAMMAGE, canonical_sku
+
+    total = 0.0
+    for key, value in sales.items():
+        key = str(key)
+        try:
+            quantity = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(quantity) or quantity < 0:
+            continue
+        if key.startswith('unit:'):
+            grams = GRAMMAGE.get(canonical_sku(key[len('unit:'):]) or '', 0)
+            total += quantity * grams
+        elif key.startswith('sku:'):
+            # Compatibility with older reports where SKU values were already in kg.
+            total += quantity
+    return round(total, 3)
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def daily_reports(request):
@@ -851,7 +901,11 @@ def daily_reports(request):
     if not scope:
         return _denied()
     if request.method == 'GET':
-        qs = _ba_visible(DailyReport.objects.select_related('ambassador', 'store'), scope)
+        qs = DailyReport.objects.select_related('ambassador', 'submitted_by', 'store')
+        if scope.ambassador:
+            qs = qs.filter(Q(ambassador=scope.ambassador) | Q(submitted_by=scope.ambassador))
+        else:
+            qs = _ba_visible(qs, scope)
         return Response({'results': [report_payload(r) for r in qs[:500]]})
 
     if not scope.ambassador:
@@ -862,9 +916,12 @@ def daily_reports(request):
         return Response({'detail': 'Unknown report source.'}, status=status.HTTP_400_BAD_REQUEST)
     stock = data.get('stock') if isinstance(data.get('stock'), dict) else {}
     sales = data.get('sales') if isinstance(data.get('sales'), dict) else {}
+    # Ignore any client-supplied total; it is calculated below from submitted SKU values.
+    sales.pop('totalSalesKg', None)
     others = data.get('otherBrands') if isinstance(data.get('otherBrands'), list) else []
     if not (stock or sales or others):
         return Response({'detail': 'The report is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+    sales['totalSalesKg'] = _total_sales_kg(sales)
     for key, value in sales.items():
         # SKU sales are counted in units: whole packs only.
         if str(key).startswith('unit:') and str(value).strip() and not re.fullmatch(r'\d+', str(value).strip()):
@@ -873,18 +930,45 @@ def daily_reports(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
     report_id = _client_id(data.get('id'), 'rep')
+    from .ba_attendance_views import _today_shift_for
+    from .shifts import business_today, work_datetime_on
+
+    submitted_at = _when(data.get('submittedAt'))
+    submission_day = timezone.localtime(submitted_at).date()
+    active_shift = (
+        ShiftAssignment.objects.filter(
+            ambassador=scope.ambassador,
+            date=submission_day,
+            coverage_of__isnull=False,
+            coverage_cancelled=False,
+        )
+        .select_related('store', 'report_owner')
+        .first()
+    )
+    if not active_shift and submission_day in (business_today(), timezone.localdate()):
+        active_shift = _today_shift_for(scope.ambassador)
+    # Checkout / anytime sales belong on the check-in (shift) day, not calendar midnight.
+    if source in (DailyReport.Source.CHECKOUT, DailyReport.Source.ANYTIME) and active_shift:
+        submitted_at = work_datetime_on(active_shift.date, submitted_at)
+    report_owner = (
+        Ambassador.objects.filter(pk=active_shift.report_owner_id).first()
+        if active_shift and active_shift.report_owner_id
+        else scope.ambassador
+    )
+    report_store = active_shift.store if active_shift else _ba_store(report_owner)
     report, created = DailyReport.objects.get_or_create(
         id=report_id,
         defaults={
-            'ambassador': scope.ambassador,
-            'ba_name': str(data.get('baName') or scope.ambassador.name)[:120],
-            'store': _ba_store(scope.ambassador),
-            'city': str(data.get('city') or scope.ambassador.city or '')[:100],
+            'ambassador': report_owner,
+            'submitted_by': scope.ambassador,
+            'ba_name': report_owner.name[:120],
+            'store': report_store,
+            'city': (report_store.city if report_store else report_owner.city) or '',
             'source': source,
             'stock': stock,
             'sales': sales,
             'other_brands': others,
-            'submitted_at': _when(data.get('submittedAt')),
+            'submitted_at': submitted_at,
             # Only an explicit true counts. Kept for checking in the database; never returned (see report_payload).
             'no_sales_confirmed': data.get('noSalesConfirmed') is True,
         },
@@ -985,6 +1069,13 @@ def interceptions(request):
         text['currentSku'] = ''  # nothing was bought
     store = Store.objects.filter(pk=data.get('storeId')).first() if data.get('storeId') else None
     store = store or _ba_store(scope.ambassador)
+    from .ba_attendance_views import _today_shift_for
+    from .shifts import business_today, work_datetime_on
+
+    # Attribute the interception to the check-in / shift day (business day rolls at 05:00).
+    work_shift = _today_shift_for(scope.ambassador)
+    work_day = work_shift.date if work_shift and work_shift.checked_in_at else business_today()
+    created_at = work_datetime_on(work_day, _when(data.get('createdAt')))
     record, created = UserInterception.objects.get_or_create(
         id=_client_id(data.get('id'), 'int'),
         defaults={
@@ -1000,7 +1091,7 @@ def interceptions(request):
             'current_sku': text['currentSku'][:120],
             'feedback': text['feedback'][:2000],
             'status': outcome,
-            'created_at': _when(data.get('createdAt')),
+            'created_at': created_at,
         },
     )
     return Response(interception_payload(record), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
@@ -1016,7 +1107,9 @@ def early_checkouts(request):
     scope = _scope(request)
     if not scope:
         return _denied()
-    today = timezone.localdate()
+    from .shifts import business_today
+
+    today = business_today()
     date_to = _date_param(request, 'date_to') or today
     date_from = _date_param(request, 'date_from') or date_to
     qs = (
@@ -1089,6 +1182,89 @@ def ba_stores(request):
             'results': StoreSerializer(stores, many=True, context={'request': request}).data,
         }
     )
+
+
+def _competitor_config_json(row):
+    return {
+        'id': row.id,
+        'key': row.key,
+        'label': row.label,
+        'fieldType': row.field_type,
+        'options': row.options,
+        'scope': row.scope,
+        'city': row.city or '',
+        'storeId': row.store_id,
+        'active': row.is_active,
+    }
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([AllowAny])
+def competitor_fields(request):
+    """Manage competitor fields (office) and resolve the BA's active fields at checkout."""
+    scope = _scope(request, allow_ba=True)
+    if scope is None:
+        return _denied()
+    if request.method == 'GET':
+        qs = CompetitorFieldConfig.objects.filter(is_active=True).select_related('store')
+        if scope.ambassador:
+            store = _ba_store(scope.ambassador)
+            city = store.city if store else scope.ambassador.city
+            store_rows = list(qs.filter(scope='STORE', store=store)) if store else []
+            city_rows = list(qs.filter(scope='CITY', city__iexact=city)) if city else []
+            rows = store_rows or city_rows or list(qs.filter(scope='ALL'))
+            return Response({'results': [_competitor_config_json(row) for row in rows]})
+        elif scope.supervisor:
+            store_rows = list(qs.filter(scope='STORE', store_id__in=scope.store_ids or []))
+            city_rows = list(qs.filter(scope='CITY', city__iexact=scope.supervisor.city))
+            rows = store_rows or city_rows or list(qs.filter(scope='ALL'))
+            return Response({'results': [_competitor_config_json(row) for row in rows]})
+        elif not scope.city.is_all:
+            store_rows = list(qs.filter(scope='STORE', store_id__in=scope.city.store_ids))
+            city_rows = list(qs.filter(scope='CITY', city__iexact=scope.city.city))
+            rows = store_rows or city_rows or list(qs.filter(scope='ALL'))
+            return Response({'results': [_competitor_config_json(row) for row in rows]})
+        return Response({'results': [_competitor_config_json(row) for row in qs]})
+
+    # Only Head Office or supervisor sessions can change the form.
+    if not scope.head_office and not scope.supervisor:
+        return _forbidden()
+    data = request.data
+    field_rows = data.get('fields', [])
+    target_scope = str(data.get('scope') or 'ALL').upper()
+    city = str(data.get('city') or '').strip()[:100]
+    store_id = data.get('storeId')
+    if target_scope not in {'ALL', 'CITY', 'STORE'} or not isinstance(field_rows, list):
+        return Response({'detail': 'Choose All, City or Store and add valid fields.'}, status=status.HTTP_400_BAD_REQUEST)
+    store = Store.objects.filter(pk=store_id).first() if store_id else None
+    if target_scope == 'CITY' and not city:
+        return Response({'detail': 'Choose a city.'}, status=status.HTTP_400_BAD_REQUEST)
+    if target_scope == 'STORE' and not store:
+        return Response({'detail': 'Choose a store.'}, status=status.HTTP_400_BAD_REQUEST)
+    if scope.supervisor and (target_scope == 'ALL' or (target_scope == 'CITY' and city.casefold() != scope.supervisor.city.casefold()) or
+                             (target_scope == 'STORE' and store.id not in (scope.store_ids or set()))):
+        return _forbidden('You can only configure stores in your assigned area.')
+    if scope.head_office and not scope.city.is_all:
+        if target_scope == 'ALL' or (target_scope == 'CITY' and city.casefold() != scope.city.city.casefold()) or \
+                (target_scope == 'STORE' and not _stores_allowed(scope.city, [store.id] if store else [])):
+            return _forbidden('You can only configure fields in your assigned city.')
+    normalized = []
+    for index, field in enumerate(field_rows[:50]):
+        label = str(field.get('label') or '').strip()[:200]
+        field_type = str(field.get('fieldType') or 'text').lower()
+        if not label or field_type not in {'text', 'number'}:
+            return Response({'detail': 'Each field needs a brand name and a text or number type.'}, status=status.HTTP_400_BAD_REQUEST)
+        normalized.append((str(field.get('key') or secrets.token_hex(12)), label, field_type))
+    with transaction.atomic():
+        existing = CompetitorFieldConfig.objects.filter(scope=target_scope)
+        if target_scope == 'CITY': existing = existing.filter(city__iexact=city)
+        elif target_scope == 'STORE': existing = existing.filter(store=store)
+        existing.delete()
+        rows = [CompetitorFieldConfig(key=key, label=label, field_type=kind, scope=target_scope,
+                   city=city if target_scope == 'CITY' else None, store=store if target_scope == 'STORE' else None,
+                   created_by=request.user if _is_head_office(request) else None) for key, label, kind in normalized]
+        CompetitorFieldConfig.objects.bulk_create(rows)
+    return Response({'results': [_competitor_config_json(row) for row in rows]})
 
 
 # ─── Shopper session ─────────────────────────────────────────────────────────
@@ -1203,15 +1379,25 @@ def ba_me(request):
     ambassador = _ambassador_from_token(request.query_params.get('token'))
     if not ambassador:
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
-    today = timezone.localdate()
+    from .ba_attendance_views import _today_shift_for
+    from .shifts import business_today
+
+    today = business_today()
     month = today.strftime('%Y-%m')
     week_start = today - timedelta(days=today.weekday())
-    store = _ba_store(ambassador)
+
+    today_shift = _today_shift_for(ambassador)
+    report_owner = (
+        Ambassador.objects.filter(pk=today_shift.report_owner_id).first()
+        if today_shift and today_shift.report_owner_id
+        else ambassador
+    )
+    store = today_shift.store if today_shift else _ba_store(ambassador)
 
     board = build_ba_leaderboard()['results']
     mine = next((row for row in board if row['id'] == ambassador.id), None)
 
-    target = AmbassadorMonthTarget.objects.filter(ambassador=ambassador, month=month).select_related('store').first()
+    target = AmbassadorMonthTarget.objects.filter(ambassador=report_owner, month=month).select_related('store').first()
     days_worked = (
         ShiftAssignment.objects.filter(
             ambassador=ambassador, date__year=today.year, date__month=today.month, checked_in_at__isnull=False
@@ -1241,6 +1427,12 @@ def ba_me(request):
         {
             'name': ambassador.name,
             'baCode': ambassador.ba_code,
+            'reportOwner': {
+                'id': report_owner.id,
+                'name': report_owner.name,
+                'baCode': report_owner.ba_code,
+                'isCovering': report_owner.id != ambassador.id,
+            },
             'status': ambassador.status,
             'certified': ambassador.status in (Ambassador.Status.CERTIFIED, Ambassador.Status.DEPLOYED),
             'city': ambassador.city or (store.city if store else ''),
@@ -1251,8 +1443,8 @@ def ba_me(request):
             'conversion': mine['conversion'] if mine else 0.0,
             'weekSessions': week_sessions,
             'monthTarget': _target_payload(target) if target else None,
-            # Lahore and Multan BAs report on their city's SKU list (None: use the target SKUs).
-            'reportSkus': report_skus_for_city(ambassador.city or (store.city if store else '')),
+            # Use the report owner’s city list when the report owner has no target SKUs.
+            'reportSkus': report_skus_for_city(report_owner.city or (store.city if store else '')),
             'daysWorked': days_worked,
             'rating': round(sum(ratings) / len(ratings), 1) if ratings else None,
             'ratingCount': len(ratings),

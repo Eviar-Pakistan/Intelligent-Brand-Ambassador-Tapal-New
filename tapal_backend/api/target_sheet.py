@@ -358,7 +358,13 @@ def import_store_sku_targets(file, month: str, scope=None) -> dict:
 SKU_CATALOGUE: list[tuple[str, str, float]] = [
     ('Danedar', 'DD 100gm Tea Bag', 0.1),
     ('Danedar', 'DD 100gm Tea Bag Envelope', 0.1),
+    ('Danedar', 'DD 1200gm Tea Bag OOH', 1.2),
+    ('Danedar', 'DD 3IN1 Elaichi 200gm', 0.2),
+    ('Danedar', 'DD 3IN1 Elachi Box 200gm', 0.2),
     ('Danedar', 'DD 170gm Hard Pack', 0.17),
+    ('Danedar', 'DD 170gm Pouch', 0.17),
+    ('Danedar', 'DD 1750gm Pouch', 1.75),
+    ('Danedar', 'DD 200gm Jar Pack', 0.2),
     ('Danedar', 'DD 200gm RTB', 0.2),
     ('Danedar', 'DD 200gm Tea Bag', 0.2),
     ('Danedar', 'DD 200gm Tea Bag Envelope', 0.2),
@@ -368,22 +374,29 @@ SKU_CATALOGUE: list[tuple[str, str, float]] = [
     ('Danedar', 'DD 400gm Pillow Pack', 0.4),
     ('Danedar', 'DD 430gm Pouch', 0.43),
     ('Danedar', 'DD 440gm Jar Pack New', 0.44),
+    ('Danedar', 'DD 49gm Hard Pack', 0.049),
     ('Danedar', 'DD 50gm Tea Bag', 0.05),
     ('Danedar', 'DD 85gm Hard Pack', 0.085),
     ('Danedar', 'DD 900gm Pouch', 0.9),
+    ('Danedar', 'DD 900gm Collectible Pack', 0.9),
     ('Danedar', 'DD Elaichi 170gm Hard Pack', 0.17),
     ('Danedar', 'DD Elaichi 80gm Hard Pack', 0.08),
+    ('Danedar', 'DD Elaichi 100gm Tea Bag Envelope', 0.1),
     ('Green Tea', 'Elaichi 45gm', 0.045),
     ('Family Mixture', 'FM 170gm Hard Pack', 0.17),
+    ('Family Mixture', 'FM 1750gm Pouch', 1.75),
     ('Family Mixture', 'FM 430gm Pouch', 0.43),
     ('Family Mixture', 'FM 440gm Jar Pack', 0.44),
     ('Family Mixture', 'FM 80gm Hard Pack', 0.08),
+    ('Family Mixture', 'FM 85gm Hard Pack', 0.085),
     ('Family Mixture', 'FM 900gm Pouch', 0.9),
     ('Green Tea', 'Ginger Honey 45gm', 0.045),
+    ('Green Tea', 'Gulbahar 80gm Hard Pack', 0.08),
     ('Green Tea', 'Jasmine 100gm', 0.1),
     ('Green Tea', 'Jasmine 45gm', 0.045),
     ('Green Tea', 'Lemon 135gm', 0.135),
     ('Green Tea', 'Lemon 45gm', 0.045),
+    ('Green Tea', 'Lemon Grass 100gm', 0.1),
     ('Green Tea', 'Orange 45gm', 0.045),
     ('Green Tea', 'Pineapple 45gm', 0.045),
     ('Green Tea', 'Mango 45gm', 0.045),
@@ -393,10 +406,13 @@ SKU_CATALOGUE: list[tuple[str, str, float]] = [
     ('Green Tea', 'Strawberry 45gm', 0.045),
     ('Tezdum', 'TD 170gm Hard Pack', 0.17),
     ('Tezdum', 'TD 170gm Pouch Pack', 0.17),
+    ('Tezdum', 'TD 1750gm Pouch', 1.75),
+    ('Tezdum', 'TD 290gm Pouch', 0.29),
     ('Tezdum', 'TD 430gm Pouch', 0.43),
     ('Tezdum', 'TD 80gm Hard Pack', 0.08),
     ('Tezdum', 'TD 900gm Pouch', 0.9),
     ('Green Tea', 'Tropical Peach 45gm', 0.045),
+    ('Insta Brew', 'Tapal Insta Brew 750gm', 0.75),
 ]
 
 TEMPLATE_HEADERS = ['Region', 'City', 'Store name', 'Brand', 'SKU Name', 'KG Count', 'Count', 'Grammage', 'BA']
@@ -469,11 +485,79 @@ BA_TEMPLATE_HEADERS = [
 GRAMMAGE = {sku: grams for _brand, sku, grams in SKU_CATALOGUE}
 BRAND = {sku: brand for brand, sku, _grams in SKU_CATALOGUE}
 _CANONICAL_SKU = {sku.lower(): sku for _brand, sku, _grams in SKU_CATALOGUE}
+_SKU_INPUT_ALIASES = {
+    'danedar 3in1 elaichi 200gm': 'DD 3IN1 Elaichi 200gm',
+    'danedar 170gm hard pack': 'DD 170gm Hard Pack',
+    'danedar 85gm hard pack': 'DD 85gm Hard Pack',
+    'danedar elaichi 170gm hard pack': 'DD Elaichi 170gm Hard Pack',
+    'danedar elaichi 80gm hard pack': 'DD Elaichi 80gm Hard Pack',
+    'danedar 440gm jar pack new': 'DD 440gm Jar Pack New',
+    'danedar 350gm pouch': 'DD 350gm Pouch',
+    'danedar 430gm pouch': 'DD 430gm Pouch',
+    'danedar 900gm pouch': 'DD 900gm Pouch',
+    'danedar 900gm collectible pack': 'DD 900gm Collectible Pack',
+    'dd 900gm collectible pack': 'DD 900gm Collectible Pack',
+    'danedar 170gm pouch': 'DD 170gm Pouch',
+    'danedar 1750gm pouch': 'DD 1750gm Pouch',
+    'danedar 200gm jar pack': 'DD 200gm Jar Pack',
+    'danedar 49gm hard pack': 'DD 49gm Hard Pack',
+    'danedar 3in1 elachi box 200gm': 'DD 3IN1 Elachi Box 200gm',
+    'dd 3in1 elachi box 200gm': 'DD 3IN1 Elachi Box 200gm',
+    'danedar 100gm tea bag (envelope)': 'DD 100gm Tea Bag Envelope',
+    'danedar 100gmtea bag (envelope)': 'DD 100gm Tea Bag Envelope',
+    'danedar 100gm tea bag': 'DD 100gm Tea Bag',
+    'danedar 200gm rtb': 'DD 200gm RTB',
+    'danedar 200gm tea bag': 'DD 200gm Tea Bag',
+    'danedar 200gm tea bag (envelope)': 'DD 200gm Tea Bag Envelope',
+    'danedar 40gm': 'DD 40gm RTB',
+    'danedar 50gm tea bag': 'DD 50gm Tea Bag',
+    'danedar elaichi 100gm tea bag (env)': 'DD Elaichi 100gm Tea Bag Envelope',
+    'danedar 1200gm tea bag ooh': 'DD 1200gm Tea Bag OOH',
+    'family mixture 170gm hard pack': 'FM 170gm Hard Pack',
+    'family mixture 80gm hard pack': 'FM 80gm Hard Pack',
+    'family mixture 85gm hard pack': 'FM 85gm Hard Pack',
+    'fm 85gm hard pack': 'FM 85gm Hard Pack',
+    'fm 85g': 'FM 85gm Hard Pack',
+    'fm 85 g': 'FM 85gm Hard Pack',
+    'fm 85gm': 'FM 85gm Hard Pack',
+    'family mixture 85g': 'FM 85gm Hard Pack',
+    'family mixture 440gm jar pack': 'FM 440gm Jar Pack',
+    'family mixture 430gm pouch': 'FM 430gm Pouch',
+    'family mixture 900gm pouch': 'FM 900gm Pouch',
+    'family mixture 1750gm pouch': 'FM 1750gm Pouch',
+    'elaichi 45gm green tea bag': 'Elaichi 45gm',
+    'ginger honey 45gm green tea bag': 'Ginger Honey 45gm',
+    'jasmine 100gm jar pack': 'Jasmine 100gm',
+    'jasmine 45gm green tea bag': 'Jasmine 45gm',
+    'lemon 135gm tea bag boxes': 'Lemon 135gm',
+    'lemon 45gm green tea bag': 'Lemon 45gm',
+    'lemon grass 100gm jar pack': 'Lemon Grass 100gm',
+    'mango 45gm green tea bag': 'Mango 45gm',
+    'mint 45gm green tea bag': 'Mint 45gm',
+    'pure green 45gm green tea bag': 'Pure Green 45gm',
+    'sog 48gm green tea bag': 'SOG 48gm',
+    'stawberry 45gm green tea bag': 'Strawberry 45gm',
+    'strawberry 45gm green tea bag': 'Strawberry 45gm',
+    'tropical peach 45gm green tea bag': 'Tropical Peach 45gm',
+    'tapal insta brew 750gm': 'Tapal Insta Brew 750gm',
+    'tezdum 170gm hard pack': 'TD 170gm Hard Pack',
+    'tezdum 80gm hard pack': 'TD 80gm Hard Pack',
+    'tezdum 430gm pouch': 'TD 430gm Pouch',
+    'tezdum 900gm pouch': 'TD 900gm Pouch',
+    'tezdum 1750gm pouch': 'TD 1750gm Pouch',
+    'tezdum 290gm pouch': 'TD 290gm Pouch',
+    'tezdum 170gm pouch pack': 'TD 170gm Pouch Pack',
+}
 
 
 def canonical_sku(name) -> str | None:
     """The SKU's name as in the list (any case / extra spaces), or None when it is not one of the SKUs."""
-    return _CANONICAL_SKU.get(' '.join(str(name or '').split()).lower())
+    normalized = ' '.join(str(name or '').split()).lower()
+    without_pack_count = re.sub(r'\s+x\s*\d+(?:\.\d+)?(?:\s+boxes?)?(?=\s|$)', ' ', normalized)
+    without_pack_count = ' '.join(without_pack_count.split())
+    canonical = _SKU_INPUT_ALIASES.get(normalized) or _SKU_INPUT_ALIASES.get(without_pack_count) or normalized
+    canonical = canonical.lower()
+    return _CANONICAL_SKU.get(canonical)
 
 
 def ba_store_for_month(ambassador: Ambassador, month: str) -> Store | None:
@@ -695,12 +779,15 @@ def reported_sku_sales(ambassador_id, month: str) -> dict[str, float]:
             if kg is None:
                 continue
             if str(key).startswith(SALES_SKU_PREFIX):
-                sold[str(key)[len(SALES_SKU_PREFIX):].strip().lower()] = kg
+                name = str(key)[len(SALES_SKU_PREFIX):].strip()
+                sku = canonical_sku(name)
+                sold[(sku or name).lower()] = kg
             elif str(key).startswith(SALES_UNIT_PREFIX):
                 name = str(key)[len(SALES_UNIT_PREFIX):].strip()
-                grams = GRAMMAGE.get(canonical_sku(name) or '', 0)
+                sku = canonical_sku(name)
+                grams = GRAMMAGE.get(sku or '', 0)
                 if grams:
-                    sold[name.lower()] = round(kg * grams, 3)
+                    sold[(sku or name).lower()] = round(kg * grams, 3)
         if sold:
             by_day[timezone.localtime(report.submitted_at).date()] = sold
     totals: dict[str, float] = {}
@@ -732,7 +819,7 @@ def recompute_target_sales(ambassador_id, month: str):
 # Sales the BA reports are saved under the matching SKU, so they count towards that SKU's target.
 
 _LAHORE_SKUS: list[tuple[str, str, str | None]] = [
-    ('Danedar', 'Danedar 3IN1 Elaichi 200gm X 40 Boxes', None),
+    ('Danedar', 'Danedar 3IN1 Elaichi 200gm X 40 Boxes', 'DD 3IN1 Elaichi 200gm'),
     ('Danedar', 'Danedar 170gm X 60 Hard Pack', 'DD 170gm Hard Pack'),
     ('Danedar', 'Danedar 85gm X 120 Hard Pack', 'DD 85gm Hard Pack'),
     ('Danedar', 'Danedar Elaichi 170gm X 60 Hard Pack', 'DD Elaichi 170gm Hard Pack'),
@@ -748,8 +835,8 @@ _LAHORE_SKUS: list[tuple[str, str, str | None]] = [
     ('Danedar', 'Danedar 200gm X 20 Tea Bag (Envelope)', 'DD 200gm Tea Bag Envelope'),
     ('Danedar', 'Danedar 40gm X 80 RTB', 'DD 40gm RTB'),
     ('Danedar', 'Danedar 50gm x 80 Tea Bag', 'DD 50gm Tea Bag'),
-    ('Danedar', 'Danedar Elaichi 100gm X 36 Tea Bag (Env)', None),
-    ('Danedar', 'Danedar 1200gm Tea Bag OOH', None),
+    ('Danedar', 'Danedar Elaichi 100gm X 36 Tea Bag (Env)', 'DD Elaichi 100gm Tea Bag Envelope'),
+    ('Danedar', 'Danedar 1200gm Tea Bag OOH', 'DD 1200gm Tea Bag OOH'),
     ('Family Mixture', 'Family Mixture 170gm X 60 Hard Pack', 'FM 170gm Hard Pack'),
     ('Family Mixture', 'Family Mixture 80gm X 120 Hard Pack', 'FM 80gm Hard Pack'),
     ('Family Mixture', 'Family Mixture 440gm X 30 Jar Pack', 'FM 440gm Jar Pack'),
@@ -761,36 +848,43 @@ _LAHORE_SKUS: list[tuple[str, str, str | None]] = [
     ('Green Tea', 'Jasmine 45gm X 40 Green Tea Bag', 'Jasmine 45gm'),
     ('Green Tea', 'Lemon 135gm x 16 Tea Bag Boxes', 'Lemon 135gm'),
     ('Green Tea', 'Lemon 45gm X 40 Green Tea Bag', 'Lemon 45gm'),
-    ('Green Tea', 'Lemon Grass 100gm X 40 Jar Pack', None),
+    ('Green Tea', 'Lemon Grass 100gm X 40 Jar Pack', 'Lemon Grass 100gm'),
     ('Green Tea', 'Mango 45gm x 40 Green Tea Bag', 'Mango 45gm'),
     ('Green Tea', 'Mint 45gm X 40 Green Tea Bag', 'Mint 45gm'),
     ('Green Tea', 'Pure Green 45gm x 40 Green Tea Bag', 'Pure Green 45gm'),
     ('Green Tea', 'SOG 48gm X 40 Green Tea Bag', 'SOG 48gm'),
     ('Green Tea', 'Stawberry 45gm x 40 Green Tea Bag', 'Strawberry 45gm'),
     ('Green Tea', 'Tropical Peach 45gm x 40 Green Tea Bag', 'Tropical Peach 45gm'),
-    ('Insta Brew', 'Tapal Insta Brew 750gm x 16 Boxes', None),
+    ('Insta Brew', 'Tapal Insta Brew 750gm x 16 Boxes', 'Tapal Insta Brew 750gm'),
     ('Tezdum', 'Tezdum 170gm X 60 Hard Pack', 'TD 170gm Hard Pack'),
     ('Tezdum', 'Tezdum 80gm X 120 Hard Pack', 'TD 80gm Hard Pack'),
     ('Tezdum', 'Tezdum 430gm X 24 Pouch', 'TD 430gm Pouch'),
     ('Tezdum', 'Tezdum 900gm X 12 Pouch', 'TD 900gm Pouch'),
 ]
 
-_MULTAN_NAMES = [
-    'Danedar 85gm X 120 Hard Pack', 'Danedar Elaichi 170gm X 60 Hard Pack', 'Danedar 350gm X 30 Pouch',
-    'Danedar 440gm x 30 Jar Pack New', 'Danedar 430gm X 24 Pouch', 'Danedar 900gm X 12 Pouch',
-    'Danedar 200gm X 20 Tea Bag', 'Danedar 200gm X 20 RTB', 'Danedar 100gm X 40 Tea Bag',
-    'Danedar 100gm X 36 Tea Bag (Envelope)', 'Danedar 200gm X 20 Tea Bag (Envelope)',
-    'SOG 48gm X 40 Green Tea Bag', 'Mint 45gm X 40 Green Tea Bag', 'Lemon 45gm X 40 Green Tea Bag',
-    'Tropical Peach 45gm x 40 Green Tea Bag', 'Stawberry 45gm x 40 Green Tea Bag', 'Jasmine 100gm X 40 Jar Pack',
-    'Lemon Grass 100gm X 40 Jar Pack', 'Tezdum 170gm X 60 Hard Pack', 'Tezdum 430gm X 24 Pouch',
-    'Tezdum 900gm X 12 Pouch', 'Ginger Honey 45gm x 40 Green Tea Bag',
+# Multan target / report SKUs (canonical catalogue names). Includes Multan-only sizes like 1750gm.
+_MULTAN_CATALOGUE_SKUS = [
+    'DD 100gm Tea Bag', 'DD 100gm Tea Bag Envelope', 'DD 170gm Hard Pack', 'DD 1750gm Pouch',
+    'DD 200gm RTB', 'DD 200gm Tea Bag', 'DD 200gm Tea Bag Envelope', 'DD 350gm Pouch',
+    'DD 3IN1 Elachi Box 200gm', 'DD 40gm RTB', 'DD 430gm Pouch', 'DD 440gm Jar Pack New',
+    'DD 49gm Hard Pack', 'DD 50gm Tea Bag', 'DD 85gm Hard Pack', 'DD 900gm Pouch',
+    'DD 900gm Collectible Pack',
+    'DD Elaichi 100gm Tea Bag Envelope', 'DD Elaichi 170gm Hard Pack', 'DD Elaichi 80gm Hard Pack',
+    'DD 200gm Jar Pack', 'DD 170gm Pouch',
+    'TD 170gm Hard Pack', 'TD 170gm Pouch Pack', 'TD 430gm Pouch', 'TD 80gm Hard Pack', 'TD 900gm Pouch',
+    'TD 1750gm Pouch', 'TD 290gm Pouch',
+    'FM 170gm Hard Pack', 'FM 430gm Pouch', 'FM 440gm Jar Pack', 'FM 80gm Hard Pack', 'FM 85gm Hard Pack',
+    'FM 900gm Pouch', 'FM 1750gm Pouch',
+    'Elaichi 45gm', 'Ginger Honey 45gm', 'Jasmine 100gm', 'Jasmine 45gm', 'Lemon 135gm', 'Lemon 45gm',
+    'Lemon Grass 100gm', 'Orange 45gm', 'Pineapple 45gm', 'Mango 45gm', 'Mint 45gm', 'Pure Green 45gm',
+    'SOG 48gm', 'Strawberry 45gm', 'Tropical Peach 45gm', 'Gulbahar 80gm Hard Pack',
 ]
 _BY_NAME = {name: (brand, name, sku) for brand, name, sku in _LAHORE_SKUS}
 _BY_SQUASHED_NAME = {' '.join(name.lower().split()): row for name, row in _BY_NAME.items()}
 
 CITY_REPORT_SKUS: dict[str, list[tuple[str, str, str | None]]] = {
     'lahore': _LAHORE_SKUS,
-    'multan': [_BY_NAME[name] for name in _MULTAN_NAMES],
+    'multan': [(BRAND[sku], sku, sku) for sku in _MULTAN_CATALOGUE_SKUS if sku in BRAND],
 }
 
 
@@ -811,8 +905,15 @@ def report_skus_for_city(city: str) -> list[dict] | None:
     from .models import CitySku
 
     city = (city or '').strip()
-    names = [name.strip() for name in CitySku.objects.filter(city__iexact=city).values_list('sku', flat=True)]
-    rows = [_city_sku_row(name) for name in names if name] or CITY_REPORT_SKUS.get(city.lower())
+    city_rows = CitySku.objects.filter(city__iexact=city).values_list('sku', 'brand')
+    rows = []
+    for raw_name, raw_brand in city_rows:
+        name = (raw_name or '').strip()
+        if not name:
+            continue
+        inferred_brand, label, sku = _city_sku_row(name)
+        rows.append(((raw_brand or '').strip() or inferred_brand, label, sku))
+    rows = rows or CITY_REPORT_SKUS.get(city.lower())
     if not rows:
         return None
     return [{'brand': brand, 'label': name, 'sku': sku or name} for brand, name, sku in rows]

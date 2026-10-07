@@ -297,6 +297,9 @@ export function SupervisorSubmissionsPage() {
               >
                 <div className="min-w-0">
                   <div className="truncate font-medium text-slate-900">{report.baName}</div>
+                  {report.submittedByName && report.submittedByName !== report.baName && (
+                    <div className="text-[11px] text-violet-700">Submitted by {report.submittedByName}</div>
+                  )}
                   <div className="truncate text-xs text-slate-500">
                     {storeByBa.get(report.baId) ?? (report.city || '—')} · {SOURCE_LABEL[report.source]}
                   </div>
@@ -325,7 +328,12 @@ export function SupervisorSubmissionsPage() {
               {rows.map((report) => (
                 <tr key={report.id} className="border-t border-slate-100">
                   <td className="px-4 py-3 text-xs text-slate-500">{formatComplaintDate(report.submittedAt)}</td>
-                  <td className="px-4 py-3 font-medium text-slate-900">{report.baName}</td>
+                  <td className="px-4 py-3 font-medium text-slate-900">
+                    {report.baName}
+                    {report.submittedByName && report.submittedByName !== report.baName && (
+                      <div className="text-[11px] font-normal text-violet-700">Submitted by {report.submittedByName}</div>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-slate-600">{storeByBa.get(report.baId) ?? (report.city || '—')}</td>
                   <td className="px-4 py-3 text-slate-600">{SOURCE_LABEL[report.source]}</td>
                   <td className="px-4 py-3 text-right">
@@ -361,6 +369,11 @@ export function SupervisorSubmissionsPage() {
               {storeByBa.get(openReport.baId) ?? (openReport.city || 'Store not set')} ·{' '}
               {SOURCE_LABEL[openReport.source]} · {formatComplaintDate(openReport.submittedAt)}
             </p>
+            {openReport.submittedByName && openReport.submittedByName !== openReport.baName && (
+              <p className="rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-800">
+                Report credited to {openReport.baName}; submitted by backup BA {openReport.submittedByName}.
+              </p>
+            )}
             <SubmissionSlice title="Stock report" rows={labeledStock(openReport.stock)} />
             <SubmissionSlice
               title="Daily sales"

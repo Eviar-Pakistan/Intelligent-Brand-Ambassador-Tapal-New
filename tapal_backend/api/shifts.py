@@ -3,16 +3,40 @@
 from __future__ import annotations
 
 import re
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 
+from django.db.models import Q
 from django.utils import timezone
 
 
 DAY_KEYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
 
+# Attendance / daily-shift "today" rolls at 5:00 AM Asia/Karachi (not midnight),
+# so late checkouts (~1–2 AM) stay on the check-in day.
+BUSINESS_DAY_START = time(5, 0)
+
+
+def business_today(now: datetime | None = None) -> date:
+    """Working day for BA attendance: before 05:00 counts as the previous calendar day."""
+    local = timezone.localtime(now or timezone.now())
+    if local.time() < BUSINESS_DAY_START:
+        return local.date() - timedelta(days=1)
+    return local.date()
+
+
+def work_datetime_on(day: date, when: datetime | None = None) -> datetime:
+    """
+    A timestamp that falls on `day` in the local timezone.
+    Keeps the clock time when possible so late-night activity (e.g. 02:00) stays on the check-in day.
+    """
+    local = timezone.localtime(when or timezone.now())
+    if local.date() == day:
+        return when or timezone.now()
+    return timezone.make_aware(datetime.combine(day, local.time().replace(microsecond=0)))
+
 
 def monday_of(d: date | None = None) -> date:
-    d = d or timezone.localdate()
+    d = d or business_today()
     return d - timedelta(days=d.weekday())  # Monday=0
 
 
@@ -98,10 +122,23 @@ def parse_month(raw) -> tuple[int, int] | None:
     return year, month
 
 
+def _time_spans(start: time, end: time) -> list[tuple[int, int]]:
+    """Minutes-from-midnight spans; overnight (end <= start) wraps past midnight."""
+    s = start.hour * 60 + start.minute
+    e = end.hour * 60 + end.minute
+    if e <= s:
+        return [(s, 24 * 60), (0, e)]
+    return [(s, e)]
+
+
 def _overlaps(a_start: time, a_end: time, b_start: time | None, b_end: time | None) -> bool:
     if b_start is None or b_end is None:
         return False
-    return a_start < b_end and b_start < a_end
+    for a0, a1 in _time_spans(a_start, a_end):
+        for b0, b1 in _time_spans(b_start, b_end):
+            if a0 < b1 and b0 < a1:
+                return True
+    return False
 
 
 def create_month_shifts(rows: list[dict], user=None, scope=None) -> dict:
@@ -145,8 +182,7 @@ def create_month_shifts(rows: list[dict], user=None, scope=None) -> dict:
             problems.append('Start time must be HH:MM')
         if end is None:
             problems.append('End time must be HH:MM')
-        if start and end and end <= start:
-            problems.append('End time must be after start time')
+        # Overnight shifts (e.g. 17:00 → 01:00) are allowed: end before start means next calendar morning.
         if month is None:
             problems.append('Month must be YYYY-MM')
 
@@ -248,7 +284,7 @@ def assign_ba_stores(month: str | None = None, ambassador_ids=None) -> int:
     """
     from .models import Ambassador, MonthlyShift
 
-    month = month or timezone.localdate().strftime('%Y-%m')
+    month = month or business_today().strftime('%Y-%m')
     shifts = MonthlyShift.objects.filter(month=month, ambassador__isnull=False).order_by('start_time', 'id')
     if ambassador_ids is not None:
         shifts = shifts.filter(ambassador_id__in=list(ambassador_ids))
@@ -274,32 +310,93 @@ _stores_assigned_for_month = ''
 def ensure_daily_rows(day: date, ambassador=None) -> None:
     """Create the attendance row for `day` from every assigned monthly shift of that month."""
     global _stores_assigned_for_month
-    from .models import MonthlyShift, ShiftAssignment
+    from .models import BackupCoverage, MonthlyShift, ShiftAssignment
     from .store_live import reset_stale_footfall
 
-    if day == timezone.localdate():
+    if day == business_today():
         reset_stale_footfall()
         # A new month: BAs move to the stores of their new monthly shifts.
         month = day.strftime('%Y-%m')
         if _stores_assigned_for_month != month:
             assign_ba_stores(month)
             _stores_assigned_for_month = month
-    # Deactivated BAs get no new attendance days.
     monthly = MonthlyShift.objects.filter(
-        month=day.strftime('%Y-%m'), ambassador__isnull=False, ambassador__is_active=True
+        month=day.strftime('%Y-%m'), ambassador__isnull=False
     )
     if ambassador is not None:
-        monthly = monthly.filter(ambassador=ambassador)
-    have = set(
-        ShiftAssignment.objects.filter(date=day, monthly_shift__in=monthly).values_list('monthly_shift_id', flat=True)
-    )
+        monthly = monthly.filter(
+            Q(ambassador=ambassador, ambassador__is_active=True)
+            | Q(ambassador__backup_coverage_absences__backup_ba=ambassador)
+        )
+    else:
+        # Deactivated BAs get no new attendance days unless an active backup
+        # assignment explicitly needs a daily row for the covered shift.
+        monthly = monthly.filter(
+            Q(ambassador__is_active=True)
+            | Q(
+                ambassador__backup_coverage_absences__starts_on__lte=day,
+                ambassador__backup_coverage_absences__backup_ba__is_active=True,
+            ) & (
+                Q(ambassador__backup_coverage_absences__ends_on__isnull=True)
+                | Q(ambassador__backup_coverage_absences__ends_on__gte=day)
+            )
+        )
+    monthly = monthly.distinct().select_related('store', 'ambassador')
     for shift in monthly:
-        if shift.id in have:
-            continue
-        ShiftAssignment.objects.get_or_create(
+        original, _ = ShiftAssignment.objects.get_or_create(
             monthly_shift=shift,
             date=day,
             defaults=_daily_fields(shift, day),
+        )
+        coverage = (
+            BackupCoverage.objects.filter(original_ba=shift.ambassador, store=shift.store, starts_on__lte=day)
+            .filter(Q(ends_on__isnull=True) | Q(ends_on__gte=day))
+            .select_related('backup_ba', 'original_ba')
+            .order_by('-starts_on', '-id')
+            .first()
+        )
+        if not coverage or not coverage.backup_ba_id or not coverage.backup_ba.is_active:
+            continue
+        # A BA who has already started the original shift stays attached to it; never rewrite attendance.
+        if original.checked_in_at or original.checked_out_at or original.report_submitted_at:
+            continue
+        if original.covered_by_id not in (None, coverage.backup_ba_id):
+            continue
+        now = timezone.now()
+        original.covered_by = coverage.backup_ba
+        original.coverage_assignment = coverage
+        original.coverage_assigned_by = coverage.assigned_by
+        original.coverage_assigned_at = coverage.assigned_at
+        original.save(update_fields=[
+            'covered_by', 'coverage_assignment', 'coverage_assigned_by', 'coverage_assigned_at', 'updated_at'
+        ])
+        backup_day = ShiftAssignment.objects.filter(
+            coverage_assignment=coverage,
+            coverage_of__isnull=False,
+            date=day,
+        ).first()
+        if backup_day:
+            continue
+        if ShiftAssignment.objects.filter(
+            ambassador=coverage.backup_ba, date=day, coverage_cancelled=False
+        ).exists():
+            continue
+        ShiftAssignment.objects.create(
+            store=original.store,
+            ambassador=coverage.backup_ba,
+            date=day,
+            day_key=day_key_for(day),
+            shift_label=original.shift_label,
+            start_time=original.start_time,
+            end_time=original.end_time,
+            peak_recommended=original.peak_recommended,
+            status=ShiftAssignment.Status.SCHEDULED,
+            coverage_of=original,
+            coverage_assignment=coverage,
+            report_owner=coverage.original_ba or original.ambassador,
+            coverage_assigned_by=coverage.assigned_by,
+            coverage_assigned_at=coverage.assigned_at or now,
+            created_by=coverage.assigned_by,
         )
 
 
@@ -318,7 +415,7 @@ def _daily_fields(shift, day: date) -> dict:
 
 def sync_daily_rows(shift) -> None:
     """After an edit, today's row (if not started yet) follows the monthly shift. Past days keep their record."""
-    today = timezone.localdate()
+    today = business_today()
     pending = shift.days.filter(date__gte=today, checked_in_at__isnull=True)
     if not shift.ambassador_id or shift.month != today.strftime('%Y-%m'):
         pending.delete()
@@ -331,7 +428,7 @@ def sync_daily_rows(shift) -> None:
 
 def drop_pending_daily_rows(shift) -> None:
     """Before a monthly shift is deleted: remove today's row unless the BA already checked in."""
-    shift.days.filter(date__gte=timezone.localdate(), checked_in_at__isnull=True).delete()
+    shift.days.filter(date__gte=business_today(), checked_in_at__isnull=True).delete()
 
 
 class Attendance:
@@ -344,9 +441,12 @@ class Attendance:
 def attendance_status(row, today: date | None = None) -> str:
     """
     Present only after check-in, report submission and check-out.
-    A past day without that is Absent, including a check-in with no report.
+    A past business day without that is Absent, including a check-in with no report.
+    Checkout is allowed until 05:00 after the shift date; after that the day is closed.
     """
-    today = today or timezone.localdate()
+    today = today or business_today()
+    if row.covered_by_id:
+        return Attendance.ABSENT
     if row.checked_out_at and row.report_submitted_at:
         return Attendance.PRESENT
     if row.date == today:
@@ -361,7 +461,7 @@ def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_i
     """Daily attendance rows (made from monthly shifts) with a status for each, plus totals."""
     from .models import ShiftAssignment
 
-    today = timezone.localdate()
+    today = business_today()
     date_to = min(date_to, today)
     if date_from > date_to:
         date_from = date_to
@@ -373,7 +473,9 @@ def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_i
     qs = (
         ShiftAssignment.objects.filter(date__gte=date_from, date__lte=date_to)
         .exclude(ambassador_id=None)
-        .select_related('store', 'ambassador')
+        .select_related(
+            'store', 'ambassador', 'covered_by', 'coverage_of__ambassador', 'report_owner', 'coverage_assigned_by'
+        )
         .order_by('-date', 'ambassador__name', 'start_time', 'id')
     )
     if scope is not None:
@@ -396,12 +498,28 @@ def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_i
                 'baId': r.ambassador_id,
                 'baName': r.ambassador.name,
                 'baCode': r.ambassador.ba_code,
+                'coveredByName': r.covered_by.name if r.covered_by_id else None,
+                'coverageOfName': (
+                    r.coverage_of.ambassador.name
+                    if r.coverage_of_id and r.coverage_of.ambassador_id
+                    else None
+                ),
+                'reportOwnerId': r.report_owner_id or r.ambassador_id,
+                'reportOwnerName': r.report_owner.name if r.report_owner_id else r.ambassador.name,
+                'coverageAssignedByName': (
+                    (r.coverage_assigned_by.get_full_name() or r.coverage_assigned_by.get_username())
+                    if r.coverage_assigned_by_id
+                    else None
+                ),
+                'coverageAssignedAt': iso(r.coverage_assigned_at),
+                'coverageCancelled': r.coverage_cancelled,
                 'storeId': r.store_id,
                 'storeName': r.store.name,
                 'storeCode': r.store.store_code,
                 'city': r.store.city,
                 'shift': r.shift_label,
                 'checkedInAt': iso(r.checked_in_at),
+                'attendanceType': r.attendance_type,
                 'checkedOutAt': iso(r.checked_out_at),
                 'checkInLat': r.check_in_lat,
                 'checkInLng': r.check_in_lng,

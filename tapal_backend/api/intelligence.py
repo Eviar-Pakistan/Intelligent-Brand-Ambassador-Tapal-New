@@ -312,9 +312,10 @@ def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
              + 20 × average shopper rating at their store(s) this month (when there is one)
     """
     from .models import AmbassadorMonthTarget, MonthlyShift, UserInterception
+    from .shifts import business_today
     from .store_live import switched_to_tapal
 
-    today = timezone.localdate()
+    today = business_today()
     week_start = today - timedelta(days=today.weekday())  # Monday
     week_end = week_start + timedelta(days=6)
     month = today.strftime('%Y-%m')
@@ -429,9 +430,9 @@ def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
 def _operations_today(scope: CityScope = ALL) -> dict:
     """Attendance for today, from the daily rows made out of monthly shifts."""
     from .models import MonthlyShift
-    from .shifts import ensure_daily_rows
+    from .shifts import business_today, ensure_daily_rows
 
-    today = timezone.localdate()
+    today = business_today()
     ensure_daily_rows(today)
     rows = list(scope.stores(ShiftAssignment.objects.filter(date=today).exclude(ambassador_id=None)))
     scheduled = len({r.ambassador_id for r in rows})

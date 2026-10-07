@@ -40,6 +40,7 @@ type ApiAmbassador = {
   store_name?: string | null
   is_active?: boolean
   report_json?: EngineReport | null
+  is_demo?: boolean
 }
 
 function asList<T>(payload: unknown): T[] {
@@ -50,9 +51,24 @@ function asList<T>(payload: unknown): T[] {
   return []
 }
 
+let syncInFlight: Promise<void> | null = null
+let lastSyncAt = 0
+
 /** Pull Django stores and ambassadors into the lists the screens already use. Existing rows stay. */
-export async function syncDjango() {
-  if (!djangoToken()) return
+export function syncDjango() {
+  if (!djangoToken()) return Promise.resolve()
+  if (syncInFlight) return syncInFlight
+  // Several screens request this same snapshot during initial navigation. Reuse the recent sync
+  // instead of repeating the stores, ambassadors, and targets queries on every route mount.
+  if (Date.now() - lastSyncAt < 15_000) return Promise.resolve()
+  syncInFlight = syncDjangoData().finally(() => {
+    lastSyncAt = Date.now()
+    syncInFlight = null
+  })
+  return syncInFlight
+}
+
+async function syncDjangoData() {
   try {
     const [storesRes, ambassadorsRes] = await Promise.all([
       djangoFetch('/api/stores/'),
@@ -114,6 +130,8 @@ export async function pushAmbassador(account: BaAccount) {
         email: account.email,
         city: account.city,
         phone: account.phone,
+        is_backup: account.isBackup === true,
+        is_demo: account.isDemoAccount === true,
       }),
     })
     if (!response.ok) return null

@@ -88,6 +88,7 @@ export function AmbassadorProfile({ account, onShiftToday }: { account: BaAccoun
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
             <StatusBadge status={account.serverStatus || account.status} />
             {!active && <StatusBadge status="Inactive" />}
+            {account.isBackup && <StatusBadge status="Backup BA" />}
           </div>
           <p className="mt-2 text-xs text-slate-500">{account.city || '—'}</p>
           <p className="mt-0.5 text-sm text-slate-600">{account.storeName || 'No store yet'}</p>
@@ -190,6 +191,27 @@ export function AmbassadorProfile({ account, onShiftToday }: { account: BaAccoun
             </Button>
           </div>
           <p className="mt-2 text-xs text-slate-400">Only certified ambassadors can be deployed.</p>
+          {serverId !== null && (
+            <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
+              <div>
+                <div className="text-sm font-medium text-slate-800">Backup BA pool</div>
+                <div className="text-xs text-slate-500">Allow Head Office to assign this BA as shift cover.</div>
+              </div>
+              <Button
+                size="sm"
+                variant={account.isBackup ? 'secondary' : 'primary'}
+                disabled={busy || !active || account.isDemoAccount}
+                onClick={() =>
+                  void run(
+                    () => patch({ is_backup: !account.isBackup }),
+                    account.isBackup ? 'Removed from the backup pool.' : 'Added to the backup pool.',
+                  )
+                }
+              >
+                {account.isBackup ? 'Remove' : 'Add'}
+              </Button>
+            </div>
+          )}
         </Card>
 
         <Card>

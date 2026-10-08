@@ -1,13 +1,12 @@
 import { useUserInterceptions } from '../../lib/userInterceptions'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
-import { RotateCcw, Search } from 'lucide-react'
-import { Card, CardHeader, cn, KpiCard, TableScroll } from '../../components/ui'
+import { Download, RotateCcw, Search } from 'lucide-react'
+import { Button, Card, CardHeader, cn, KpiCard, TableScroll } from '../../components/ui'
 import {
   aggregateBaPerformance,
-  applySkuFilter,
   MONTH_ORDER,
-  packsFromLines,
+  periodsForCalendarRange,
   recordsFromTargets,
   type BaPerformanceRecord,
 } from '../../data/baPerformance'
@@ -21,14 +20,12 @@ import {
   defaultChartOptions,
 } from '../../lib/chartjs'
 import type { ChartData, ChartOptions } from 'chart.js'
-import {
-  achievementPct,
-  currentMonthKey,
-  formatTargetMonth,
-  useBaTargets,
-} from '../../lib/baTargets'
+import { achievementPct, useBaTargets } from '../../lib/baTargets'
 import { isDemoBa, useBaAccounts } from '../../lib/baAccounts'
+import { reportSalesInRange, syncDailyReports, useDailyReports } from '../../lib/baReport'
+import { syncBaTargets } from '../../lib/djangoSync'
 import { useDjangoUser } from '../../lib/djangoApi'
+import { loadSkuCatalogue, type SkuRow } from '../../lib/skuCatalogue'
 import { useCreatedStores } from '../../lib/storeRegistry'
 import { stores as allStores } from '../../data/mock'
 
@@ -277,6 +274,8 @@ function dateRangeForPreset(preset: DatePreset, customFrom: string, customTo: st
 }
 
 export function BaPerformanceDashboardPage() {
+  const snapshotRef = useRef<HTMLDivElement>(null)
+  const [downloading, setDownloading] = useState(false)
   const [towns, setTowns] = useState<string[]>([])
   const [months, setMonths] = useState<string[]>(() => {
     const month = monthForPreset('mtd')
@@ -285,11 +284,21 @@ export function BaPerformanceDashboardPage() {
   const [stores, setStores] = useState<string[]>([])
   const [skus, setSkus] = useState<string[]>([])
   const [datePreset, setDatePreset] = useState<DatePreset>('mtd')
-  const [customFrom, setCustomFrom] = useState('')
-  const [customTo, setCustomTo] = useState('')
+  const [customFrom, setCustomFrom] = useState(() => {
+    const r = dateRangeForPreset('mtd', '', '')
+    return r ? dateInputValue(r.start) : ''
+  })
+  const [customTo, setCustomTo] = useState(() => {
+    const r = dateRangeForPreset('mtd', '', '')
+    return r ? dateInputValue(r.end) : ''
+  })
   const baTargets = useBaTargets()
+  const dailyReports = useDailyReports()
+  const [catalogue, setCatalogue] = useState<SkuRow[]>([])
   useEffect(() => {
     void import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())
+    void syncDailyReports()
+    void loadSkuCatalogue().then(setCatalogue)
   }, [])
   // Totals for the signed-in user: the server only sends their city's BAs and stores (all cities
   // for an all-cities login). The Town filter narrows them further.
@@ -305,22 +314,26 @@ export function BaPerformanceDashboardPage() {
     [knownStores, towns],
   )
   const countScope = towns.length ? towns.join(', ') : officeUser?.city || 'All cities'
-  const targetMonths = useMemo(() => {
-    const keys = new Set(baTargets.map((row) => row.month))
-    keys.add(currentMonthKey())
-    return [...keys].sort((a, b) => b.localeCompare(a))
-  }, [baTargets])
-  const [targetMonth, setTargetMonth] = useState(currentMonthKey)
-  const targetRows = useMemo(
-    () =>
-      baTargets
-        .filter((row) => row.month === targetMonth)
-        .slice()
-        .sort((a, b) => a.baName.localeCompare(b.baName)),
-    [baTargets, targetMonth],
-  )
   const interceptions = useUserInterceptions()
   const liveRecords = useMemo(() => recordsFromTargets(baTargets, interceptions), [baTargets, interceptions])
+  /** Monthly target rows, optionally narrowed to selected SKUs (target kg/units only). */
+  const skuLiveRecords = useMemo(() => {
+    if (!skus.length) return liveRecords
+    const wanted = new Set(skus)
+    const rows = baTargets.flatMap((row) => {
+      const lines = (row.lines ?? []).filter((line) => wanted.has(line.sku))
+      if (!lines.length) return []
+      return [
+        {
+          ...row,
+          lines,
+          targetKg: lines.reduce((sum, line) => sum + line.kg, 0),
+          salesKg: 0,
+        },
+      ]
+    })
+    return recordsFromTargets(rows, interceptions)
+  }, [baTargets, interceptions, liveRecords, skus])
   const townOptions = useMemo(
     () => [...new Set(liveRecords.map((record) => record.town))].sort((a, b) => a.localeCompare(b)),
     [liveRecords],
@@ -342,8 +355,33 @@ export function BaPerformanceDashboardPage() {
     [datePreset, customFrom, customTo],
   )
 
+  // Load monthly BA SKU targets for every YYYY-MM touched by the active date range.
+  useEffect(() => {
+    if (!range) return
+    let cancelled = false
+    const keys: string[] = []
+    for (
+      let d = new Date(range.start.getFullYear(), range.start.getMonth(), 1);
+      d <= range.end;
+      d = new Date(d.getFullYear(), d.getMonth() + 1, 1)
+    ) {
+      keys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+    }
+    void (async () => {
+      for (const month of keys) {
+        if (cancelled) return
+        await syncBaTargets(month)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [range])
+
+  /** Months touched by the active date range; empty when custom dates are incomplete. */
   const coveredMonths = useMemo(() => {
-    const fromRange = range ? monthsTouched(range.start, range.end) : months
+    if (!range) return []
+    const fromRange = monthsTouched(range.start, range.end)
     if (!months.length) return fromRange
     return fromRange.filter((month) => months.includes(month))
   }, [range, months])
@@ -361,32 +399,141 @@ export function BaPerformanceDashboardPage() {
 
   const scopeTown = towns.length === 0 ? null : towns.length === 1 ? towns[0] : towns.join(', ')
 
-  const scopedRecords = useMemo(
-    () => applySkuFilter(filterLiveRecords(liveRecords, { towns, stores, months: coveredMonths }), skus),
-    [liveRecords, towns, stores, coveredMonths, skus],
-  )
+  /** Monthly target SKU lines per BA — same grammage source as the BA Rewards screen. */
+  const targetLinesByBa = useMemo(() => {
+    const map = new Map<string, { sku: string; grammage?: number }[]>()
+    for (const row of baTargets) {
+      if (!row.baId) continue
+      const existing = map.get(row.baId) ?? []
+      for (const line of row.lines ?? []) {
+        existing.push({ sku: line.sku, grammage: line.grammage })
+      }
+      map.set(row.baId, existing)
+    }
+    return map
+  }, [baTargets])
+
+  /** Sales from Daily Sales reports — same unit→kg math as BA Rewards for Amna etc. */
+  const salesByBa = useMemo(() => {
+    if (!range) return new Map<string, { kg: number; units: number; city: string; store: string }>()
+    return reportSalesInRange(dailyReports, range, {
+      towns,
+      stores,
+      skus,
+      catalogue,
+      targetLinesByBa,
+    })
+  }, [dailyReports, range, towns, stores, skus, catalogue, targetLinesByBa])
+
+  /**
+   * Target = monthly BA SKU target table (full month).
+   * Sales = daily sales report table for the selected date range (never target.salesKg).
+   */
+  const scopedRecords = useMemo(() => {
+    if (!range) return []
+    const periods = periodsForCalendarRange(range.start, range.end).filter(
+      (period) => !months.length || (period.month != null && months.includes(period.month)),
+    )
+    const monthRows = periods.flatMap((period) => {
+      if (!period.month) return []
+      return filterLiveRecords(skuLiveRecords, { towns, stores, months: [period.month] }).map((record) => ({
+        ...record,
+        salesKg: 0,
+        salesPacks: 0,
+      }))
+    })
+
+    // Attach daily-report sales once per BA so multi-month ranges do not multiply sales.
+    const salesApplied = new Set<string>()
+    return monthRows.map((record) => {
+      const key = record.baId || `${record.town}|${record.store}`
+      const fromReports = record.baId ? salesByBa.get(record.baId) : undefined
+      if (!fromReports) return record
+      if (salesApplied.has(key)) return record
+      salesApplied.add(key)
+      return {
+        ...record,
+        salesKg: fromReports.kg,
+        salesPacks: fromReports.units,
+      }
+    })
+  }, [range, skuLiveRecords, towns, stores, months, salesByBa])
 
   const data = useMemo(
     () => aggregateBaPerformance(scopedRecords, scopeTown, { rankBy: 'target' }),
     [scopedRecords, scopeTown],
   )
 
+  /** One row per ambassador (merged across months in the active filter range). */
+  const targetRows = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        baId: string
+        baName: string
+        baCode?: string
+        store: string
+        targetKg: number
+        salesKg: number
+        targetPacks: number
+        salesPacks: number
+      }
+    >()
+    for (const record of scopedRecords) {
+      const key = record.baId || `${record.town}|${record.store}|${record.baName ?? ''}`
+      const current = grouped.get(key) ?? {
+        baId: record.baId || key,
+        baName: record.baName || 'Ambassador',
+        baCode: record.baCode,
+        store: record.store,
+        targetKg: 0,
+        salesKg: 0,
+        targetPacks: 0,
+        salesPacks: 0,
+      }
+      current.targetKg += record.targetKg
+      current.salesKg += record.salesKg
+      current.targetPacks += record.targetPacks ?? 0
+      current.salesPacks += record.salesPacks ?? 0
+      if (record.store && record.store !== 'Store') current.store = record.store
+      if (record.baCode) current.baCode = record.baCode
+      grouped.set(key, current)
+    }
+    return [...grouped.values()]
+      .map((row) => ({
+        ...row,
+        targetKg: Math.round(row.targetKg * 100) / 100,
+        // Keep 3 decimals so figures match the BA Rewards card (e.g. 367.238).
+        salesKg: Math.round(row.salesKg * 1000) / 1000,
+        targetPacks: Math.round(row.targetPacks),
+        salesPacks: Math.round(row.salesPacks),
+      }))
+      .sort((a, b) => a.baName.localeCompare(b.baName))
+  }, [scopedRecords])
+
   const cityRows = useMemo(() => {
     const grouped = new Map<
       string,
-      { stores: Set<string>; ambassadors: number; target: number; sales: number; targetUnits: number; salesUnits: number }
+      {
+        stores: Set<string>
+        ambassadors: Set<string>
+        target: number
+        sales: number
+        targetUnits: number
+        salesUnits: number
+      }
     >()
     for (const record of scopedRecords) {
       const current = grouped.get(record.town) ?? {
         stores: new Set<string>(),
-        ambassadors: 0,
+        ambassadors: new Set<string>(),
         target: 0,
         sales: 0,
         targetUnits: 0,
         salesUnits: 0,
       }
       current.stores.add(record.store)
-      current.ambassadors += 1
+      current.ambassadors.add(record.baId || `${record.store}|${record.baName ?? ''}`)
       current.target += record.targetKg
       current.sales += record.salesKg
       current.targetUnits += record.targetPacks ?? 0
@@ -397,9 +544,9 @@ export function BaPerformanceDashboardPage() {
       .map(([city, row]) => ({
         city,
         stores: row.stores.size,
-        ambassadors: row.ambassadors,
+        ambassadors: row.ambassadors.size,
         target: Math.round(row.target),
-        sales: Math.round(row.sales * 10) / 10,
+        sales: Math.round(row.sales * 1000) / 1000,
         targetUnits: Math.round(row.targetUnits),
         salesUnits: Math.round(row.salesUnits),
       }))
@@ -408,10 +555,23 @@ export function BaPerformanceDashboardPage() {
 
   const [salesTrend, setSalesTrend] = useState<'wow' | 'mom' | 'yoy'>('wow')
 
-  function applyDatePreset(preset: DatePreset, from = customFrom, to = customTo) {
+  function applyDatePreset(preset: DatePreset) {
     setDatePreset(preset)
-    if (preset === 'custom') return
-    const month = monthForPreset(preset, from, to)
+    if (preset === 'custom') {
+      if (!customFrom && !customTo) {
+        const today = todayInputValue()
+        setCustomFrom(today)
+        setCustomTo(today)
+      }
+      return
+    }
+    const nextRange = dateRangeForPreset(preset, '', '')
+    if (nextRange) {
+      setCustomFrom(dateInputValue(nextRange.start))
+      setCustomTo(dateInputValue(nextRange.end))
+    }
+    // YTD spans many months — clear the Month sidebar filter so the range drives coverage.
+    const month = monthForPreset(preset)
     setMonths(month ? [month] : [])
     setStores([])
   }
@@ -433,6 +593,198 @@ export function BaPerformanceDashboardPage() {
       const month = monthForPreset('custom', customFrom, value)
       setMonths(month ? [month] : [])
       setStores([])
+    }
+  }
+
+  async function downloadDashboardPdf(from: string, to: string) {
+    const el = snapshotRef.current
+    if (!el) throw new Error('Dashboard snapshot is not ready yet.')
+
+    // html2canvas-pro supports Tailwind v4 oklch()/oklab() colors (plain html2canvas does not).
+    const [{ default: html2canvas }, jspdfMod] = await Promise.all([
+      import('html2canvas-pro'),
+      import('jspdf'),
+    ])
+    const jsPDF = jspdfMod.jsPDF ?? jspdfMod.default
+
+    const canvas = await html2canvas(el, {
+      scale: Math.min(2, 1600 / Math.max(el.scrollWidth, 1)),
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: '#f8fafc',
+      logging: false,
+      scrollX: 0,
+      scrollY: -window.scrollY,
+      windowWidth: el.scrollWidth,
+      windowHeight: el.scrollHeight,
+    })
+
+    if (!canvas.width || !canvas.height) {
+      throw new Error('Could not capture the dashboard image.')
+    }
+
+    // Slice tall dashboards into A4 JPEG pages (smaller + more reliable than one huge image).
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+    const pageWidth = pdf.internal.pageSize.getWidth()
+    const pageHeight = pdf.internal.pageSize.getHeight()
+    const margin = 8
+    const usableWidth = pageWidth - margin * 2
+    const usableHeight = pageHeight - margin * 2
+    const pageCanvas = document.createElement('canvas')
+    const pageCtx = pageCanvas.getContext('2d')
+    if (!pageCtx) throw new Error('Could not prepare PDF pages.')
+
+    const pxPerMm = canvas.width / usableWidth
+    const pageHeightPx = Math.floor(usableHeight * pxPerMm)
+    let yPx = 0
+    let pageIndex = 0
+
+    while (yPx < canvas.height) {
+      const sliceHeight = Math.min(pageHeightPx, canvas.height - yPx)
+      pageCanvas.width = canvas.width
+      pageCanvas.height = sliceHeight
+      pageCtx.fillStyle = '#f8fafc'
+      pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
+      pageCtx.drawImage(canvas, 0, yPx, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight)
+      const sliceData = pageCanvas.toDataURL('image/jpeg', 0.92)
+      const sliceMm = sliceHeight / pxPerMm
+      if (pageIndex > 0) pdf.addPage()
+      if (pageIndex === 0) {
+        pdf.setFontSize(10)
+        pdf.setTextColor(51, 65, 85)
+        pdf.text(`BA Performance · ${dateRangeLabel}`, margin, 5.5)
+      }
+      pdf.addImage(sliceData, 'JPEG', margin, margin, usableWidth, sliceMm)
+      yPx += sliceHeight
+      pageIndex += 1
+      if (sliceHeight <= 0) break
+    }
+
+    pdf.save(`BA_Performance_${from}_to_${to}.pdf`)
+  }
+
+  async function downloadFilteredReports() {
+    if (!range || downloading) return
+    setDownloading(true)
+    try {
+      const XLSX = await import('xlsx')
+      const from = dateInputValue(range.start)
+      const to = dateInputValue(range.end)
+
+      // PDF first — browsers often block a second download after Excel.
+      try {
+        await downloadDashboardPdf(from, to)
+      } catch (pdfError) {
+        console.error('[dashboard] PDF download failed:', pdfError)
+        window.alert(
+          pdfError instanceof Error
+            ? `PDF could not be created: ${pdfError.message}`
+            : 'PDF could not be created. Excel will still download.',
+        )
+      }
+
+      // Brief pause so the browser treats Excel as a separate user gesture download.
+      await new Promise((resolve) => window.setTimeout(resolve, 400))
+
+      const summary = XLSX.utils.aoa_to_sheet([
+        ['BA Performance Dashboard'],
+        ['Date range', dateRangeLabel],
+        ['From', from],
+        ['To', to],
+        ['Towns', towns.length ? towns.join(', ') : 'All'],
+        ['Months', months.length ? months.join(', ') : coveredMonths.join(', ') || 'All'],
+        ['Stores', stores.length ? stores.join(', ') : 'All'],
+        ['SKUs', skus.length ? skus.join(', ') : 'All'],
+        [],
+        ['Metric', 'Value'],
+        ['Ambassadors', totalAmbassadors],
+        ['Stores', totalStores],
+        ['Target (kg)', data.targetKg],
+        ['Target (units)', data.targetUnits],
+        ['Sales (kg)', data.salesKg],
+        ['Sales (units)', data.unitsSold],
+        ['Achievement (kg) %', data.achievementPct],
+      ])
+      summary['!cols'] = [{ wch: 22 }, { wch: 40 }]
+
+      const byCity = XLSX.utils.aoa_to_sheet([
+        ['City', 'Stores', 'Ambassadors', 'Target (kg)', 'Target (units)', 'Sales (kg)', 'Sales (units)'],
+        ...cityRows.map((row) => [
+          row.city,
+          row.stores,
+          row.ambassadors,
+          row.target,
+          row.targetUnits,
+          row.sales,
+          row.salesUnits,
+        ]),
+      ])
+      byCity['!cols'] = [16, 10, 12, 12, 14, 12, 14].map((wch) => ({ wch }))
+
+      const byStoreMap = new Map<
+        string,
+        { town: string; targetKg: number; salesKg: number; targetUnits: number; salesUnits: number }
+      >()
+      for (const record of scopedRecords) {
+        const key = `${record.town}|${record.store}`
+        const cur = byStoreMap.get(key) ?? {
+          town: record.town,
+          targetKg: 0,
+          salesKg: 0,
+          targetUnits: 0,
+          salesUnits: 0,
+        }
+        cur.targetKg += record.targetKg
+        cur.salesKg += record.salesKg
+        cur.targetUnits += record.targetPacks ?? 0
+        cur.salesUnits += record.salesPacks ?? 0
+        byStoreMap.set(key, cur)
+      }
+      const byStore = XLSX.utils.aoa_to_sheet([
+        ['City', 'Store', 'Target (kg)', 'Target (units)', 'Sales (kg)', 'Sales (units)', 'Achievement %'],
+        ...[...byStoreMap.entries()]
+          .map(([key, row]) => {
+            const store = key.split('|').slice(1).join('|')
+            const pct = row.targetKg > 0 ? Math.round((row.salesKg / row.targetKg) * 100) : 0
+            return [
+              row.town,
+              store,
+              Math.round(row.targetKg * 10) / 10,
+              Math.round(row.targetUnits),
+              Math.round(row.salesKg * 10) / 10,
+              Math.round(row.salesUnits),
+              pct,
+            ]
+          })
+          .sort((a, b) => String(a[0]).localeCompare(String(b[0])) || String(a[1]).localeCompare(String(b[1]))),
+      ])
+      byStore['!cols'] = [14, 28, 12, 14, 12, 14, 14].map((wch) => ({ wch }))
+
+      const skuMap = new Map<string, number>()
+      for (const record of scopedRecords) {
+        for (const line of record.skuSales) {
+          skuMap.set(line.sku, (skuMap.get(line.sku) ?? 0) + line.sales)
+        }
+      }
+      const bySku = XLSX.utils.aoa_to_sheet([
+        ['SKU', 'Sales (kg)'],
+        ...[...skuMap.entries()]
+          .map(([sku, sales]) => [sku, Math.round(sales * 10) / 10])
+          .sort((a, b) => Number(b[1]) - Number(a[1])),
+      ])
+      bySku['!cols'] = [{ wch: 36 }, { wch: 12 }]
+
+      const book = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(book, summary, 'Summary')
+      XLSX.utils.book_append_sheet(book, byCity, 'By city')
+      XLSX.utils.book_append_sheet(book, byStore, 'By store')
+      XLSX.utils.book_append_sheet(book, bySku, 'By SKU')
+      XLSX.writeFile(book, `BA_Performance_${from}_to_${to}.xlsx`)
+    } catch (error) {
+      console.error('[dashboard] download failed:', error)
+      window.alert(error instanceof Error ? error.message : 'Download failed.')
+    } finally {
+      setDownloading(false)
     }
   }
 
@@ -540,9 +892,22 @@ export function BaPerformanceDashboardPage() {
   )
 
   const trendRecords = useMemo(() => {
-    const monthsForTrend = salesTrend === 'wow' ? coveredMonths : monthOptions
-    return applySkuFilter(filterLiveRecords(liveRecords, { towns, stores, months: monthsForTrend }), skus)
-  }, [salesTrend, coveredMonths, monthOptions, liveRecords, towns, stores, skus])
+    if (salesTrend === 'wow') return scopedRecords
+    const monthsForTrend = monthOptions
+    if (!range) return []
+    const periods = periodsForCalendarRange(range.start, range.end).filter(
+      (period) => period.month != null && monthsForTrend.includes(period.month),
+    )
+    // MoM / YoY: use full months inside the selected year span (sales from target rows / reports).
+    if (salesTrend === 'mom' || salesTrend === 'yoy') {
+      return filterLiveRecords(skuLiveRecords, {
+        towns,
+        stores,
+        months: periods.map((p) => p.month!).filter(Boolean),
+      })
+    }
+    return scopedRecords
+  }, [salesTrend, scopedRecords, monthOptions, skuLiveRecords, towns, stores, range])
 
   const trendSeries = useMemo(() => {
     if (salesTrend === 'wow') {
@@ -702,7 +1067,7 @@ export function BaPerformanceDashboardPage() {
             </div>
             <div className="text-xs text-slate-400">{dateRangeLabel}</div>
           </div>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {DATE_PRESETS.map((p) => (
               <button
                 key={p.id}
@@ -718,6 +1083,16 @@ export function BaPerformanceDashboardPage() {
                 {p.label}
               </button>
             ))}
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={!range || downloading}
+              onClick={() => void downloadFilteredReports()}
+            >
+              <Download size={14} />
+              {downloading ? 'Preparing…' : 'Download'}
+            </Button>
           </div>
         </div>
         {datePreset === 'custom' && (
@@ -745,8 +1120,12 @@ export function BaPerformanceDashboardPage() {
             </label>
           </div>
         )}
+        {!range && datePreset === 'custom' && (
+          <p className="mt-2 text-xs text-amber-700">Choose a valid From / To range (From ≤ To, not after today).</p>
+        )}
       </Card>
 
+      <div ref={snapshotRef} className="space-y-5 bg-slate-50">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <KpiCard label="Ambassadors" value={totalAmbassadors.toLocaleString()} hint={countScope} />
         <KpiCard label="Stores" value={totalStores.toLocaleString()} hint={countScope} />
@@ -822,25 +1201,11 @@ export function BaPerformanceDashboardPage() {
       </div>
 
       <Card padding={false}>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-50 px-4 py-3 sm:px-5">
+        <div className="border-b border-slate-50 px-4 py-3 sm:px-5">
           <CardHeader
             title="Target vs achievement"
-            subtitle="September 2026 targets saved for each store's ambassador"
+            subtitle={`${dateRangeLabel} · Target from monthly BA SKU targets · Sales from daily sales reports`}
           />
-          <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
-            Month
-            <select
-              value={targetMonth}
-              onChange={(e) => setTargetMonth(e.target.value)}
-              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-800 outline-none focus:border-brand-500"
-            >
-              {targetMonths.map((month) => (
-                <option key={month} value={month}>
-                  {formatTargetMonth(month)}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
         <TableScroll minWidth={640}>
           <table className="w-full text-left text-sm">
@@ -858,18 +1223,17 @@ export function BaPerformanceDashboardPage() {
             <tbody>
               {targetRows.map((row) => {
                 const pct = achievementPct(row.targetKg, row.salesKg)
-                const packs = packsFromLines(row.lines)
                 return (
-                  <tr key={`${row.baId}-${row.month}`} className="border-t border-slate-100">
+                  <tr key={row.baId} className="border-t border-slate-100">
                     <td className="px-4 py-3 font-medium text-slate-900">
                       <div>{row.baName}</div>
                       {row.baCode && <div className="text-xs text-slate-400">{row.baCode}</div>}
                     </td>
-                    <td className="px-4 py-3 text-slate-600">{row.storeName || '—'}</td>
+                    <td className="px-4 py-3 text-slate-600">{row.store || '—'}</td>
                     <td className="px-4 py-3 tabular-nums">{row.targetKg.toLocaleString()}</td>
-                    <td className="px-4 py-3 tabular-nums">{Math.round(packs.target).toLocaleString()}</td>
+                    <td className="px-4 py-3 tabular-nums">{row.targetPacks.toLocaleString()}</td>
                     <td className="px-4 py-3 tabular-nums">{row.salesKg.toLocaleString()}</td>
-                    <td className="px-4 py-3 tabular-nums">{Math.round(packs.sales).toLocaleString()}</td>
+                    <td className="px-4 py-3 tabular-nums">{row.salesPacks.toLocaleString()}</td>
                     <td className="px-4 py-3">
                       <span
                         className={
@@ -894,7 +1258,10 @@ export function BaPerformanceDashboardPage() {
 
       <Card padding={false}>
         <div className="border-b border-slate-50 px-4 py-3 sm:px-5">
-          <CardHeader title="Targets by city" subtitle={dateRangeLabel} />
+          <CardHeader
+            title="Targets by city"
+            subtitle={`${dateRangeLabel} · Target from monthly BA SKU targets · Sales from daily sales reports`}
+          />
         </div>
         <TableScroll minWidth={520}>
           <table className="w-full text-left text-sm">
@@ -926,6 +1293,7 @@ export function BaPerformanceDashboardPage() {
           </table>
         </TableScroll>
       </Card>
+      </div>
     </div>
   )
 }

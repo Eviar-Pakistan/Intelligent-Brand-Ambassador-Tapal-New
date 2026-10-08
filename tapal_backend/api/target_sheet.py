@@ -383,6 +383,8 @@ SKU_CATALOGUE: list[tuple[str, str, float]] = [
     ('Danedar', 'DD Elaichi 80gm Hard Pack', 0.08),
     ('Danedar', 'DD Elaichi 100gm Tea Bag Envelope', 0.1),
     ('Green Tea', 'Elaichi 45gm', 0.045),
+    ('Green Tea', 'Elaichi 80gm', 0.08),
+    ('Danedar', 'Instant Tea 200gm', 0.2),
     ('Family Mixture', 'FM 170gm Hard Pack', 0.17),
     ('Family Mixture', 'FM 1750gm Pouch', 1.75),
     ('Family Mixture', 'FM 430gm Pouch', 0.43),
@@ -547,6 +549,14 @@ _SKU_INPUT_ALIASES = {
     'tezdum 1750gm pouch': 'TD 1750gm Pouch',
     'tezdum 290gm pouch': 'TD 290gm Pouch',
     'tezdum 170gm pouch pack': 'TD 170gm Pouch Pack',
+    'td 170gm pouch': 'TD 170gm Pouch Pack',
+    'tezdum 170gm pouch': 'TD 170gm Pouch Pack',
+    'instant tea 200g': 'Instant Tea 200gm',
+    'instant tea 200gm': 'Instant Tea 200gm',
+    'dd instant tea 200gm': 'Instant Tea 200gm',
+    'elaichi 80gm': 'Elaichi 80gm',
+    'elaichi 80g': 'Elaichi 80gm',
+    'gt elaichi 80gm': 'Elaichi 80gm',
 }
 
 
@@ -875,9 +885,10 @@ _MULTAN_CATALOGUE_SKUS = [
     'TD 1750gm Pouch', 'TD 290gm Pouch',
     'FM 170gm Hard Pack', 'FM 430gm Pouch', 'FM 440gm Jar Pack', 'FM 80gm Hard Pack', 'FM 85gm Hard Pack',
     'FM 900gm Pouch', 'FM 1750gm Pouch',
-    'Elaichi 45gm', 'Ginger Honey 45gm', 'Jasmine 100gm', 'Jasmine 45gm', 'Lemon 135gm', 'Lemon 45gm',
-    'Lemon Grass 100gm', 'Orange 45gm', 'Pineapple 45gm', 'Mango 45gm', 'Mint 45gm', 'Pure Green 45gm',
-    'SOG 48gm', 'Strawberry 45gm', 'Tropical Peach 45gm', 'Gulbahar 80gm Hard Pack',
+    'Elaichi 45gm', 'Elaichi 80gm', 'Ginger Honey 45gm', 'Jasmine 100gm', 'Jasmine 45gm', 'Lemon 135gm',
+    'Lemon 45gm', 'Lemon Grass 100gm', 'Orange 45gm', 'Pineapple 45gm', 'Mango 45gm', 'Mint 45gm',
+    'Pure Green 45gm', 'SOG 48gm', 'Strawberry 45gm', 'Tropical Peach 45gm', 'Gulbahar 80gm Hard Pack',
+    'Instant Tea 200gm',
 ]
 _BY_NAME = {name: (brand, name, sku) for brand, name, sku in _LAHORE_SKUS}
 _BY_SQUASHED_NAME = {' '.join(name.lower().split()): row for name, row in _BY_NAME.items()}

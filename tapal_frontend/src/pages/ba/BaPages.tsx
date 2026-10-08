@@ -31,6 +31,8 @@ import {
   downloadBaReportTemplate,
   hasAnytimeStockSubmitted,
   labeledSales,
+  localDayKey,
+  packKgForSales,
   parseBaReportFile,
   recordDailyReport,
   saveBaReport,
@@ -1050,22 +1052,6 @@ function periodBounds(period: RewardPeriod, now = new Date()) {
   return { start, end }
 }
 
-function localDay(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
-function packKg(sku: string, catalogue: SkuRow[], target: { sku: string; grammage?: number }[]) {
-  const name = sku.trim().toLowerCase()
-  const fromTarget = target.find((line) => line.sku.trim().toLowerCase() === name)?.grammage
-  if (fromTarget && fromTarget > 0) return fromTarget
-  const listed = catalogue.find((line) => line.sku.trim().toLowerCase() === name)?.grammage
-  if (listed && listed > 0) return listed
-  const carton = /(?:^|\s)(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(kg|g|gm|gram)\b/i.exec(sku)
-  if (carton) return Number(carton[1]) * Number(carton[2]) * (/^kg$/i.test(carton[3]) ? 1 : 0.001)
-  const size = /(\d+(?:\.\d+)?)\s*(kg|g|gm|gram)\b/i.exec(sku)
-  return size ? Number(size[1]) * (/^kg$/i.test(size[2]) ? 1 : 0.001) : 0
-}
-
 function salesForPeriod(
   reports: StoredDailyReport[],
   baId: string,
@@ -1074,16 +1060,16 @@ function salesForPeriod(
   target: { sku: string; grammage?: number }[],
 ) {
   const { start, end } = periodBounds(period)
-  const startKey = localDay(start)
-  const endKey = localDay(end)
+  const startKey = localDayKey(start)
+  const endKey = localDayKey(end)
   const byDay = new Map<string, StoredDailyReport>()
   for (const report of [...reports].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))) {
     if (report.baId !== baId) continue
-    const submitted = new Date(report.submittedAt)
-    const key = localDay(submitted)
+    const key = localDayKey(report.submittedAt)
     if (key < startKey || key > endKey) continue
     const skuLines = labeledSales(report.sales).filter((line) => line.section.toLowerCase().includes('sales'))
-    const hasSalesSubmission = report.source === 'checkout' ||
+    const hasSalesSubmission =
+      report.source === 'checkout' ||
       (report.source === 'excel' && skuLines.some((line) => Number(line.value) > 0))
     if (hasSalesSubmission) byDay.set(key, report)
   }
@@ -1092,7 +1078,7 @@ function salesForPeriod(
     for (const line of labeledSales(report.sales).filter((row) => row.section.toLowerCase().includes('sales'))) {
       const amount = Number(line.value)
       if (!Number.isFinite(amount) || amount <= 0) continue
-      const grams = packKg(line.item, catalogue, target)
+      const grams = packKgForSales(line.item, catalogue, target)
       const row = bySku.get(line.item.toLowerCase()) ?? { sku: line.item, kg: 0, units: 0 }
       if (line.section.toLowerCase().includes('(units)')) {
         row.units += amount
@@ -1105,7 +1091,10 @@ function salesForPeriod(
     }
   }
   const items = [...bySku.values()].sort((a, b) => a.sku.localeCompare(b.sku))
-  const totals = items.reduce((total, item) => ({ kg: total.kg + item.kg, units: total.units + item.units }), { kg: 0, units: 0 })
+  const totals = items.reduce((total, item) => ({ kg: total.kg + item.kg, units: total.units + item.units }), {
+    kg: 0,
+    units: 0,
+  })
   return { ...totals, items }
 }
 
@@ -1123,14 +1112,13 @@ export function BaPerformancePage() {
     [reports, account?.id, period, catalogue, target?.lines],
   )
   const targetKg = target?.targetKg ?? 0
-  const targetUnits = (target?.lines ?? []).reduce((sum, line) => sum + (line.unit ?? (line.grammage ? line.kg / line.grammage : 0)), 0)
   const detailRows = useMemo(() => {
-    const rows = new Map<string, { sku: string; targetKg: number; targetUnits: number; soldKg: number; soldUnits: number }>()
+    const rows = new Map<string, { sku: string; targetKg: number; soldKg: number; soldUnits: number }>()
     for (const line of target?.lines ?? []) rows.set(line.sku.toLowerCase(), {
-      sku: line.sku, targetKg: line.kg, targetUnits: line.unit ?? (line.grammage ? line.kg / line.grammage : 0), soldKg: 0, soldUnits: 0,
+      sku: line.sku, targetKg: line.kg, soldKg: 0, soldUnits: 0,
     })
     for (const line of sales.items) {
-      const existing = rows.get(line.sku.toLowerCase()) ?? { sku: line.sku, targetKg: 0, targetUnits: 0, soldKg: 0, soldUnits: 0 }
+      const existing = rows.get(line.sku.toLowerCase()) ?? { sku: line.sku, targetKg: 0, soldKg: 0, soldUnits: 0 }
       existing.soldKg = line.kg
       existing.soldUnits = line.units
       rows.set(line.sku.toLowerCase(), existing)
@@ -1191,9 +1179,8 @@ export function BaPerformancePage() {
             <option value="today">Today</option><option value="yesterday">Yesterday</option><option value="last7">Last 7 days</option><option value="month">Current month</option>
           </select>
         </div>
-        <div className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-3 lg:grid-cols-5">
+        <div className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
           <RewardMetric label="Target (kg)" value={fmtNum(Math.round(targetKg))} />
-          <RewardMetric label="Target (units)" value={fmtNum(Math.round(targetUnits))} />
           <RewardMetric label="Sales (kg)" value={fmtNum(sales.kg)} />
           <RewardMetric label="Sales (units)" value={fmtNum(Math.round(sales.units))} />
           <RewardMetric label="Achievement" value={`${achievementPct(targetKg, sales.kg)}%`} highlight />
@@ -1206,7 +1193,7 @@ export function BaPerformancePage() {
               {detailRows.map((line) => (
                 <div key={line.sku} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2 border-b border-slate-50 pb-2 text-xs last:border-0">
                   <span className="min-w-0 break-words font-medium text-slate-700">{line.sku}</span>
-                  <span className="text-right tabular-nums"><span className="block font-semibold text-slate-900">{fmtNum(line.soldKg)} kg</span><span className="text-[10px] text-slate-500">target {fmtNum(Math.round(line.targetKg))} kg · {fmtNum(Math.round(line.targetUnits))} units</span></span>
+                  <span className="text-right tabular-nums"><span className="block font-semibold text-slate-900">{fmtNum(line.soldKg)} kg</span><span className="text-[10px] text-slate-500">target {fmtNum(Math.round(line.targetKg))} kg</span></span>
                   <span className="text-right tabular-nums"><span className="block font-semibold text-slate-900">{fmtNum(Math.round(line.soldUnits))} units</span><span className="text-[10px] text-brand-600">{achievementPct(line.targetKg, line.soldKg)}%</span></span>
                 </div>
               ))}

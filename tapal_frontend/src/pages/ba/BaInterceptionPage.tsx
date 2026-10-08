@@ -1,18 +1,24 @@
-import { useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, UserRound } from 'lucide-react'
 import { ambassadors, stores } from '../../data/mock'
 import { useBaShift } from '../../context/BaShiftContext'
 import { useBaSession } from '../../lib/baAccounts'
+import { type CityReportSku } from '../../lib/baReport'
 import { baCurrentStore, useCreatedStores } from '../../lib/storeRegistry'
+import { portalGet } from '../../lib/serverApi'
 import {
   INTERCEPTION_STATUSES,
   submitUserInterception,
   type InterceptionStatus,
+  type PurchasedSkuQty,
 } from '../../lib/userInterceptions'
 
 const fieldClass =
   'w-full rounded-xl border border-slate-200 bg-[#faf6ee] px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-brand-500 focus:bg-white focus:ring-2 focus:ring-brand-500/15'
+
+const qtyClass =
+  'w-16 shrink-0 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-center text-sm tabular-nums text-slate-900 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/15'
 
 const empty = {
   status: 'productive' as InterceptionStatus,
@@ -21,8 +27,12 @@ const empty = {
   cityArea: '',
   previousBrand: '',
   previousSku: '',
-  currentSku: '',
   feedback: '',
+}
+
+function parseQty(raw: string | undefined): number {
+  const n = Number.parseInt(String(raw ?? '').trim(), 10)
+  return Number.isFinite(n) && n > 0 ? n : 0
 }
 
 export function BaInterceptionPage() {
@@ -41,22 +51,58 @@ export function BaInterceptionPage() {
   }, [ba, shiftStore, knownStores])
 
   const [form, setForm] = useState(empty)
+  /** SKU label → quantity string (empty = 0 / not purchased). */
+  const [qtyBySku, setQtyBySku] = useState<Record<string, string>>({})
+  const [citySkus, setCitySkus] = useState<CityReportSku[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [savedName, setSavedName] = useState<string | null>(null)
 
+  useEffect(() => {
+    let cancelled = false
+    void portalGet<{ reportSkus?: CityReportSku[] | null }>('/api/ba/me/', 'ba').then((me) => {
+      if (cancelled) return
+      setCitySkus(me?.reportSkus?.length ? me.reportSkus : [])
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const skusByBrand = useMemo(() => {
+    const groups = new Map<string, CityReportSku[]>()
+    const seen = new Set<string>()
+    for (const row of citySkus ?? []) {
+      const key = row.label || row.sku
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      groups.set(row.brand || 'Other', [...(groups.get(row.brand || 'Other') ?? []), row])
+    }
+    return [...groups.entries()]
+  }, [citySkus])
+
+  const purchasedSkus: PurchasedSkuQty[] = useMemo(() => {
+    const out: PurchasedSkuQty[] = []
+    for (const [, rows] of skusByBrand) {
+      for (const row of rows) {
+        const label = row.label || row.sku
+        const qty = parseQty(qtyBySku[label])
+        if (qty > 0) out.push({ sku: label, qty })
+      }
+    }
+    return out
+  }, [skusByBrand, qtyBySku])
+
   const phoneDigits = form.contact.replace(/\D/g, '')
   const nonProductive = form.status === 'non_productive'
-  // Every field just needs something in it — no minimum length. A non-productive interception has no
-  // required fields (and no purchased SKU).
   const canSubmit =
     nonProductive ||
     (form.name.trim() !== '' &&
-    phoneDigits !== '' &&
-    form.cityArea.trim() !== '' &&
-    form.previousBrand.trim() !== '' &&
-    form.previousSku.trim() !== '' &&
-    form.currentSku.trim() !== '' &&
-    form.feedback.trim() !== '')
+      phoneDigits !== '' &&
+      form.cityArea.trim() !== '' &&
+      form.previousBrand.trim() !== '' &&
+      form.previousSku.trim() !== '' &&
+      purchasedSkus.length > 0 &&
+      form.feedback.trim() !== '')
 
   function set(key: keyof typeof empty) {
     return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -65,22 +111,37 @@ export function BaInterceptionPage() {
     }
   }
 
+  function setQty(label: string, value: string) {
+    // Digits only; blank clears.
+    const cleaned = value.replace(/\D/g, '')
+    setQtyBySku((current) => ({ ...current, [label]: cleaned }))
+    setError(null)
+  }
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
     if (!canSubmit) {
-      setError('Fill every field.')
+      setError(
+        nonProductive
+          ? 'Fill every field.'
+          : 'Fill every field and enter quantity greater than 0 for at least one SKU.',
+      )
       return
     }
+    const qtys = nonProductive ? [] : purchasedSkus
     const saved = submitUserInterception({
       baId,
       baName,
       storeId: store?.id ?? null,
       storeName: store?.name ?? '',
       ...form,
-      currentSku: nonProductive ? '' : form.currentSku,
+      currentSku: qtys.map((row) => `${row.sku} × ${row.qty}`).join(', '),
+      currentSkus: qtys.map((row) => row.sku),
+      currentSkuQtys: qtys,
     })
     setSavedName(saved.name)
     setForm(empty)
+    setQtyBySku({})
   }
 
   return (
@@ -107,7 +168,16 @@ export function BaInterceptionPage() {
         </div>
 
         <Field label="Interception type">
-          <select className={fieldClass} value={form.status} onChange={set('status')}>
+          <select
+            className={fieldClass}
+            value={form.status}
+            onChange={(e) => {
+              const status = e.target.value as InterceptionStatus
+              setForm((current) => ({ ...current, status }))
+              if (status === 'non_productive') setQtyBySku({})
+              setError(null)
+            }}
+          >
             {INTERCEPTION_STATUSES.map((item) => (
               <option key={item.value} value={item.value}>
                 {item.label}
@@ -152,14 +222,57 @@ export function BaInterceptionPage() {
           />
         </Field>
         {!nonProductive && (
-          <Field label="Current purchased SKU">
-            <input
-              className={fieldClass}
-              value={form.currentSku}
-              onChange={set('currentSku')}
-              placeholder="Tapal Danedar 430gm"
-            />
-          </Field>
+          <div className="mt-3">
+            <span className="mb-1 block text-xs font-semibold text-slate-600">
+              Current purchased SKU
+              {purchasedSkus.length > 0 ? (
+                <span className="ml-1 font-normal text-slate-400">
+                  ({purchasedSkus.length} with qty)
+                </span>
+              ) : null}
+            </span>
+            <p className="mb-2 text-[11px] text-slate-500">Enter quantity for each SKU bought. Leave blank or 0 to skip.</p>
+            {citySkus === null ? (
+              <p className="rounded-xl bg-slate-50 px-3 py-2.5 text-xs text-slate-500">Loading SKUs…</p>
+            ) : skusByBrand.length === 0 ? (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                No city SKUs configured for your city. Ask Head Office to add them.
+              </p>
+            ) : (
+              <div className="max-h-72 space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-[#faf6ee] p-3">
+                {skusByBrand.map(([brand, rows]) => (
+                  <div key={brand}>
+                    <div className="mb-1.5 text-[11px] font-semibold tracking-wide text-slate-500 uppercase">
+                      {brand}
+                    </div>
+                    <ul className="space-y-1.5">
+                      {rows.map((row) => {
+                        const label = row.label || row.sku
+                        return (
+                          <li
+                            key={`${brand}-${row.sku}`}
+                            className="flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-white/80"
+                          >
+                            <span className="min-w-0 flex-1 text-sm text-slate-800">{label}</span>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              aria-label={`Quantity for ${label}`}
+                              placeholder="0"
+                              value={qtyBySku[label] ?? ''}
+                              onChange={(e) => setQty(label, e.target.value)}
+                              className={qtyClass}
+                            />
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         <Field label="Feedback">
           <textarea

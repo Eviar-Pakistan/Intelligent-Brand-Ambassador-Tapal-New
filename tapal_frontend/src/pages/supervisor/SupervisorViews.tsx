@@ -105,11 +105,8 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
               </div>
               <StatusBadge status={b.state} />
             </div>
-            <div className="mt-2 grid grid-cols-4 gap-2 text-center">
-              <Stat label="Conv." value={`${b.conversion}%`} />
-              <Stat label="Sessions" value={String(b.sessions)} />
-              <Stat label="Points" value={b.points.toLocaleString()} />
-              <Stat label="Score" value={b.score ? `${b.score}%` : '—'} />
+            <div className="mt-2 grid grid-cols-1 gap-2 text-center">
+              <Stat label="Conversion" value={`${b.conversion}%`} />
             </div>
           </li>
         ))}
@@ -125,9 +122,6 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
               <th className="px-4 py-3">Store</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Conversion</th>
-              <th className="px-4 py-3">Sessions</th>
-              <th className="px-4 py-3">Points</th>
-              <th className="px-4 py-3">Score</th>
             </tr>
           </thead>
           <tbody>
@@ -144,14 +138,11 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
                   <StatusBadge status={b.state} />
                 </td>
                 <td className="px-4 py-3 font-semibold">{b.conversion}%</td>
-                <td className="px-4 py-3 tabular-nums">{b.sessions}</td>
-                <td className="px-4 py-3 tabular-nums">{b.points.toLocaleString()}</td>
-                <td className="px-4 py-3 tabular-nums">{b.score ? `${b.score}%` : '—'}</td>
               </tr>
             ))}
             {sorted.length === 0 && (
               <tr className="border-t border-slate-100">
-                <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-400">
+                <td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-400">
                   No ambassadors are assigned to these stores yet.
                 </td>
               </tr>

@@ -990,7 +990,8 @@ class UserInterception(models.Model):
     city_area = models.CharField(max_length=120, blank=True)
     previous_brand = models.CharField(max_length=120, blank=True)
     previous_sku = models.CharField(max_length=120, blank=True)
-    current_sku = models.CharField(max_length=120, blank=True)
+    # Text so BAs can pick multiple city SKUs (joined with ", " in the API).
+    current_sku = models.TextField(blank=True)
     feedback = models.TextField(blank=True)
     # Outcome of the conversation: bought (productive), tried a sample (trialist) or did not buy.
     status = models.CharField(

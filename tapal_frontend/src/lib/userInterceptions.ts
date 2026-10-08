@@ -15,6 +15,9 @@ export function interceptionStatusLabel(status: InterceptionStatus) {
   return INTERCEPTION_STATUSES.find((item) => item.value === status)?.label ?? ''
 }
 
+/** One purchased city SKU with quantity (only qty > 0 is submitted). */
+export type PurchasedSkuQty = { sku: string; qty: number }
+
 /** A shopper a brand ambassador spoke with during a store visit. */
 export type UserInterception = {
   id: string
@@ -27,7 +30,12 @@ export type UserInterception = {
   cityArea: string
   previousBrand: string
   previousSku: string
+  /** Joined display string, e.g. "DD 40gm RTB × 2, Mango 45gm × 1". */
   currentSku: string
+  /** SKU labels with qty > 0 (legacy / display). */
+  currentSkus?: string[]
+  /** Structured purchased SKUs with quantities (preferred on POST). */
+  currentSkuQtys?: PurchasedSkuQty[]
   feedback: string
   status: InterceptionStatus
   createdAt: string
@@ -127,6 +135,21 @@ export function useUserInterceptions() {
 }
 
 export function submitUserInterception(input: Omit<UserInterception, 'id' | 'createdAt'>) {
+  const currentSkuQtys = (input.currentSkuQtys ?? [])
+    .map((row) => ({
+      sku: String(row.sku ?? '').trim(),
+      qty: Math.max(0, Math.floor(Number(row.qty) || 0)),
+    }))
+    .filter((row) => row.sku && row.qty > 0)
+  const currentSkus = currentSkuQtys.length
+    ? currentSkuQtys.map((row) => row.sku)
+    : (input.currentSkus ?? []).map((s) => s.trim()).filter(Boolean)
+  const currentSku = (
+    input.currentSku ||
+    (currentSkuQtys.length
+      ? currentSkuQtys.map((row) => `${row.sku} × ${row.qty}`).join(', ')
+      : currentSkus.join(', '))
+  ).trim()
   const entry: UserInterception = {
     ...input,
     name: input.name.trim(),
@@ -134,7 +157,9 @@ export function submitUserInterception(input: Omit<UserInterception, 'id' | 'cre
     cityArea: input.cityArea.trim(),
     previousBrand: input.previousBrand.trim(),
     previousSku: input.previousSku.trim(),
-    currentSku: input.currentSku.trim(),
+    currentSku,
+    currentSkus,
+    currentSkuQtys,
     feedback: input.feedback.trim(),
     id: `int-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     createdAt: new Date().toISOString(),

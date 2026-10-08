@@ -19,6 +19,10 @@ export type BaPerformanceRecord = {
   /** Target / sales in packs (kg / grammage per SKU); only set for records built from live targets */
   targetPacks?: number
   salesPacks?: number
+  /** Present on records built from live BA targets */
+  baId?: string
+  baName?: string
+  baCode?: string
 }
 
 /** Packs for a target row's SKU lines: target = line.unit (or kg / grammage), sales = line.sales / grammage. */
@@ -141,6 +145,11 @@ function round1(n: number) {
   return Math.round(n * 10) / 10
 }
 
+/**
+ * Scale activity (sales, calls, SKUs) to the days in the selected range.
+ * Targets stay at the full month value — they are assigned per month (e.g. October),
+ * so Today / Yesterday / MTD / custom dates do not reduce Target (kg/units).
+ */
 export function scaleRecordsToPeriod(records: BaPerformanceRecord[], share: PeriodShare) {
   return records.map<BaPerformanceRecord>((r) => {
     const weeks = [...r.weekSales].sort((a, b) => a.week - b.week)
@@ -148,11 +157,14 @@ export function scaleRecordsToPeriod(records: BaPerformanceRecord[], share: Peri
       ...r,
       customersIntercepted: Math.round(r.customersIntercepted * share.sales),
       productiveCalls: Math.round(r.productiveCalls * share.sales),
-      targetKg: r.targetKg * share.target,
+      // Keep full monthly target (share.target is unused for targets by design).
+      targetKg: r.targetKg,
       salesKg: r.salesKg * share.sales,
       danedarSales: r.danedarSales * share.sales,
       familyPackSales: r.familyPackSales * share.sales,
       teaBagSales: r.teaBagSales * share.sales,
+      targetPacks: r.targetPacks,
+      salesPacks: r.salesPacks !== undefined ? r.salesPacks * share.sales : undefined,
       weekSales: weeks.flatMap((w, i) => {
         const factor = share.weekFactor(i, weeks.length)
         return factor > 0 ? [{ week: w.week, sales: round1(w.sales * factor) }] : []
@@ -254,6 +266,8 @@ function emptyAggregate(townLabel: string): BaPerformanceAggregate {
 export function recordsFromTargets(
   rows: {
     baId?: string
+    baName?: string
+    baCode?: string
     city?: string
     storeName?: string
     month: string
@@ -277,6 +291,7 @@ export function recordsFromTargets(
   }
   return rows.map((row) => {
     const lines = row.lines ?? []
+    // Target-only buckets/SKU list — sales are filled later from daily sales reports.
     const bucket = (kind: 'danedar' | 'family' | 'tea') =>
       lines.reduce((total, line) => {
         const sku = line.sku.toLowerCase()
@@ -290,19 +305,25 @@ export function recordsFromTargets(
     const monthIndex = Number(row.month.split('-')[1]) - 1
     const packs = packsFromLines(lines)
     return {
+      baId: row.baId,
+      baName: row.baName,
+      baCode: row.baCode,
       targetPacks: packs.target,
-      salesPacks: packs.sales,
+      // Sales always come from Daily Sales reports on the dashboard — not target.salesKg.
+      salesPacks: 0,
       town: row.city?.trim() || 'Unknown',
       month: MONTH_ORDER[monthIndex] ?? row.month,
       store: row.storeName?.trim() || 'Store',
       customersIntercepted: intercepted.get(`${row.baId}|${row.month}`)?.total ?? 0,
       productiveCalls: intercepted.get(`${row.baId}|${row.month}`)?.productive ?? 0,
+      // Prefer the monthly target total from the API (same figure the BA Rewards card shows).
       targetKg: row.targetKg,
-      salesKg: row.salesKg,
+      salesKg: 0,
       danedarSales: bucket('danedar'),
       familyPackSales: bucket('family'),
       teaBagSales: bucket('tea'),
       weekSales: [1, 2, 3, 4].map((week) => ({ week, sales: 0 })),
+      // skuSales.sales holds target kg here (used by "Top SKU targets").
       skuSales: lines.map((line) => ({ sku: line.sku, sales: line.kg })),
     }
   })
@@ -427,6 +448,23 @@ export function periodsForRange(start: Date, end: Date) {
   }
 
   return { periods, missing }
+}
+
+/**
+ * Split a calendar date range into month buckets with day shares.
+ * Unlike periodsForRange, this does not require months to exist in the generated demo dataset.
+ */
+export function periodsForCalendarRange(start: Date, end: Date): DataPeriod[] {
+  const byMonth = new Map<number, Set<number>>()
+  for (let d = new Date(start); d <= end; d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)) {
+    const days = byMonth.get(d.getMonth()) ?? new Set<number>()
+    days.add(d.getDate())
+    byMonth.set(d.getMonth(), days)
+  }
+  return [...byMonth.entries()].map(([monthIdx, days]) => ({
+    month: MONTH_ORDER[monthIdx],
+    share: periodShareForDays(MONTH_ORDER[monthIdx], [...days]),
+  }))
 }
 
 /** Filtered records for each period, scaled to the days each period covers. */

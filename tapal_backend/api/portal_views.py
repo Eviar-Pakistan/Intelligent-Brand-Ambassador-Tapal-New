@@ -1132,7 +1132,26 @@ def stock_board(request):
 # ─── BA user interceptions ───────────────────────────────────────────────────
 
 
+def _parse_purchased_skus(current: str) -> list[dict]:
+    """Parse 'SKU × 2, Other SKU x 1' (or plain names) into [{sku, qty}, ...]."""
+    rows = []
+    for part in (current or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        match = re.fullmatch(r'(.+?)\s*[×xX]\s*(\d+)\s*', part)
+        if match:
+            name, qty = match.group(1).strip(), int(match.group(2))
+            if name and qty > 0:
+                rows.append({'sku': name, 'qty': qty})
+        else:
+            rows.append({'sku': part, 'qty': 1})
+    return rows
+
+
 def interception_payload(r: UserInterception) -> dict:
+    current = (r.current_sku or '').strip()
+    current_sku_qtys = _parse_purchased_skus(current)
     return {
         'id': r.id,
         'baId': _ba_id(r.ambassador_id),
@@ -1144,7 +1163,9 @@ def interception_payload(r: UserInterception) -> dict:
         'cityArea': r.city_area,
         'previousBrand': r.previous_brand,
         'previousSku': r.previous_sku,
-        'currentSku': r.current_sku,
+        'currentSku': current,
+        'currentSkus': [row['sku'] for row in current_sku_qtys],
+        'currentSkuQtys': current_sku_qtys,
         'feedback': r.feedback,
         'status': r.status,
         'createdAt': _iso(r.created_at),
@@ -1174,6 +1195,25 @@ def interceptions(request):
     text = {k: str(data.get(k) or '').strip() for k in (
         'name', 'contact', 'cityArea', 'previousBrand', 'previousSku', 'currentSku', 'feedback', 'storeName'
     )}
+    # Prefer currentSkuQtys[{sku, qty}] (qty > 0 only); else currentSkus[]; else currentSku string.
+    raw_qtys = data.get('currentSkuQtys') or data.get('purchasedSkus')
+    if isinstance(raw_qtys, list):
+        parts = []
+        for row in raw_qtys:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get('sku') or row.get('name') or '').strip()
+            try:
+                qty = int(row.get('qty') if row.get('qty') is not None else row.get('quantity') or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            if name and qty > 0:
+                parts.append(f'{name} × {qty}')
+        text['currentSku'] = ', '.join(parts)
+    else:
+        raw_skus = data.get('currentSkus')
+        if isinstance(raw_skus, list):
+            text['currentSku'] = ', '.join(str(s).strip() for s in raw_skus if str(s).strip())
     outcome = str(data.get('status') or '').strip()
     if outcome not in ('productive', 'trialist', 'non_productive'):
         # older app versions: a purchased SKU means productive
@@ -1203,7 +1243,7 @@ def interceptions(request):
             'city_area': text['cityArea'][:120],
             'previous_brand': text['previousBrand'][:120],
             'previous_sku': text['previousSku'][:120],
-            'current_sku': text['currentSku'][:120],
+            'current_sku': text['currentSku'],
             'feedback': text['feedback'][:2000],
             'status': outcome,
             'created_at': created_at,

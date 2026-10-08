@@ -6,6 +6,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { currentBaAccountId, isDemoBa } from './baAccounts'
 import type { BaMonthTarget } from './baTargets'
 import { canonicalSkuName } from './skuNames'
+import type { SkuRow } from './skuCatalogue'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
@@ -667,6 +668,130 @@ export function labeledSales(sales: Record<string, string>) {
     sales,
     otherBrands: [],
   })
+}
+
+/** Calendar day YYYY-MM-DD in the browser's local timezone (same as BA Rewards screen). */
+export function localDayKey(value: Date | string) {
+  const date = value instanceof Date ? value : new Date(value)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+/** kg per pack: monthly target line → SKU catalogue → parse size from the SKU name. */
+export function packKgForSales(
+  sku: string,
+  catalogue: SkuRow[] = [],
+  targetLines: { sku: string; grammage?: number }[] = [],
+) {
+  const name = sku.trim().toLowerCase()
+  const fromTarget = targetLines.find((line) => line.sku.trim().toLowerCase() === name)?.grammage
+  if (fromTarget && fromTarget > 0) return fromTarget
+  const listed = catalogue.find((line) => line.sku.trim().toLowerCase() === name)?.grammage
+  if (listed && listed > 0) return listed
+  const canon = canonicalSkuName(sku).trim().toLowerCase()
+  const fromCanonTarget = targetLines.find((line) => line.sku.trim().toLowerCase() === canon)?.grammage
+  if (fromCanonTarget && fromCanonTarget > 0) return fromCanonTarget
+  const fromCanonCat = catalogue.find((line) => line.sku.trim().toLowerCase() === canon)?.grammage
+  if (fromCanonCat && fromCanonCat > 0) return fromCanonCat
+  const carton = /(?:^|\s)(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(kg|g|gm|gram)\b/i.exec(sku)
+  if (carton) return Number(carton[1]) * Number(carton[2]) * (/^kg$/i.test(carton[3]) ? 1 : 0.001)
+  const size = /(\d+(?:\.\d+)?)\s*(kg|g|gm|gram)\b/i.exec(sku)
+  return size ? Number(size[1]) * (/^kg$/i.test(size[2]) ? 1 : 0.001) : 0
+}
+
+export type ReportSalesTotal = { kg: number; units: number; city: string; store: string }
+
+/**
+ * Sum daily-sales-report quantities in a date range (one report per BA per day).
+ * Same unit→kg rules as the BA Rewards "Sales & target achievement" card.
+ */
+export function reportSalesInRange(
+  reports: StoredDailyReport[],
+  range: { start: Date; end: Date },
+  options?: {
+    towns?: string[]
+    stores?: string[]
+    skus?: string[]
+    baIds?: string[]
+    catalogue?: SkuRow[]
+    /** baId → target SKU lines (for grammage) */
+    targetLinesByBa?: Map<string, { sku: string; grammage?: number }[]>
+  },
+) {
+  const startKey = localDayKey(range.start)
+  const endKey = localDayKey(range.end)
+  const towns = options?.towns ?? []
+  const stores = options?.stores ?? []
+  const baIds = options?.baIds?.length ? new Set(options.baIds) : null
+  const wanted = new Set((options?.skus ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean))
+  const catalogue = options?.catalogue ?? []
+  const byDayBa = new Map<string, StoredDailyReport>()
+
+  for (const report of [...reports].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))) {
+    if (!report.baId || isDemoBa(report.baId)) continue
+    if (baIds && !baIds.has(report.baId)) continue
+    const day = localDayKey(report.submittedAt)
+    if (day < startKey || day > endKey) continue
+    if (towns.length && !towns.some((t) => t.toLowerCase() === (report.city ?? '').trim().toLowerCase())) continue
+    if (stores.length && !stores.includes(report.storeName?.trim() || '')) continue
+    const skuLines = labeledSales(report.sales).filter((line) => line.section.toLowerCase().includes('sales'))
+    // Match BA Rewards: only checkout / excel sales submissions count.
+    const hasSalesSubmission =
+      report.source === 'checkout' ||
+      (report.source === 'excel' && skuLines.some((line) => Number(line.value) > 0))
+    if (!hasSalesSubmission) continue
+    byDayBa.set(`${report.baId}|${day}`, report)
+  }
+
+  const totals = new Map<string, ReportSalesTotal>()
+  for (const report of byDayBa.values()) {
+    const targetLines = options?.targetLinesByBa?.get(report.baId) ?? []
+    let kg = 0
+    let units = 0
+    for (const line of labeledSales(report.sales).filter((row) => row.section.toLowerCase().includes('sales'))) {
+      const amount = Number(line.value)
+      if (!Number.isFinite(amount) || amount <= 0) continue
+      if (wanted.size && !wanted.has(line.item.trim().toLowerCase())) continue
+      const grams = packKgForSales(line.item, catalogue, targetLines)
+      if (line.section.toLowerCase().includes('(units)')) {
+        units += amount
+        kg += grams * amount
+      } else {
+        kg += amount
+        if (grams > 0) units += amount / grams
+      }
+    }
+
+    if (kg <= 0 && units <= 0) continue
+    const current = totals.get(report.baId) ?? {
+      kg: 0,
+      units: 0,
+      city: report.city?.trim() || '',
+      store: report.storeName?.trim() || '',
+    }
+    current.kg += kg
+    current.units += units
+    if (report.city) current.city = report.city.trim()
+    if (report.storeName) current.store = report.storeName.trim()
+    totals.set(report.baId, current)
+  }
+  return totals
+}
+
+/** Single-BA helper used by the BA Rewards screen (same math as reportSalesInRange). */
+export function baSalesForPeriod(
+  reports: StoredDailyReport[],
+  baId: string,
+  range: { start: Date; end: Date },
+  catalogue: SkuRow[] = [],
+  targetLines: { sku: string; grammage?: number }[] = [],
+) {
+  const map = reportSalesInRange(reports, range, {
+    baIds: baId ? [baId] : [],
+    catalogue,
+    targetLinesByBa: baId ? new Map([[baId, targetLines]]) : undefined,
+  })
+  const total = map.get(baId) ?? { kg: 0, units: 0, city: '', store: '' }
+  return { kg: total.kg, units: total.units }
 }
 
 export type ReportFieldEntry = { key: string; label: string; value: string }

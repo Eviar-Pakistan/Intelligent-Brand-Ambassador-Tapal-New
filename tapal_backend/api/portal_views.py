@@ -1527,7 +1527,6 @@ def ba_me(request):
 
     from .intelligence import build_ba_leaderboard
     from .models import AmbassadorMonthTarget
-    from .store_live import switched_to_tapal
     from .target_sheet import report_skus_for_city
     from .views import _target_payload
 
@@ -1573,9 +1572,28 @@ def ba_me(request):
     )
 
     mine_qs = UserInterception.objects.filter(ambassador=ambassador)
-    today_rows = list(mine_qs.filter(created_at__date=today).only('previous_brand'))
+    today_rows = list(mine_qs.filter(created_at__date=today).only('status', 'current_sku'))
     week_sessions = mine_qs.filter(created_at__date__gte=week_start).count()
-    switched_today = sum(1 for r in today_rows if switched_to_tapal(r.previous_brand))
+
+    def _is_productive(row) -> bool:
+        outcome = (row.status or '').strip() or (
+            'productive' if (row.current_sku or '').strip() else 'non_productive'
+        )
+        return outcome == 'productive'
+
+    # Conversion = productive UserInterceptions ÷ total UserInterceptions for this BA × 100.
+    total_calls = mine_qs.count()
+    if total_calls:
+        productive_calls = (
+            mine_qs.filter(status='productive').count()
+            + mine_qs.filter(status='').exclude(current_sku='').count()
+            + mine_qs.filter(status__isnull=True).exclude(current_sku='').count()
+        )
+        conversion = round((productive_calls / total_calls) * 100, 1)
+    else:
+        conversion = 0.0
+
+    productive_today = sum(1 for r in today_rows if _is_productive(r))
     week_goal = KpiConfig.normalize(KpiConfig.get_solo().config)['sessionTarget']
 
     return Response(
@@ -1595,7 +1613,7 @@ def ba_me(request):
             'rank': mine['rank'] if mine else None,
             'rankedOutOf': len(board),
             'points': mine['points'] if mine else 0,
-            'conversion': mine['conversion'] if mine else 0.0,
+            'conversion': conversion,
             'weekSessions': week_sessions,
             'monthTarget': _target_payload(target) if target else None,
             # Use the report owner’s city list when the report owner has no target SKUs.
@@ -1605,7 +1623,9 @@ def ba_me(request):
             'ratingCount': len(ratings),
             'today': {
                 'interceptions': len(today_rows),
-                'switched': switched_today,
+                'productive': productive_today,
+                # Kept for older clients; same as productive under the new conversion rule.
+                'switched': productive_today,
                 'dailyGoal': max(1, math.ceil(week_goal / 6)),
             },
         }

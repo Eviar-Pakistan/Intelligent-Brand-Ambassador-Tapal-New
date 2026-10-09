@@ -40,7 +40,6 @@ import { BaShiftsCard } from './BaShiftsCard'
 import { serverAmbassadorId } from '../../context/ScheduleContext'
 import { AmbassadorProfile } from './AmbassadorProfile'
 import { timeOf, useAttendance } from './BaAttendancePage'
-import { useDailyReports } from '../../lib/baReport'
 import { ShiftPlanModal } from './ShiftPlanModal'
 import { buildIncentiveRoster, formatPkr } from '../../lib/incentives'
 import {
@@ -408,6 +407,8 @@ function AmbassadorDetailModal({
   extras?: {
     checkedInAt?: string | null
     checkedOutAt?: string | null
+    reported?: boolean
+    attendanceType?: 'store' | 'training' | string | null
     coveringStore?: string
   }
   onSaved?: () => void
@@ -419,9 +420,12 @@ function AmbassadorDetailModal({
   const [phone, setPhone] = useState('')
   const [checkInLocal, setCheckInLocal] = useState('')
   const [checkOutLocal, setCheckOutLocal] = useState('')
+  const [clearReport, setClearReport] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const reportSubmitted = !!extras?.reported && !clearReport
+  const trainingDay = extras?.attendanceType === 'training'
 
   useEffect(() => {
     if (!account) return
@@ -431,9 +435,10 @@ function AmbassadorDetailModal({
     setPhone(account.phone || '')
     setCheckInLocal(toLocalInput(extras?.checkedInAt))
     setCheckOutLocal(toLocalInput(extras?.checkedOutAt))
+    setClearReport(false)
     setError(null)
     setSaved(false)
-  }, [account, extras?.checkedInAt, extras?.checkedOutAt])
+  }, [account, extras?.checkedInAt, extras?.checkedOutAt, extras?.reported])
 
   const cityOptions = useMemo(() => {
     const list = [...CITIES]
@@ -476,12 +481,14 @@ function AmbassadorDetailModal({
           ambassadorId: serverId,
           checkedInAt: fromLocalInput(checkInLocal),
           checkedOutAt: fromLocalInput(checkOutLocal),
+          ...(clearReport || !checkInLocal ? { reportSubmittedAt: null } : {}),
         }),
       })
       const attendanceData = (await attendanceRes.json().catch(() => ({}))) as {
         detail?: string
         checkedInAt?: string | null
         checkedOutAt?: string | null
+        reportSubmittedAt?: string | null
       }
       const { syncDjango } = await import('../../lib/djangoSync')
       await syncDjango()
@@ -498,6 +505,7 @@ function AmbassadorDetailModal({
 
       setCheckInLocal(toLocalInput(attendanceData.checkedInAt))
       setCheckOutLocal(toLocalInput(attendanceData.checkedOutAt))
+      setClearReport(!attendanceData.reportSubmittedAt)
       setSaved(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save changes.')
@@ -600,6 +608,29 @@ function AmbassadorDetailModal({
                 </Button>
               </div>
             </div>
+
+            <div className="sm:col-span-2">
+              <span className="mb-1 block text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                Data filled
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {trainingDay && (reportSubmitted || extras?.checkedOutAt) ? (
+                  <StatusBadge status="On training" />
+                ) : reportSubmitted ? (
+                  <StatusBadge status="Submitted" />
+                ) : (
+                  <StatusBadge status="Pending" />
+                )}
+                {reportSubmitted && (
+                  <Button type="button" size="sm" variant="secondary" onClick={() => setClearReport(true)}>
+                    Clear report
+                  </Button>
+                )}
+              </div>
+              {clearReport && extras?.reported && (
+                <p className="mt-1 text-xs text-slate-500">Save to remove today&apos;s submitted report.</p>
+              )}
+            </div>
           </div>
 
           {error && (
@@ -648,10 +679,17 @@ export function AmbassadorsPage() {
   const targetMonth = currentMonthKey()
   const today = localDay(new Date())
   const { data: todayAttendance, reload: reloadAttendance } = useAttendance(today, today)
-  const reports = useDailyReports()
   // Today's attendance per BA (a BA with two shifts: the one they checked in to first).
   const attendanceByBa = useMemo(() => {
-    const map = new Map<string, { checkedInAt: string | null; checkedOutAt: string | null; reported: boolean }>()
+    const map = new Map<
+      string,
+      {
+        checkedInAt: string | null
+        checkedOutAt: string | null
+        reported: boolean
+        attendanceType: 'store' | 'training' | string | null
+      }
+    >()
     for (const row of todayAttendance?.results ?? []) {
       const key = `api-${row.baId}`
       const prev = map.get(key)
@@ -659,7 +697,9 @@ export function AmbassadorsPage() {
         map.set(key, {
           checkedInAt: row.checkedInAt,
           checkedOutAt: row.checkedOutAt,
-          reported: !!row.reportSubmittedAt || !!prev?.reported,
+          // Data filled follows shift.report_submitted_at only (not cached daily-report rows).
+          reported: !!row.reportSubmittedAt,
+          attendanceType: row.attendanceType ?? prev?.attendanceType ?? 'store',
         })
       }
     }
@@ -668,10 +708,6 @@ export function AmbassadorsPage() {
   const coverageByBa = useMemo(
     () => new Map((todayAttendance?.results ?? []).filter((row) => row.coverageOfName && !row.coverageCancelled).map((row) => [row.baId, row])),
     [todayAttendance],
-  )
-  const reportedToday = useMemo(
-    () => new Set(reports.filter((r) => localDay(new Date(r.submittedAt)) === today).map((r) => r.baId)),
-    [reports, today],
   )
   const [createOpen, setCreateOpen] = useState(false)
   const [linkPrompt, setLinkPrompt] = useState<{ account: BaAccount; title: string } | null>(null)
@@ -795,15 +831,24 @@ export function AmbassadorsPage() {
                   {timeOf(attendanceByBa.get(a.id)?.checkedOutAt ?? null)}
                 </td>
                 <td className="px-4 py-3">
-                  {reportedToday.has(a.id) || attendanceByBa.get(a.id)?.reported ? (
-                    <StatusBadge status="Submitted" />
-                  ) : attendanceByBa.has(a.id) ? (
-                    <StatusBadge status="Pending" />
-                  ) : (
-                    <span className="text-slate-400" title="No shift today">
-                      —
-                    </span>
-                  )}
+                  {(() => {
+                    const att = attendanceByBa.get(a.id)
+                    if (att?.attendanceType === 'training' && (att.reported || att.checkedOutAt)) {
+                      return <StatusBadge status="On training" />
+                    }
+                    // Submitted only when shift.report_submitted_at is set on the server.
+                    if (att?.reported) {
+                      return <StatusBadge status="Submitted" />
+                    }
+                    if (att) {
+                      return <StatusBadge status="Pending" />
+                    }
+                    return (
+                      <span className="text-slate-400" title="No shift today">
+                        —
+                      </span>
+                    )
+                  })()}
                 </td>
                 {isMis && (
                   <td className="px-4 py-3">
@@ -924,6 +969,8 @@ export function AmbassadorsPage() {
                 return {
                   checkedInAt: attendance?.checkedInAt ?? null,
                   checkedOutAt: attendance?.checkedOutAt ?? null,
+                  reported: attendance?.reported ?? false,
+                  attendanceType: attendance?.attendanceType ?? 'store',
                   coveringStore: coverage
                     ? `Covering ${coverage.storeName} (for ${coverage.coverageOfName})`
                     : undefined,

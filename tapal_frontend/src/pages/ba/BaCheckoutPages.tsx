@@ -6,11 +6,14 @@ import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
 import { useBaSession } from '../../lib/baAccounts'
 import { Modal } from '../../components/ui'
 import {
+  clearReportDraft,
   DEFAULT_OTHER_BRANDS,
   fixedSalesSections,
   isUnitSalesKey,
   isWholeUnits,
+  loadReportDraft,
   recordDailyReport,
+  saveReportDraft,
   SESSION_KEYS,
   STOCK_OPTIONS,
   useReportSections,
@@ -117,9 +120,26 @@ function reportPath(path: string, anytime: boolean) {
   return anytime ? `${path}?mode=anytime` : path
 }
 
+function hasFilledValues(values?: Record<string, string> | null) {
+  return !!values && Object.values(values).some((v) => String(v ?? '').trim() !== '')
+}
+
 /** Checkout needs this checkout's stock report first (an anytime stock report does not count). */
-function hasCheckoutStock() {
-  return Object.keys(readSession<Record<string, string>>(SESSION_KEYS.stock, {})).length > 0
+function hasCheckoutStock(baId?: string) {
+  if (hasFilledValues(readSession<Record<string, string>>(SESSION_KEYS.stock, {}))) return true
+  if (!baId) return false
+  return hasFilledValues(loadReportDraft(baId).stock)
+}
+
+function mergeFieldValues(empty: Record<string, string>, ...sources: Array<Record<string, string> | undefined>) {
+  const next = { ...empty }
+  for (const src of sources) {
+    if (!src) continue
+    for (const key of Object.keys(next)) {
+      if (src[key] != null && src[key] !== '') next[key] = src[key]
+    }
+  }
+  return next
 }
 
 function readSession<T>(key: string, fallback: T): T {
@@ -168,23 +188,45 @@ export function BaDailySalesPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const anytime = params.get('mode') === 'anytime'
+  const { account } = useBaSession()
+  const baId = account?.id ?? 'ba'
 
   useEffect(() => {
-    if (!anytime && !hasCheckoutStock()) navigate('/ba/stock-report', { replace: true })
-  }, [anytime, navigate])
+    if (!anytime && !hasCheckoutStock(baId)) navigate('/ba/stock-report', { replace: true })
+  }, [anytime, navigate, baId])
 
   const sections = useReportSections()
   if (!sections) return <LoadingSkus />
-  return <DailySalesForm sections={sections} anytime={anytime} />
+  return <DailySalesForm sections={sections} anytime={anytime} baId={baId} />
 }
 
-function DailySalesForm({ sections, anytime }: { sections: ReportSections; anytime: boolean }) {
+function DailySalesForm({
+  sections,
+  anytime,
+  baId,
+}: {
+  sections: ReportSections
+  anytime: boolean
+  baId: string
+}) {
   const navigate = useNavigate()
   const { city, reportingFor } = useBaShift()
   const all = [...fixedSalesSections, ...sections.skuSales]
-  const [values, setValues] = useState(() => emptyNumeric(all.flatMap((section) => section.fields)))
+  const [values, setValues] = useState(() => {
+    const empty = emptyNumeric(all.flatMap((section) => section.fields))
+    if (anytime) return empty
+    const draft = loadReportDraft(baId)
+    const session = readSession<Record<string, string>>(SESSION_KEYS.sales, {})
+    return mergeFieldValues(empty, draft.sales, session)
+  })
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [unitError, setUnitError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (anytime) return
+    saveReportDraft(baId, { sales: values })
+    sessionStorage.setItem(SESSION_KEYS.sales, JSON.stringify(values))
+  }, [values, baId, anytime])
 
   function setField(key: string, value: string) {
     setValues((prev) => ({ ...prev, [key]: value }))
@@ -196,6 +238,9 @@ function DailySalesForm({ sections, anytime }: { sections: ReportSections; anyti
     sessionStorage.setItem(SESSION_KEYS.sales, JSON.stringify(values))
     if (confirmedNoSales) sessionStorage.setItem(SESSION_KEYS.salesSkipped, 'true')
     else sessionStorage.removeItem(SESSION_KEYS.salesSkipped)
+    if (!anytime) {
+      saveReportDraft(baId, { sales: values, salesSkipped: confirmedNoSales })
+    }
     navigate(reportPath('/ba/other-brands', anytime))
   }
 
@@ -293,10 +338,23 @@ function StockReportForm({ sections, anytime }: { sections: ReportSections; anyt
   const navigate = useNavigate()
   const { city, reportingFor } = useBaShift()
   const { account } = useBaSession()
+  const baId = account?.id ?? 'ba'
   const [submitted, setSubmitted] = useState(false)
 
   const stockFields = sections.stock.flatMap((section) => section.fields)
-  const [stock, setStock] = useState(() => emptyStock(stockFields))
+  const [stock, setStock] = useState(() => {
+    const empty = emptyStock(stockFields)
+    if (anytime) return empty
+    const draft = loadReportDraft(baId)
+    const session = readSession<Record<string, string>>(SESSION_KEYS.stock, {})
+    return mergeFieldValues(empty, draft.stock, session)
+  })
+
+  useEffect(() => {
+    if (anytime) return
+    saveReportDraft(baId, { stock })
+    sessionStorage.setItem(SESSION_KEYS.stock, JSON.stringify(stock))
+  }, [stock, baId, anytime])
 
   function setField(key: string, value: string) {
     setStock((prev) => ({ ...prev, [key]: value }))
@@ -311,7 +369,7 @@ function StockReportForm({ sections, anytime }: { sections: ReportSections; anyt
       recordDailyReport(
         { stock, sales: {}, otherBrands: [] },
         {
-          baId: account?.id ?? 'ba',
+          baId,
           baName: account?.name ?? 'Brand Ambassador',
           city: account?.city || city,
           source: 'anytime',
@@ -321,6 +379,7 @@ function StockReportForm({ sections, anytime }: { sections: ReportSections; anyt
       return
     }
     sessionStorage.setItem(SESSION_KEYS.stock, JSON.stringify(stock))
+    saveReportDraft(baId, { stock })
     navigate('/ba/daily-sales')
   }
 
@@ -352,7 +411,7 @@ function StockReportForm({ sections, anytime }: { sections: ReportSections; anyt
         subtitle={
           anytime
             ? 'Anytime submission is stock only'
-            : 'Checkout step 1 of 3 · closing stock, then daily sales and competitor data'
+            : 'Report step 1 of 3 · closing stock, then daily sales and competitor data'
         }
         onBack={() => navigate('/ba/home')}
       />
@@ -384,7 +443,15 @@ export function BaOtherBrandsPage() {
   const anytime = params.get('mode') === 'anytime'
   const { submitCheckoutReport, earlyCheckoutReason, city, reportingFor } = useBaShift()
   const { account } = useBaSession()
-  const [rows, setRows] = useState<OtherBrandRow[]>(DEFAULT_OTHER_BRANDS)
+  const baId = account?.id ?? 'ba'
+  const [rows, setRows] = useState<OtherBrandRow[]>(() => {
+    if (anytime) return DEFAULT_OTHER_BRANDS
+    const draft = loadReportDraft(baId).otherBrands
+    const session = readSession<OtherBrandRow[]>(SESSION_KEYS.otherBrands, [])
+    if (session.length) return session
+    if (draft?.length) return draft
+    return DEFAULT_OTHER_BRANDS
+  })
   const [submitted, setSubmitted] = useState(false)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -393,10 +460,31 @@ export function BaOtherBrandsPage() {
     let active = true
     void portalGet<{ results: Array<{ key: string; label: string; fieldType: 'text' | 'number' }> }>('/api/competitor-fields/', 'ba').then((data) => {
       if (!active || !data?.results?.length) return
-      setRows(data.results.map((field) => ({ id: field.key, name: field.label, price: '', fieldType: field.fieldType })))
+      const apiRows = data.results.map((field) => ({
+        id: field.key,
+        name: field.label,
+        price: '',
+        fieldType: field.fieldType as 'text' | 'number',
+      }))
+      const draftRows = anytime ? [] : loadReportDraft(baId).otherBrands ?? []
+      const sessionRows = anytime ? [] : readSession<OtherBrandRow[]>(SESSION_KEYS.otherBrands, [])
+      const saved = sessionRows.length ? sessionRows : draftRows
+      const byId = new Map(saved.map((r) => [r.id, r]))
+      setRows(
+        apiRows.map((r) => {
+          const prev = byId.get(r.id)
+          return prev ? { ...r, price: prev.price ?? '', name: prev.name || r.name } : r
+        }),
+      )
     })
     return () => { active = false }
-  }, [])
+  }, [baId, anytime])
+
+  useEffect(() => {
+    if (anytime) return
+    saveReportDraft(baId, { otherBrands: rows })
+    sessionStorage.setItem(SESSION_KEYS.otherBrands, JSON.stringify(rows))
+  }, [rows, baId, anytime])
 
   function updateRow(id: string, patch: Partial<OtherBrandRow>) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
@@ -407,14 +495,21 @@ export function BaOtherBrandsPage() {
     if (sending) return
     const payload = rows.filter((r) => r.name.trim())
     sessionStorage.setItem(SESSION_KEYS.otherBrands, JSON.stringify(payload))
-    const stock = readSession<Record<string, string>>(SESSION_KEYS.stock, {})
-    const sales = readSession<Record<string, string>>(SESSION_KEYS.sales, {})
+    const draft = loadReportDraft(baId)
+    const stock = {
+      ...(draft.stock ?? {}),
+      ...readSession<Record<string, string>>(SESSION_KEYS.stock, {}),
+    }
+    const sales = {
+      ...(draft.sales ?? {}),
+      ...readSession<Record<string, string>>(SESSION_KEYS.sales, {}),
+    }
     if (!anytime) {
-      if (!hasCheckoutStock()) {
+      if (!hasCheckoutStock(baId)) {
         navigate('/ba/stock-report')
         return
       }
-      // This submission is the check-out: attendance is marked only when the server accepts it.
+      // Report submission marks Present (and checks out if the BA has not already).
       setSending(true)
       setSendError(null)
       const problem = await submitCheckoutReport({ stock, sales, otherBrands: payload })
@@ -425,7 +520,7 @@ export function BaOtherBrandsPage() {
       }
       if (earlyCheckoutReason) {
         recordEarlyCheckout({
-          baId: account?.id ?? 'ba',
+          baId,
           baName: account?.name ?? 'Brand Ambassador',
           reason: earlyCheckoutReason,
         })
@@ -433,11 +528,13 @@ export function BaOtherBrandsPage() {
     }
     // Only counts if the BA confirmed on the Daily Sales step and the sales are still empty or 0.
     const noSalesConfirmed =
-      !anytime && readSession<boolean>(SESSION_KEYS.salesSkipped, false) === true && hasNoSales(sales)
+      !anytime &&
+      (readSession<boolean>(SESSION_KEYS.salesSkipped, false) === true || draft.salesSkipped === true) &&
+      hasNoSales(sales)
     recordDailyReport(
       { stock, sales, otherBrands: payload },
       {
-        baId: account?.id ?? 'ba',
+        baId,
         baName: account?.name ?? 'Brand Ambassador',
         city: account?.city || city,
         source: anytime ? 'anytime' : 'checkout',
@@ -445,8 +542,7 @@ export function BaOtherBrandsPage() {
       },
     )
     if (!anytime) {
-      sessionStorage.removeItem(SESSION_KEYS.stock)
-      sessionStorage.removeItem(SESSION_KEYS.salesSkipped)
+      clearReportDraft(baId)
     }
     setSubmitted(true)
   }

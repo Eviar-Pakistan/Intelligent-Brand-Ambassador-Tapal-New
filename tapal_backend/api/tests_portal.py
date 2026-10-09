@@ -478,14 +478,16 @@ class LiveStoreTests(PortalTestBase):
     def test_conversion_and_engagement_include_interceptions(self):
         from .models import UserInterception
 
-        for i, brand in enumerate(['Lipton', 'Supreme', 'Tapal Danedar', 'lipton']):
+        # Conversion = productive ÷ total UserInterceptions (not previous-brand switch).
+        statuses = ['productive', 'productive', 'non_productive', 'productive']
+        for i, status in enumerate(statuses):
             UserInterception.objects.create(
                 id=f'int-{i}', ambassador=self.ba, ba_name='Ali', store=self.store, name='S', contact='0300',
-                previous_brand=brand, current_sku='DD 90g', created_at=timezone.now(),
+                previous_brand='Lipton', current_sku='DD 90g', status=status, created_at=timezone.now(),
             )
         self.ho.post(f'/api/stores/{self.store.id}/footfall/', {'count': 8}, format='json')
         row = self.store_row()
-        self.assertEqual(row['conversion'], 75.0)   # 3 of 4 switched to Tapal
+        self.assertEqual(row['conversion'], 75.0)   # 3 of 4 productive
         self.assertEqual(row['engagement'], 50.0)   # 4 engaged / 8 walked in
         metrics = self.ho.get('/api/intelligence/campaign-metrics/').data
         self.assertEqual(metrics['kpis']['conversion_rate'], 75.0)
@@ -674,6 +676,47 @@ class OncePerDayTests(PortalTestBase):
         self.assertEqual(ShiftAssignment.objects.filter(checked_in_at__isnull=False).count(), 1)
         shift = self.anon.get(f'/api/ba/today-shift/?token={token}').data['shift']
         self.assertEqual((shift['checkedIn'], shift['checkedOut'], shift['reportSubmitted']), (True, True, True))
+
+    def test_store_check_out_without_report_then_submit_report(self):
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json').status_code, 200)
+        out = self.anon.post('/api/ba/check-out/', {**GPS, 'token': token}, format='json')
+        self.assertEqual(out.status_code, 200, out.data)
+        shift = out.data['shift']
+        self.assertEqual((shift['checkedOut'], shift['reportSubmitted']), (True, False))
+        row = ShiftAssignment.objects.get(checked_in_at__isnull=False)
+        self.assertIsNotNone(row.checked_out_at)
+        self.assertIsNone(row.report_submitted_at)
+        self.assertEqual((row.check_out_lat, row.check_out_lng), (GPS['latitude'], GPS['longitude']))
+        report = self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        self.assertEqual(report.status_code, 200, report.data)
+        self.assertTrue(report.data['shift']['reportSubmitted'])
+        row.refresh_from_db()
+        self.assertIsNotNone(row.report_submitted_at)
+        att = self.ho.get('/api/attendance/').data['results'][0]
+        self.assertEqual(att['status'], 'Present')
+
+    def test_mistaken_check_in_can_be_undone_for_store_and_training(self):
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+        for attendance_type in ('store', 'training'):
+            with self.subTest(attendance_type=attendance_type):
+                self.assertEqual(
+                    self.anon.post(
+                        '/api/ba/check-in/',
+                        {**GPS, 'token': token, 'attendance_type': attendance_type},
+                        format='json',
+                    ).status_code,
+                    200,
+                )
+                undo = self.anon.post('/api/ba/undo-check-in/', {'token': token}, format='json')
+                self.assertEqual(undo.status_code, 200, undo.data)
+                self.assertFalse(undo.data['shift']['checkedIn'])
+                row = ShiftAssignment.objects.get(date=self.today, ambassador=self.ba)
+                self.assertIsNone(row.checked_in_at)
+                self.assertIsNone(row.check_in_lat)
+                self.assertEqual(row.attendance_type, 'store')
 
 
 class LeaderboardTests(PortalTestBase):

@@ -1,7 +1,15 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from .ba_attendance_views import ba_check_in, ba_footfall, ba_check_out, ba_leaderboard, ba_submit_complaint, ba_today_shift
+from .ba_attendance_views import (
+    ba_check_in,
+    ba_check_out,
+    ba_footfall,
+    ba_leaderboard,
+    ba_submit_complaint,
+    ba_today_shift,
+    ba_undo_check_in,
+)
 from .ba_training_views import (
     AmbassadorViewSet,
     TrainingVideoViewSet,
@@ -84,6 +92,7 @@ urlpatterns = [
     path('ba/invite/<str:token>/', ba_invite_lookup, name='ba-invite-lookup'),
     path('ba/today-shift/', ba_today_shift, name='ba-today-shift'),
     path('ba/check-in/', ba_check_in, name='ba-check-in'),
+    path('ba/undo-check-in/', ba_undo_check_in, name='ba-undo-check-in'),
     path('ba/check-out/', ba_check_out, name='ba-check-out'),
     path('ba/footfall/', ba_footfall, name='ba-footfall'),
     path('ba/complaints/', ba_submit_complaint, name='ba-submit-complaint'),

@@ -3,19 +3,20 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
 import { useBaSession } from '../lib/baAccounts'
-import type { ParsedBaReport } from '../lib/baReport'
+import { clearReportDraft, forgetTodaysCheckoutReports, type ParsedBaReport } from '../lib/baReport'
 import { formatTime12 } from './ScheduleContext'
 import { BaShiftContext } from './baShiftContextObject'
 import { getBaLocation, LOCATION_REQUIRED_MESSAGE } from '../lib/baLocation'
 
 /** Demo unlock: Check Out becomes available this many ms after check-in */
 const CHECKOUT_UNLOCK_AFTER_MS = 10_000
-/** How often today's shift is fetched again, so HO edits reach the BA. */
-const SHIFT_REFRESH_MS = 5 * 60_000
+/** How often today's shift is fetched again, so HO/MIS attendance edits reach the BA. */
+const SHIFT_REFRESH_MS = 60_000
 /** A shift request that takes longer than this counts as failed, so the BA can retry instead of waiting forever. */
 const SHIFT_LOAD_TIMEOUT_MS = 10_000
 
@@ -82,13 +83,20 @@ export type BaShiftState = {
    * be saved (nothing changes then), so the BA is never shown as checked in without a record.
    */
   checkIn: (selfie?: string, attendanceType?: 'store' | 'training') => Promise<string | null>
+  /** Clear a mistaken store or training check-in (before check-out only). */
+  undoCheckIn: () => Promise<string | null>
   endShift: () => void
   checkOut: () => void
   setEarlyCheckoutReason: (reason: string | null) => void
   markReportSubmitted: () => void
   /**
-   * Check-out counts only once the report is submitted. Sends it to the server, which marks the BA Present,
-   * then checks out here. Returns an error message when the server refuses (nothing changes then).
+   * Store check-out only (GPS + time). Does not submit the daily report or mark Present.
+   * Returns an error message when the server refuses.
+   */
+  performCheckOut: (earlyReason?: string | null) => Promise<string | null>
+  /**
+   * Submit stock/sales/competitor report. Marks Present (report_submitted_at).
+   * Also checks out if the BA has not checked out yet (e.g. Excel upload path).
    */
   submitCheckoutReport: (report: ParsedBaReport, earlyReason?: string | null) => Promise<string | null>
   submitTrainingCheckout: () => Promise<string | null>
@@ -131,6 +139,8 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   const [assistShiftEnded, setAssistShiftEnded] = useState(false)
   const [reportSubmitted, setReportSubmitted] = useState(false)
   const [earlyCheckoutReason, setEarlyCheckoutReason] = useState<string | null>(null)
+  const hadReportSubmitted = useRef(false)
+  const baId = account?.id ?? ''
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000)
@@ -148,6 +158,7 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   // A different BA signing in starts again from "loading", so they never see the previous BA's state.
   useEffect(() => {
     setShiftStatus(needsServer(token) ? 'loading' : 'ready')
+    hadReportSubmitted.current = false
   }, [token])
 
   // Demo / sample accounts: session-only state (no localStorage). Refresh always shows Check In again.
@@ -197,12 +208,26 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
             setCheckedIn(true)
             setAttendanceType(s.attendanceType === 'training' ? 'training' : 'store')
             if (s.checkedInAt) setCheckInAt(new Date(s.checkedInAt))
+          } else {
+            setCheckedIn(false)
+            setCheckInAt(null)
+            setAttendanceType('store')
           }
           if (s?.checkedOut) {
             setCheckedOut(true)
             if (s.checkedOutAt) setCheckOutAt(new Date(s.checkedOutAt))
-            setReportSubmitted(true)
+          } else {
+            setCheckedOut(false)
+            setCheckOutAt(null)
           }
+          // Same source of truth as HO/MIS Data filled: shift.report_submitted_at only.
+          const submitted = !!s?.reportSubmitted
+          setReportSubmitted(submitted)
+          if (!submitted && baId) {
+            const dropped = forgetTodaysCheckoutReports(baId)
+            if (dropped || hadReportSubmitted.current) clearReportDraft(baId)
+          }
+          hadReportSubmitted.current = submitted
           setShiftStatus('ready')
         })
         .catch(() => {
@@ -213,11 +238,18 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     }
     void load()
     const id = window.setInterval(load, SHIFT_REFRESH_MS)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
     return () => {
       cancelled = true
       window.clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
     }
-  }, [token, reloadKey])
+  }, [token, reloadKey, baId])
 
   const endAtMs = todayShift?.endAt ? Date.parse(todayShift.endAt) : NaN
   shiftEndAtMs = Number.isFinite(endAtMs) ? endAtMs : null
@@ -228,11 +260,11 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
   const canCheckOut =
     checkedIn &&
     !checkedOut &&
-    !reportSubmitted &&
     !!checkInAt &&
     now.getTime() + clockOffsetMs - checkInAt.getTime() >= CHECKOUT_UNLOCK_AFTER_MS
   const shiftEnded = atShiftEnd || assistShiftEnded || canCheckOut
 
+  /** Checked out already today (report may still be pending for store shifts). */
   const doneForToday = checkedOut || !!todayShift?.checkedOut
 
   const checkIn = useCallback(
@@ -276,6 +308,43 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     [doneForToday, token],
   )
 
+  const undoCheckIn = useCallback(async () => {
+    if (!checkedIn) return null
+    if (checkedOut || reportSubmitted) {
+      return 'Check-in can no longer be undone after check-out or report submission.'
+    }
+    if (needsServer(token)) {
+      try {
+        const response = await fetch('/api/ba/undo-check-in/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        })
+        const data = (await response.json().catch(() => ({}))) as {
+          detail?: string
+          shift?: { checkedIn?: boolean } | null
+        }
+        if (!response.ok) {
+          return data.detail || 'Could not undo check-in. Please try again.'
+        }
+        if (data.shift?.checkedIn) {
+          return 'Could not undo check-in. Please try again.'
+        }
+      } catch {
+        return 'No connection. Check-in was not undone — please try again.'
+      }
+    }
+    setCheckedIn(false)
+    setAttendanceType('store')
+    setCheckInAt(null)
+    setCheckedOut(false)
+    setCheckOutAt(null)
+    setReportSubmitted(false)
+    setEarlyCheckoutReason(null)
+    setAssistShiftEnded(false)
+    return null
+  }, [checkedIn, checkedOut, reportSubmitted, token])
+
   const endShift = useCallback(() => {
     setAssistShiftEnded(true)
   }, [])
@@ -290,33 +359,79 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
     setReportSubmitted(true)
   }, [])
 
-  const submitCheckoutReport = useCallback(
-    async (report: ParsedBaReport, earlyReason?: string | null) => {
+  const performCheckOut = useCallback(
+    async (earlyReason?: string | null) => {
       if (needsServer(token)) {
         try {
-          // The BA's position goes with the check-out. Without it there is no check-out.
           const location = await getBaLocation()
           if (!location) return LOCATION_REQUIRED_MESSAGE
           const response = await fetch('/api/ba/check-out/', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token, report, early_reason: earlyReason ?? earlyCheckoutReason ?? '', ...location }),
+            body: JSON.stringify({
+              token,
+              early_reason: earlyReason ?? earlyCheckoutReason ?? '',
+              ...location,
+            }),
           })
+          const data = (await response.json().catch(() => ({}))) as {
+            detail?: string
+            shift?: { checkedOutAt?: string | null; reportSubmitted?: boolean }
+          }
           if (!response.ok) {
-            const data = (await response.json().catch(() => ({}))) as { detail?: string }
             return data.detail || 'Your check-out could not be saved. Please try again.'
+          }
+          if (data.shift?.checkedOutAt) setCheckOutAt(new Date(data.shift.checkedOutAt))
+          setReportSubmitted(!!data.shift?.reportSubmitted)
+        } catch {
+          return 'No connection. Your check-out was not saved — please try again.'
+        }
+      }
+      setCheckedOut(true)
+      if (!checkOutAt) setCheckOutAt(new Date())
+      return null
+    },
+    [token, earlyCheckoutReason, checkOutAt],
+  )
+
+  const submitCheckoutReport = useCallback(
+    async (report: ParsedBaReport, earlyReason?: string | null) => {
+      if (needsServer(token)) {
+        try {
+          // GPS required when checking out for the first time with the report; optional if already out.
+          const location = checkedOut ? null : await getBaLocation()
+          if (!checkedOut && !location) return LOCATION_REQUIRED_MESSAGE
+          const response = await fetch('/api/ba/check-out/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              token,
+              report,
+              early_reason: earlyReason ?? earlyCheckoutReason ?? '',
+              ...(location ?? {}),
+            }),
+          })
+          const data = (await response.json().catch(() => ({}))) as {
+            detail?: string
+            shift?: { checkedOutAt?: string | null; reportSubmitted?: boolean }
+          }
+          if (!response.ok) {
+            return data.detail || 'Your report could not be saved. Please try again.'
+          }
+          if (data.shift?.checkedOutAt) {
+            setCheckedOut(true)
+            setCheckOutAt(new Date(data.shift.checkedOutAt))
           }
         } catch {
           return 'No connection. Your report was not sent — please try again.'
         }
       }
       setCheckedOut(true)
-      const time = new Date()
-      setCheckOutAt(time)
+      if (!checkOutAt) setCheckOutAt(new Date())
       setReportSubmitted(true)
       return null
     },
-    [token, earlyCheckoutReason],
+    [token, earlyCheckoutReason, checkedOut, checkOutAt],
   )
 
   const submitTrainingCheckout = useCallback(async () => {
@@ -385,10 +500,12 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       earlyCheckoutReason,
       isEarlyCheckout,
       checkIn,
+      undoCheckIn,
       endShift,
       checkOut,
       setEarlyCheckoutReason,
       markReportSubmitted,
+      performCheckOut,
       submitCheckoutReport,
       submitTrainingCheckout,
       resetShift,
@@ -415,9 +532,11 @@ export function BaShiftProvider({ children }: { children: ReactNode }) {
       earlyCheckoutReason,
       isEarlyCheckout,
       checkIn,
+      undoCheckIn,
       endShift,
       checkOut,
       markReportSubmitted,
+      performCheckOut,
       submitCheckoutReport,
       submitTrainingCheckout,
       resetShift,

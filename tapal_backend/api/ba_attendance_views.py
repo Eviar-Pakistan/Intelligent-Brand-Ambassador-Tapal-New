@@ -319,6 +319,55 @@ def ba_check_in(request):
     return Response(serialize_ba_shift(shift, ambassador))
 
 
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def ba_undo_check_in(request):
+    """
+    POST /api/ba/undo-check-in/
+    Body: { token }
+
+    Clears a mistaken store or training check-in (same action for both).
+    Allowed only before check-out / report submission so the BA can check in again correctly.
+    """
+    ambassador = _ambassador_from_token(request.data.get('token'))
+    if not ambassador:
+        return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
+
+    shift = _today_shift_for(ambassador)
+    if not shift:
+        return Response({'detail': 'No shift scheduled for today.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not shift.checked_in_at:
+        return Response(serialize_ba_shift(shift, ambassador))
+    if shift.checked_out_at or shift.report_submitted_at:
+        return Response(
+            {'detail': 'Check-in can no longer be undone after check-out or report submission.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if shift.check_in_photo:
+        shift.check_in_photo.delete(save=False)
+    shift.checked_in_at = None
+    shift.attendance_type = 'store'
+    shift.check_in_lat = None
+    shift.check_in_lng = None
+    shift.check_in_accuracy_m = None
+    shift.check_in_photo = None
+    shift.early_checkout_reason = ''
+    shift.save(
+        update_fields=[
+            'checked_in_at',
+            'attendance_type',
+            'check_in_lat',
+            'check_in_lng',
+            'check_in_accuracy_m',
+            'check_in_photo',
+            'early_checkout_reason',
+            'updated_at',
+        ]
+    )
+    return Response(serialize_ba_shift(shift, ambassador))
+
+
 LOCATION_REQUIRED = 'Your location is required to {}. Turn on location (GPS), allow it for this app, then try again.'
 
 
@@ -360,10 +409,12 @@ def _clean_report(raw) -> dict | None:
 def ba_check_out(request):
     """
     POST /api/ba/check-out/
-    Body: { token, report: {stock, sales, otherBrands}, latitude, longitude, accuracy?, early_reason? }
-    Check-out only counts once the report is submitted; that is what marks the BA Present.
-    The BA's location is required: no check-out is recorded without it.
-    Before the shift's end (server time) early_reason is required; after it, any early_reason is ignored.
+    Body: { token, latitude, longitude, accuracy?, early_reason?, report?: {stock, sales, otherBrands} }
+
+    Store shifts:
+      - Without `report`: records check-out time + GPS only. Attendance stays incomplete until a report is sent.
+      - With `report`: saves the report and sets report_submitted_at (marks Present). May also check out if not yet.
+    Training shifts: check-out + GPS marks the day complete (no store report); Data Filled shows On training.
     """
     ambassador = _ambassador_from_token(request.data.get('token'))
     if not ambassador:
@@ -392,6 +443,8 @@ def ba_check_out(request):
 
     # Training attendance uses the same location-verified shift but has no store report.
     if shift.attendance_type == 'training':
+        if shift.checked_out_at:
+            return Response(serialize_ba_shift(shift, ambassador))
         lat, lng, accuracy = _location(request.data)
         if lat is None:
             return Response({'detail': LOCATION_REQUIRED.format('check out')}, status=status.HTTP_400_BAD_REQUEST)
@@ -409,44 +462,47 @@ def ba_check_out(request):
         return Response(serialize_ba_shift(shift, ambassador))
 
     report = _clean_report(request.data.get('report'))
-    if report is None:
-        return Response(
-            {'detail': 'Submit your stock, sales and competitor report to check out.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    lat, lng, accuracy = _location(request.data)
-    if lat is None:
-        return Response({'detail': LOCATION_REQUIRED.format('check out')}, status=status.HTTP_400_BAD_REQUEST)
-
-    # Early or not is decided here, on the server's clock. A reason is required when early and dropped when not.
-    early = not _past_shift_end(shift)
-    reason = str(request.data.get('early_reason') or '').strip()[:1000]
-    if early and not reason:
-        ends = shift.end_time.strftime('%I:%M %p').lstrip('0')
-        return Response(
-            {'detail': f'Your shift ends at {ends}. Give a reason to check out early.', 'early': True},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
+    already_out = bool(shift.checked_out_at)
     now = timezone.now()
-    shift.checkout_report = report
-    shift.report_submitted_at = now
-    shift.checked_out_at = now
-    shift.early_checkout_reason = reason if early else ''
-    shift.check_out_lat, shift.check_out_lng, shift.check_out_accuracy_m = lat, lng, accuracy
-    shift.save(
-        update_fields=[
-            'checkout_report',
-            'report_submitted_at',
+    update_fields = ['updated_at']
+
+    if not already_out:
+        lat, lng, accuracy = _location(request.data)
+        if lat is None:
+            return Response({'detail': LOCATION_REQUIRED.format('check out')}, status=status.HTTP_400_BAD_REQUEST)
+        # Early or not is decided here, on the server's clock.
+        early = not _past_shift_end(shift)
+        reason = str(request.data.get('early_reason') or '').strip()[:1000]
+        if early and not reason:
+            ends = shift.end_time.strftime('%I:%M %p').lstrip('0')
+            return Response(
+                {'detail': f'Your shift ends at {ends}. Give a reason to check out early.', 'early': True},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        shift.checked_out_at = now
+        shift.early_checkout_reason = reason if early else ''
+        shift.check_out_lat, shift.check_out_lng, shift.check_out_accuracy_m = lat, lng, accuracy
+        update_fields.extend([
             'checked_out_at',
             'early_checkout_reason',
             'check_out_lat',
             'check_out_lng',
             'check_out_accuracy_m',
-            'updated_at',
-        ]
-    )
-    notify_supervisor(shift, 'check-out')
+        ])
+    elif report is None:
+        return Response(
+            {'detail': "Submit your stock, sales and competitor report to mark today's attendance."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if report is not None:
+        shift.checkout_report = report
+        shift.report_submitted_at = now
+        update_fields.extend(['checkout_report', 'report_submitted_at'])
+
+    shift.save(update_fields=update_fields)
+    if not already_out:
+        notify_supervisor(shift, 'check-out')
     return Response(serialize_ba_shift(shift, ambassador))
 
 

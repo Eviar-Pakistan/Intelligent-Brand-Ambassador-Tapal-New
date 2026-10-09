@@ -217,6 +217,8 @@ type LeaderRow = {
   days_present: number
   check_ins_this_week: number
   interactions: number
+  /** Productive calls this week (also mirrored as `switched` for older payloads). */
+  productive?: number
   switched: number
   conversion: number
   target_achievement: number | null
@@ -258,9 +260,9 @@ export function LeaderboardPage() {
         }
       />
       <p className="text-xs text-slate-500">
-        Points: 50 per day present (checked in, report submitted, checked out) · 20 per day only checked in · 10 per
-        shopper intercepted · 15 per shopper who switched to Tapal · 2 × this month&apos;s target achievement % (max 150%)
-        · 20 × shopper rating.
+        Conversion = that BA&apos;s productive UserInterceptions ÷ all of their UserInterceptions × 100. Points: 50 per
+        day present · 20 per day only checked in · 10 per call this week · 15 per productive call this week · 2 × this
+        month&apos;s target achievement % (max 150%) · 20 × shopper rating.
       </p>
       <Card padding={false}>
         {error ? (
@@ -304,7 +306,9 @@ export function LeaderboardPage() {
                     <td className="px-4 py-3">{row.interactions}</td>
                     <td className="px-4 py-3">
                       {row.interactions ? `${row.conversion}%` : '—'}
-                      {row.switched > 0 && <span className="text-xs text-slate-400"> ({row.switched})</span>}
+                      {(row.productive ?? row.switched) > 0 && (
+                        <span className="text-xs text-slate-400"> ({row.productive ?? row.switched} productive)</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">{row.target_achievement != null ? `${row.target_achievement}%` : '—'}</td>
                     <td className="px-4 py-3">{row.customer_rating != null ? `${row.customer_rating} ★` : '—'}</td>

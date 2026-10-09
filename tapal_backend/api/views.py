@@ -24,6 +24,7 @@ from .models import (
     AmbassadorMonthTarget,
     BackupCoverage,
     Consumer,
+    DailyReport,
     MisAuditLog,
     MonthlyShift,
     PlatformSettings,
@@ -621,13 +622,25 @@ def mis_audit_logs(request):
     return Response({'results': rows})
 
 
+def _clear_today_checkout_reports(ambassador: Ambassador, day: date) -> None:
+    """Remove today's checkout/excel DailyReport rows so MIS Data filled / daily reports match."""
+    start = timezone.make_aware(datetime.combine(day, datetime.min.time()))
+    end = start + timedelta(days=1)
+    DailyReport.objects.filter(
+        Q(ambassador=ambassador) | Q(submitted_by=ambassador),
+        source__in=(DailyReport.Source.CHECKOUT, DailyReport.Source.EXCEL),
+        submitted_at__gte=start,
+        submitted_at__lt=end,
+    ).delete()
+
+
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
 def mis_edit_attendance(request):
     """
-    MIS only: set or clear today's check-in / check-out for a BA.
-    Body: { ambassadorId, checkedInAt?: ISO|null, checkedOutAt?: ISO|null }
-    Pass null/'' to clear a time. Clearing check-in also clears check-out.
+    MIS only: set or clear today's check-in / check-out / report for a BA.
+    Body: { ambassadorId, checkedInAt?: ISO|null, checkedOutAt?: ISO|null, reportSubmittedAt?: ISO|null }
+    Pass null/'' to clear a time. Clearing check-in also clears check-out and data filled.
     """
     if not getattr(request.user, 'is_mis', False):
         return Response({'detail': 'Only MIS can edit attendance times.'}, status=status.HTTP_403_FORBIDDEN)
@@ -663,14 +676,20 @@ def mis_edit_attendance(request):
     before = {
         'checkedInAt': shift.checked_in_at.isoformat() if shift.checked_in_at else None,
         'checkedOutAt': shift.checked_out_at.isoformat() if shift.checked_out_at else None,
+        'reportSubmittedAt': shift.report_submitted_at.isoformat() if shift.report_submitted_at else None,
     }
     data = request.data
+    update_fields = ['checked_in_at', 'checked_out_at', 'early_checkout_reason', 'updated_at']
+    cleared_report = False
     try:
         if 'checkedInAt' in data:
             shift.checked_in_at = _parse_optional_dt(data.get('checkedInAt'))
             if shift.checked_in_at is None:
                 shift.checked_out_at = None
                 shift.early_checkout_reason = ''
+                shift.report_submitted_at = None
+                shift.checkout_report = {}
+                cleared_report = True
         if 'checkedOutAt' in data:
             if shift.checked_in_at is None and data.get('checkedOutAt') not in (None, ''):
                 return Response(
@@ -680,6 +699,11 @@ def mis_edit_attendance(request):
             shift.checked_out_at = _parse_optional_dt(data.get('checkedOutAt'))
             if shift.checked_out_at is None:
                 shift.early_checkout_reason = ''
+        if 'reportSubmittedAt' in data:
+            shift.report_submitted_at = _parse_optional_dt(data.get('reportSubmittedAt'))
+            if shift.report_submitted_at is None:
+                shift.checkout_report = {}
+                cleared_report = True
     except ValueError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -689,10 +713,17 @@ def mis_edit_attendance(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    shift.save(update_fields=['checked_in_at', 'checked_out_at', 'early_checkout_reason', 'updated_at'])
+    if cleared_report:
+        update_fields.extend(['report_submitted_at', 'checkout_report'])
+        _clear_today_checkout_reports(ambassador, today)
+    elif 'reportSubmittedAt' in data:
+        update_fields.append('report_submitted_at')
+
+    shift.save(update_fields=update_fields)
     after = {
         'checkedInAt': shift.checked_in_at.isoformat() if shift.checked_in_at else None,
         'checkedOutAt': shift.checked_out_at.isoformat() if shift.checked_out_at else None,
+        'reportSubmittedAt': shift.report_submitted_at.isoformat() if shift.report_submitted_at else None,
     }
     from .audit import changed_fields, log_mis_action
     from .models import MisAuditLog
@@ -704,7 +735,7 @@ def mis_edit_attendance(request):
             action=MisAuditLog.Action.ATTENDANCE_EDIT,
             entity_type='shift',
             entity_id=shift.id,
-            summary=f'Updated check-in/out for {ambassador.name} ({today.isoformat()})',
+            summary=f'Updated attendance for {ambassador.name} ({today.isoformat()})',
             before=diff['before'],
             after=diff['after'],
             meta={
@@ -722,6 +753,7 @@ def mis_edit_attendance(request):
             'date': shift.date.isoformat(),
             'checkedInAt': shift.checked_in_at.isoformat() if shift.checked_in_at else None,
             'checkedOutAt': shift.checked_out_at.isoformat() if shift.checked_out_at else None,
+            'reportSubmittedAt': shift.report_submitted_at.isoformat() if shift.report_submitted_at else None,
         }
     )
 

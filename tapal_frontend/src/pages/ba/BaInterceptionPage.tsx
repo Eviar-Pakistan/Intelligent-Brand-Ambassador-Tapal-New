@@ -4,7 +4,7 @@ import { ArrowLeft, CheckCircle2, UserRound } from 'lucide-react'
 import { ambassadors, stores } from '../../data/mock'
 import { useBaShift } from '../../context/BaShiftContext'
 import { useBaSession } from '../../lib/baAccounts'
-import { type CityReportSku } from '../../lib/baReport'
+import { packKgForSales, type CityReportSku } from '../../lib/baReport'
 import { baCurrentStore, useCreatedStores } from '../../lib/storeRegistry'
 import { portalGet } from '../../lib/serverApi'
 import {
@@ -77,7 +77,15 @@ export function BaInterceptionPage() {
       seen.add(key)
       groups.set(row.brand || 'Other', [...(groups.get(row.brand || 'Other') ?? []), row])
     }
-    return [...groups.entries()]
+    return [...groups.entries()].map(([brand, rows]) => {
+      const sorted = [...rows].sort((a, b) => {
+        const gramsA = packKgForSales(a.sku)
+        const gramsB = packKgForSales(b.sku)
+        if (gramsA !== gramsB) return gramsA - gramsB
+        return (a.label || a.sku).localeCompare(b.label || b.sku, undefined, { sensitivity: 'base' })
+      })
+      return [brand, sorted] as [string, CityReportSku[]]
+    })
   }, [citySkus])
 
   const purchasedSkus: PurchasedSkuQty[] = useMemo(() => {

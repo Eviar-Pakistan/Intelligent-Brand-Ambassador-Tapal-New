@@ -21,7 +21,8 @@ export type BaMe = {
   daysWorked: number
   rating: number | null
   ratingCount: number
-  today: { interceptions: number; switched: number; dailyGoal: number }
+  /** Conversion on Rewards = productive ÷ total calls this week. Today uses productive/interceptions. */
+  today: { interceptions: number; productive?: number; switched: number; dailyGoal: number }
 }
 
 const REFRESH_MS = 60_000
@@ -33,6 +34,7 @@ export function useBaMe() {
     let cancelled = false
     const load = () =>
       void portalGet<BaMe>('/api/ba/me/', 'ba').then((data) => {
+        console.log('data', data)
         if (!cancelled && data) setMe(data)
       })
     load()

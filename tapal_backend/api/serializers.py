@@ -191,8 +191,11 @@ class StoreSerializer(serializers.ModelSerializer):
         return cache['interceptions']
 
     def get_conversion(self, obj):
-        # Shoppers who switched to Tapal / shoppers engaged (BA interceptions + survey 'Yes').
-        switched, intercepted = self._interceptions().get(obj.pk, [0, 0])
+        # Same rule as BA conversion: productive UserInterceptions ÷ total UserInterceptions × 100.
+        productive, total = self._interceptions().get(obj.pk, [0, 0])
+        if total:
+            return _pct(productive, total)
+        # Fallback when the store has no interceptions yet: survey "Yes" / answered.
         cache = self.context.setdefault('_store_conversion_cache', {})
         if 'switch_id' not in cache:
             q = SurveyQuestion.objects.filter(is_active=True, order=5).first()
@@ -200,10 +203,9 @@ class StoreSerializer(serializers.ModelSerializer):
         switch_id = cache['switch_id']
         consumers = list(obj.consumers.only('answers', 'feedback_rating'))
         if not consumers:
-            return _pct(switched, intercepted) if intercepted else 0.0
+            return 0.0
         if switch_id:
-            answered = intercepted
-            yes = switched
+            answered = yes = 0
             for c in consumers:
                 ans = c.answers if isinstance(c.answers, dict) else {}
                 val = str(ans.get(switch_id, ''))
@@ -214,8 +216,6 @@ class StoreSerializer(serializers.ModelSerializer):
                     yes += 1
             if answered:
                 return _pct(yes, answered)
-        if intercepted:
-            return _pct(switched, intercepted)
         with_feedback = sum(1 for c in consumers if c.feedback_rating is not None)
         return _pct(with_feedback, len(consumers))
 

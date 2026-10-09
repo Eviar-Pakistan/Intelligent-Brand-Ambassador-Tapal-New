@@ -116,6 +116,7 @@ export function StatusBadge({ status }: { status: string }) {
     Offline: 'bg-slate-100 text-slate-600 ring-slate-200',
     'Checked Out': 'bg-slate-100 text-slate-600 ring-slate-200',
     Submitted: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+    'On training': 'bg-violet-50 text-violet-700 ring-violet-200',
     Incomplete: 'bg-amber-50 text-amber-700 ring-amber-200',
     Assigned: 'bg-sky-50 text-sky-700 ring-sky-200',
     Scheduled: 'bg-sky-50 text-sky-700 ring-sky-200',

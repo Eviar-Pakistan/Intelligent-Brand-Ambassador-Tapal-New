@@ -24,10 +24,10 @@ import {
   currentMonthKey,
   formatTargetMonth,
 } from '../../lib/baTargets'
-import { useBrand } from '../../context/BrandContext'
 import { formatDate, formatTime, useBaShift } from '../../context/BaShiftContext'
 import { useTrainingContent } from '../../context/TrainingContentContext'
 import {
+  clearReportDraft,
   downloadBaReportTemplate,
   hasAnytimeStockSubmitted,
   labeledSales,
@@ -74,7 +74,6 @@ function initialsOf(name: string) {
 
 export function BaHomePage() {
   const me = useBaMe()
-  const { brand } = useBrand()
   const { account } = useBaSession()
   const baName = account?.name ?? 'Brand Ambassador'
   const navigate = useNavigate()
@@ -86,6 +85,7 @@ export function BaHomePage() {
     shiftLabel,
     shiftEndLabel,
     checkedIn,
+    checkedOut,
     attendanceType,
     checkInAt,
     canCheckOut,
@@ -93,7 +93,9 @@ export function BaHomePage() {
     isEarlyCheckout,
     earlyCheckoutReason,
     checkIn,
+    undoCheckIn,
     setEarlyCheckoutReason,
+    performCheckOut,
     submitCheckoutReport,
     submitTrainingCheckout,
     doneForToday,
@@ -111,6 +113,11 @@ export function BaHomePage() {
   const [checkInError, setCheckInError] = useState<string | null>(null)
   const [trainingCheckoutBusy, setTrainingCheckoutBusy] = useState(false)
   const [trainingCheckoutError, setTrainingCheckoutError] = useState<string | null>(null)
+  const [storeCheckoutBusy, setStoreCheckoutBusy] = useState(false)
+  const [storeCheckoutError, setStoreCheckoutError] = useState<string | null>(null)
+  const [mistakenCheckInOpen, setMistakenCheckInOpen] = useState(false)
+  const [mistakenCheckInBusy, setMistakenCheckInBusy] = useState(false)
+  const [mistakenCheckInError, setMistakenCheckInError] = useState<string | null>(null)
   const [checkoutWarningOpen, setCheckoutWarningOpen] = useState(false)
   const [earlyReasonOpen, setEarlyReasonOpen] = useState(false)
   const [earlyReason, setEarlyReason] = useState('')
@@ -150,7 +157,7 @@ export function BaHomePage() {
 
   async function finishExcelCheckout(file: File, data: ParsedBaReport, reason: string | null) {
     const result = { data }
-    // Checking out with the file counts only once the server has the report (that marks attendance).
+    // Excel submission sends the report (and checks out if needed) — that marks Present.
     if (!reportSubmitted) {
       setExcelBusy(true)
       const problem = await submitCheckoutReport(result.data, reason)
@@ -158,6 +165,13 @@ export function BaHomePage() {
       if (problem) {
         setExcelErrors([problem])
         return
+      }
+      if (isEarlyCheckout || reason) {
+        recordEarlyCheckout({
+          baId,
+          baName,
+          reason: reason ?? earlyCheckoutReason ?? 'Checked out before shift end',
+        })
       }
     }
     setExcelErrors([])
@@ -169,20 +183,17 @@ export function BaHomePage() {
       city,
       source: 'excel',
     })
-    if (!reportSubmitted) {
-      if (isEarlyCheckout) {
-        recordEarlyCheckout({
-          baId,
-          baName,
-          reason: reason ?? earlyCheckoutReason ?? 'Checked out before shift end',
-        })
-      }
-    }
+    clearReportDraft(baId)
+    reloadShift()
   }
 
   function handleCheckOutClick() {
     if (attendanceType === 'training') {
       void finishTrainingCheckout()
+      return
+    }
+    if (checkedOut) {
+      navigate('/ba/stock-report')
       return
     }
     if (isEarlyCheckout) {
@@ -191,6 +202,26 @@ export function BaHomePage() {
       return
     }
     setCheckoutWarningOpen(true)
+  }
+
+  async function finishStoreCheckOut(reason?: string | null): Promise<boolean> {
+    setStoreCheckoutBusy(true)
+    setStoreCheckoutError(null)
+    const problem = await performCheckOut(reason)
+    setStoreCheckoutBusy(false)
+    if (problem) {
+      setStoreCheckoutError(problem)
+      return false
+    }
+    if (reason || earlyCheckoutReason) {
+      recordEarlyCheckout({
+        baId,
+        baName,
+        reason: reason ?? earlyCheckoutReason ?? 'Checked out before shift end',
+      })
+    }
+    reloadShift()
+    return true
   }
 
   async function finishTrainingCheckout() {
@@ -205,19 +236,32 @@ export function BaHomePage() {
     reloadShift()
   }
 
+  async function confirmMistakenCheckIn() {
+    setMistakenCheckInBusy(true)
+    setMistakenCheckInError(null)
+    const problem = await undoCheckIn()
+    setMistakenCheckInBusy(false)
+    if (problem) {
+      setMistakenCheckInError(problem)
+      return
+    }
+    setMistakenCheckInOpen(false)
+    reloadShift()
+  }
+
   function submitEarlyReason() {
     const reason = earlyReason.trim()
     if (reason.length < 8) return
     setEarlyCheckoutReason(reason)
     setEarlyReasonOpen(false)
     if (pendingExcel) {
-      // The uploaded report file was waiting for this reason: check out with it now.
+      // The uploaded report file was waiting for this reason: submit report (+ check out if needed).
       const { file, data } = pendingExcel
       setPendingExcel(null)
       void finishExcelCheckout(file, data, reason)
       return
     }
-    setCheckoutWarningOpen(true)
+    void finishStoreCheckOut(reason)
   }
 
   function cancelEarlyReason() {
@@ -232,6 +276,12 @@ export function BaHomePage() {
     const id = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(id)
   }, [])
+
+  useEffect(() => {
+    if (reportSubmitted) return
+    setExcelFileName(null)
+    setExcelErrors([])
+  }, [reportSubmitted])
 
   useEffect(() => {
     let cancelled = false
@@ -363,11 +413,13 @@ export function BaHomePage() {
               <CheckCircle2 size={14} />
               {coveredByName
                 ? 'Marked Absent'
-                : doneForToday
+                : reportSubmitted
                   ? 'Done for today'
-                  : attendanceType === 'training'
-                    ? 'Checked in for training'
-                    : 'Checked in at store'}
+                  : checkedOut
+                    ? 'Checked out'
+                    : attendanceType === 'training'
+                      ? 'Checked in for training'
+                      : 'Checked in at store'}
             </span>
           )}
         </div>
@@ -397,7 +449,9 @@ export function BaHomePage() {
           </div>
         )}
 
-        {checkedIn && !reportSubmitted && (
+ 
+
+        {checkedIn && attendanceType === 'training' && !reportSubmitted && (
           <>
             <button
               type="button"
@@ -405,7 +459,42 @@ export function BaHomePage() {
               onClick={handleCheckOutClick}
               className="mt-3 w-full rounded-2xl bg-navy-900 py-3 text-sm font-semibold text-white shadow-md shadow-navy-900/20 transition enabled:hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none"
             >
-              {trainingCheckoutBusy ? 'Checking out…' : attendanceType === 'training' ? 'Check Out of Training' : 'Check Out'}
+              {trainingCheckoutBusy ? 'Checking out…' : 'Check Out of Training'}
+            </button>
+            {!canCheckOut && (
+              <p className="mt-2 text-center text-xs text-slate-500">
+                Check Out enables 10 seconds after check-in
+              </p>
+            )}
+            {trainingCheckoutError && (
+              <p className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-center text-xs text-rose-700">{trainingCheckoutError}</p>
+            )}
+          </>
+        )}
+               {checkedIn && !checkedOut && !reportSubmitted && (
+          <div className="mt-2 text-center">
+            <button
+              type="button"
+              onClick={() => {
+                setMistakenCheckInError(null)
+                setMistakenCheckInOpen(true)
+              }}
+              className="text-xs font-medium text-slate-500 underline underline-offset-2 transition hover:text-slate-800"
+            >
+              Mistakenly check-in
+            </button>
+          </div>
+        )}
+
+        {checkedIn && attendanceType === 'store' && !checkedOut && !reportSubmitted && (
+          <>
+            <button
+              type="button"
+              disabled={!canCheckOut || storeCheckoutBusy}
+              onClick={handleCheckOutClick}
+              className="mt-3 w-full rounded-2xl bg-navy-900 py-3 text-sm font-semibold text-white shadow-md shadow-navy-900/20 transition enabled:hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none"
+            >
+              {storeCheckoutBusy ? 'Checking out…' : 'Check Out'}
             </button>
             {!canCheckOut && (
               <p className="mt-2 text-center text-xs text-slate-500">
@@ -413,12 +502,30 @@ export function BaHomePage() {
               </p>
             )}
             {canCheckOut && isEarlyCheckout && (
-              attendanceType === 'store' && <p className="mt-2 text-center text-xs text-amber-700">
+              <p className="mt-2 text-center text-xs text-amber-700">
                 Shift ends at {shiftEndLabel}. Early checkout requires a reason.
               </p>
             )}
-            {trainingCheckoutError && (
-              <p className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-center text-xs text-rose-700">{trainingCheckoutError}</p>
+            {storeCheckoutError && (
+              <p className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-center text-xs text-rose-700">{storeCheckoutError}</p>
+            )}
+          </>
+        )}
+
+        {checkedIn && attendanceType === 'store' && checkedOut && !reportSubmitted && (
+          <>
+            <button
+              type="button"
+              onClick={() => navigate('/ba/stock-report')}
+              className="mt-3 w-full rounded-2xl bg-navy-900 py-3 text-sm font-semibold text-white shadow-md shadow-navy-900/20 transition hover:bg-brand-600"
+            >
+              Submit Report
+            </button>
+            <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-center text-xs font-medium text-amber-800">
+              Submit the report to mark your today&apos;s attendance.
+            </p>
+            {storeCheckoutError && (
+              <p className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-center text-xs text-rose-700">{storeCheckoutError}</p>
             )}
           </>
         )}
@@ -461,8 +568,8 @@ export function BaHomePage() {
         </div>
         <p className="mt-1 text-xs text-slate-500">
           {stockAlreadySubmitted
-            ? 'Today’s stock report is submitted. Checkout will ask for your closing stock again.'
-            : 'Submit stock at any time. Checkout also asks for stock, daily sales and competitor data.'}
+            ? 'Today’s stock report is submitted. After check-out you will enter closing stock again in Submit Report.'
+            : 'Submit stock at any time. After check-out, Submit Report asks for stock, daily sales and competitor data.'}
         </p>
         {stockAlreadySubmitted ? (
           <div className="mt-3 flex items-center gap-2 rounded-xl bg-brand-50 px-3 py-2.5 text-sm font-semibold text-brand-700">
@@ -505,7 +612,7 @@ export function BaHomePage() {
         </button>
       </div>
 
-      {checkedIn && attendanceType === 'store' && (
+      {checkedIn && attendanceType === 'store' && !reportSubmitted && (
         <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
           <div className="flex items-center gap-2">
             <FileSpreadsheet size={18} className="text-brand-600" />
@@ -574,7 +681,7 @@ export function BaHomePage() {
             </p>
           ) : (
             <p className="mt-3 text-center text-xs text-slate-500">
-              Or check out and fill reports manually
+              Or use Submit Report after check-out to fill forms manually
             </p>
           )}
         </div>
@@ -605,6 +712,48 @@ export function BaHomePage() {
           setFaceCheckOpen(false)
         }}
       />
+
+      <Modal
+        open={mistakenCheckInOpen}
+        onClose={() => {
+          if (mistakenCheckInBusy) return
+          setMistakenCheckInOpen(false)
+          setMistakenCheckInError(null)
+        }}
+        title="Undo check-in?"
+      >
+        <div className="space-y-4">
+          <p className="text-sm leading-relaxed text-slate-700">
+            This will remove your{' '}
+            {attendanceType === 'training' ? 'training' : 'store'} check-in for today. You can check in
+            again afterward if needed.
+          </p>
+          {mistakenCheckInError && (
+            <p className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700">{mistakenCheckInError}</p>
+          )}
+          <div className="flex flex-col gap-2 pt-1 sm:flex-row-reverse">
+            <button
+              type="button"
+              disabled={mistakenCheckInBusy}
+              onClick={() => void confirmMistakenCheckIn()}
+              className="w-full rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition enabled:hover:bg-brand-600 disabled:opacity-45 sm:w-auto sm:px-5"
+            >
+              {mistakenCheckInBusy ? 'Undoing…' : 'Yes, undo check-in'}
+            </button>
+            <button
+              type="button"
+              disabled={mistakenCheckInBusy}
+              onClick={() => {
+                setMistakenCheckInOpen(false)
+                setMistakenCheckInError(null)
+              }}
+              className="w-full rounded-xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 sm:w-auto sm:px-5"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         open={earlyReasonOpen}
@@ -652,38 +801,45 @@ export function BaHomePage() {
       <Modal
         open={checkoutWarningOpen}
         onClose={() => {
+          if (storeCheckoutBusy) return
           setEarlyCheckoutReason(null)
           setCheckoutWarningOpen(false)
         }}
-        title="Complete your reports"
+        title="Check out now?"
       >
         <div className="space-y-4">
           <div className="flex gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3">
             <AlertTriangle className="mt-0.5 shrink-0 text-amber-600" size={22} />
             <p className="text-sm leading-relaxed text-slate-800">
-              Checkout includes the <span className="font-semibold">Stock Report</span>,{' '}
-              <span className="font-semibold">Daily Sales</span>, and{' '}
-              <span className="font-semibold">Competitor data</span>. Competitor prices are optional.
+              Check-out saves your time and location. You will still need to{' '}
+              <span className="font-semibold">Submit Report</span> (stock, daily sales, and competitor data)
+              to mark today&apos;s attendance.
             </p>
           </div>
           <p className="text-sm leading-relaxed text-slate-600">
-            If these reports are not submitted, your attendance for today will be marked as{' '}
+            Without the report, your attendance for today will be marked as{' '}
             <span className="font-bold text-red-600">Absent</span>.
           </p>
+          {storeCheckoutError && (
+            <p className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700">{storeCheckoutError}</p>
+          )}
           <div className="flex flex-col gap-2 pt-1 sm:flex-row-reverse">
             <button
               type="button"
+              disabled={storeCheckoutBusy}
               onClick={() => {
-                // Check-out happens when the last report is submitted, not here.
-                setCheckoutWarningOpen(false)
-                navigate('/ba/stock-report')
+                void (async () => {
+                  const ok = await finishStoreCheckOut(earlyCheckoutReason)
+                  if (ok) setCheckoutWarningOpen(false)
+                })()
               }}
-              className="w-full rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition hover:bg-brand-600 sm:w-auto sm:px-5"
+              className="w-full rounded-xl bg-navy-900 py-3 text-sm font-semibold text-white transition enabled:hover:bg-brand-600 disabled:opacity-45 sm:w-auto sm:px-5"
             >
-              Continue to reports
+              {storeCheckoutBusy ? 'Checking out…' : 'Check Out'}
             </button>
             <button
               type="button"
+              disabled={storeCheckoutBusy}
               onClick={() => {
                 setEarlyCheckoutReason(null)
                 setCheckoutWarningOpen(false)
@@ -695,50 +851,6 @@ export function BaHomePage() {
           </div>
         </div>
       </Modal>
-
-      <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-        <h3 className="text-sm font-bold text-slate-900">Today&apos;s Goals</h3>
-        <div className="mt-4 grid grid-cols-3 gap-1.5 text-center sm:gap-2">
-          <BaGoalStat label="Engagement" value={me ? `${me.today.interceptions}/${me.today.dailyGoal}` : '—'} />
-          <BaGoalStat
-            label="Conversions"
-            value={me && me.today.interceptions ? `${Math.round((me.today.switched / me.today.interceptions) * 100)}%` : '—'}
-          />
-          <BaGoalStat
-            label="Month target"
-            value={
-              me?.monthTarget ? `${achievementPct(me.monthTarget.targetKg, me.monthTarget.salesKg)}%` : '—'
-            }
-          />
-        </div>
-        <div className="mt-5 flex items-end justify-around gap-3">
-          {brand.baGoalProducts.map((product, index) => (
-            <div
-              key={`${product.alt}-${index}`}
-              className="flex h-[4.5rem] w-[4.5rem] items-center justify-center overflow-hidden rounded-full bg-[#f7f4ec] p-1.5 shadow-inner"
-            >
-              <img
-                src={product.src}
-                alt={product.alt}
-                className="h-full w-full object-contain"
-                style={{
-                  objectPosition: product.position ?? 'center',
-                  transform: product.scale ? `scale(${product.scale})` : undefined,
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function BaGoalStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-lg font-bold text-slate-900">{value}</div>
-      <div className="mt-0.5 text-xs font-medium text-slate-500">{label}</div>
     </div>
   )
 }

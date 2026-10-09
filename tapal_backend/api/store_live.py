@@ -3,9 +3,8 @@ Live store numbers worked out from what actually happens, instead of stored coun
 
   status / coverage / BAs / assigned  — from this month's shifts, deployments and today's check-ins
   footfall                            — entered daily (by the BA or Head Office); resets each day
-  conversion                          — shoppers who switched to Tapal ÷ shoppers engaged, from
-                                        BA interceptions (previous brand not Tapal) and shopper
-                                        surveys ("Would you switch?" answered Yes)
+  conversion                          — productive UserInterceptions ÷ total UserInterceptions
+                                        (status = productive), per store / BA
 """
 
 from __future__ import annotations
@@ -44,18 +43,30 @@ def record_footfall(store, count: int, entered_by: str = '') -> None:
 
 
 def switched_to_tapal(previous_brand: str) -> bool:
-    """An intercepted shopper counts as converted when they came from another brand."""
+    """Legacy helper: shopper came from another brand (not Tapal). Kept for reports/filters."""
     brand = (previous_brand or '').strip().lower()
     return bool(brand) and 'tapal' not in brand
 
 
+def is_productive_interception(status: str | None, current_sku: str | None = None) -> bool:
+    """A call counts as converted when UserInterception.status is productive."""
+    outcome = (status or '').strip()
+    if not outcome:
+        outcome = 'productive' if (current_sku or '').strip() else 'non_productive'
+    return outcome == 'productive'
+
+
 def interception_counts(store_ids=None, start: date | None = None, end: date | None = None):
     """
-    (per store {id: [switched, total]}, per BA {id: [switched, total]}, per day {date: switched}, totals [s, t])
+    Conversion buckets use productive ÷ total UserInterceptions:
+    (per store {id: [productive, total]}, per BA {id: [productive, total]},
+     per day {date: productive}, totals [productive, total])
     """
     from .models import UserInterception
 
-    qs = UserInterception.objects.only('store_id', 'ambassador_id', 'previous_brand', 'created_at')
+    qs = UserInterception.objects.only(
+        'store_id', 'ambassador_id', 'status', 'current_sku', 'created_at'
+    )
     if store_ids is not None:
         qs = qs.filter(store_id__in=store_ids)
     if start:
@@ -67,16 +78,16 @@ def interception_counts(store_ids=None, start: date | None = None, end: date | N
     by_day: dict[date, int] = defaultdict(int)
     totals = [0, 0]
     for row in qs:
-        switched = switched_to_tapal(row.previous_brand)
+        productive = is_productive_interception(row.status, row.current_sku)
         for bucket in (
             by_store[row.store_id] if row.store_id else None,
             by_ba[row.ambassador_id] if row.ambassador_id else None,
             totals,
         ):
             if bucket is not None:
-                bucket[0] += switched
+                bucket[0] += productive
                 bucket[1] += 1
-        if switched:
+        if productive:
             by_day[timezone.localtime(row.created_at).date()] += 1
     return by_store, by_ba, by_day, totals
 

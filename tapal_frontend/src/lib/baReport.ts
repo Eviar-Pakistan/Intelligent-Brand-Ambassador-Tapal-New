@@ -6,7 +6,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { currentBaAccountId, isDemoBa } from './baAccounts'
 import type { BaMonthTarget } from './baTargets'
 import { canonicalSkuName } from './skuNames'
-import type { SkuRow } from './skuCatalogue'
+import { loadSkuCatalogue, type SkuRow } from './skuCatalogue'
 import { djangoToken } from './djangoApi'
 import { currentPortal, portalGet, portalSend, resultsOf } from './serverApi'
 
@@ -141,45 +141,37 @@ const DEFAULT_SECTIONS: ReportSections = {
   fromTarget: false,
 }
 
-/** Build the SKU sections from the BA's month target, grouped by brand (target order kept). */
-export function sectionsFromTarget(target: BaMonthTarget | null | undefined): ReportSections {
-  const byBrand = new Map<string, string[]>()
-  const seen = new Set<string>()
-  for (const line of target?.lines ?? []) {
-    const sku = String(line.sku ?? '').trim()
-    if (!sku || seen.has(sku.toLowerCase())) continue
-    seen.add(sku.toLowerCase())
-    const brand = String(line.brand ?? '').trim() || 'Target SKUs'
-    byBrand.set(brand, [...(byBrand.get(brand) ?? []), sku])
-  }
-  if (byBrand.size === 0) return DEFAULT_SECTIONS
-  const groups = [...byBrand.entries()]
-  return {
-    stock: groups.map(([title, skus]) => ({
-      title,
-      fields: skus.map((sku) => ({ key: `${STOCK_SKU_PREFIX}${sku}`, label: sku })),
-    })),
-    skuSales: groups.map(([title, skus]) => ({
-      title: `${title} · sales (units)`,
-      fields: skus.map((sku) => ({ key: `${SALES_UNIT_PREFIX}${sku}`, label: sku })),
-    })),
-    fromTarget: true,
-  }
+type SkuWithGrammage = { sku: string; label: string; grammage?: number }
+
+/**
+ * Product family from the SKU label (size stripped), e.g. "Lemon 45gm" and "Lemon 135gm" → "lemon".
+ * "Lemon Grass 100gm" stays "lemon grass" so it does not mix with Lemon.
+ */
+export function skuFamilyName(label: string): string {
+  return label
+    .replace(/(?:^|\s)\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*(?:kg|g|gm|gram)\b/gi, ' ')
+    .replace(/(?:^|\s)\d+(?:\.\d+)?\s*(?:kg|g|gm|gram|s)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
 }
 
-/** A SKU on a city's list: the name the BA sees, and the SKU its stock and sales are saved under. */
-export type CityReportSku = { brand: string; label: string; sku: string }
+/** Within a brand: lightest pack first; same size keeps original order. */
+function sortSkusByGrammage(items: SkuWithGrammage[], catalogue: SkuRow[] = []): SkuWithGrammage[] {
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      grams: packKgForSales(item.sku, catalogue, item.grammage ? [{ sku: item.sku, grammage: item.grammage }] : []),
+    }))
+    .sort((a, b) => {
+      if (a.grams !== b.grams) return a.grams - b.grams
+      return a.index - b.index
+    })
+    .map((row) => row.item)
+}
 
-/** The SKU sections for a city's own list (Lahore, Multan), grouped by brand in the list's order. */
-export function sectionsFromCityList(list: CityReportSku[]): ReportSections {
-  const byBrand = new Map<string, CityReportSku[]>()
-  const seen = new Set<string>()
-  for (const item of list) {
-    if (seen.has(item.sku)) continue
-    seen.add(item.sku)
-    byBrand.set(item.brand, [...(byBrand.get(item.brand) ?? []), item])
-  }
-  const groups = [...byBrand.entries()]
+function sectionsFromBrandSkus(groups: [string, SkuWithGrammage[]][], fromTarget: boolean): ReportSections {
   return {
     stock: groups.map(([title, items]) => ({
       title,
@@ -189,8 +181,53 @@ export function sectionsFromCityList(list: CityReportSku[]): ReportSections {
       title: `${title} · sales (units)`,
       fields: items.map((item) => ({ key: `${SALES_UNIT_PREFIX}${item.sku}`, label: item.label })),
     })),
-    fromTarget: false,
+    fromTarget,
   }
+}
+
+/** Build the SKU sections from the BA's month target, grouped by brand; SKUs by grammage ascending. */
+export function sectionsFromTarget(
+  target: BaMonthTarget | null | undefined,
+  catalogue: SkuRow[] = [],
+): ReportSections {
+  const byBrand = new Map<string, SkuWithGrammage[]>()
+  const seen = new Set<string>()
+  for (const line of target?.lines ?? []) {
+    const sku = String(line.sku ?? '').trim()
+    if (!sku || seen.has(sku.toLowerCase())) continue
+    seen.add(sku.toLowerCase())
+    const brand = String(line.brand ?? '').trim() || 'Target SKUs'
+    byBrand.set(brand, [
+      ...(byBrand.get(brand) ?? []),
+      { sku, label: sku, grammage: line.grammage },
+    ])
+  }
+  if (byBrand.size === 0) return DEFAULT_SECTIONS
+  const groups = [...byBrand.entries()].map(
+    ([title, items]) => [title, sortSkusByGrammage(items, catalogue)] as [string, SkuWithGrammage[]],
+  )
+  return sectionsFromBrandSkus(groups, true)
+}
+
+/** A SKU on a city's list: the name the BA sees, and the SKU its stock and sales are saved under. */
+export type CityReportSku = { brand: string; label: string; sku: string }
+
+/** The SKU sections for a city's own list, grouped by brand; SKUs by grammage ascending. */
+export function sectionsFromCityList(list: CityReportSku[], catalogue: SkuRow[] = []): ReportSections {
+  const byBrand = new Map<string, SkuWithGrammage[]>()
+  const seen = new Set<string>()
+  for (const item of list) {
+    if (seen.has(item.sku)) continue
+    seen.add(item.sku)
+    byBrand.set(item.brand, [
+      ...(byBrand.get(item.brand) ?? []),
+      { sku: item.sku, label: item.label },
+    ])
+  }
+  const groups = [...byBrand.entries()].map(
+    ([title, items]) => [title, sortSkusByGrammage(items, catalogue)] as [string, SkuWithGrammage[]],
+  )
+  return sectionsFromBrandSkus(groups, false)
 }
 
 let cachedSections: ReportSections | null = null
@@ -199,17 +236,21 @@ let cachedSections: ReportSections | null = null
  * The signed-in BA's report SKUs from /api/ba/me/: this month's target SKUs when present,
  * else their city's SKU list, else the default list.
  */
-export async function loadReportSections(): Promise<ReportSections> {
-  const me = await portalGet<{ monthTarget: BaMonthTarget | null; reportSkus?: CityReportSku[] | null }>(
-    '/api/ba/me/',
-    'ba',
-  )
+export async function loadReportSections(options?: { force?: boolean }): Promise<ReportSections> {
+  if (cachedSections && !options?.force) return cachedSections
+  const [me, catalogue] = await Promise.all([
+    portalGet<{ monthTarget: BaMonthTarget | null; reportSkus?: CityReportSku[] | null }>(
+      '/api/ba/me/',
+      'ba',
+    ),
+    loadSkuCatalogue(),
+  ])
   if (me) {
-    const targetSections = sectionsFromTarget(me.monthTarget)
+    const targetSections = sectionsFromTarget(me.monthTarget, catalogue)
     cachedSections = targetSections.fromTarget
       ? targetSections
       : me.reportSkus?.length
-        ? sectionsFromCityList(me.reportSkus)
+        ? sectionsFromCityList(me.reportSkus, catalogue)
         : DEFAULT_SECTIONS
   }
   return cachedSections ?? DEFAULT_SECTIONS
@@ -217,10 +258,11 @@ export async function loadReportSections(): Promise<ReportSections> {
 
 /** Null while the BA's SKUs load. */
 export function useReportSections() {
-  const [sections, setSections] = useState<ReportSections | null>(cachedSections)
+  const [sections, setSections] = useState<ReportSections | null>(null)
   useEffect(() => {
     let cancelled = false
-    void loadReportSections().then((next) => {
+    // Always rebuild so name+grammage order picks up after deploys (cache still helps within a load).
+    void loadReportSections({ force: true }).then((next) => {
       if (!cancelled) setSections(next)
     })
     return () => {
@@ -238,6 +280,53 @@ export const SESSION_KEYS = {
   salesSkipped: 'ba-sales-skipped',
   excelName: 'ba-reports-excel',
 } as const
+
+/** Persist checkout-report drafts so leaving the form does not wipe filled fields. */
+function reportDraftKey(baId: string) {
+  const day = new Date().toLocaleDateString('en-CA')
+  return `ba-report-draft-v1:${baId}:${day}`
+}
+
+export type ReportDraft = {
+  stock?: Record<string, string>
+  sales?: Record<string, string>
+  otherBrands?: OtherBrandRow[]
+  salesSkipped?: boolean
+}
+
+export function loadReportDraft(baId: string): ReportDraft {
+  try {
+    const raw = localStorage.getItem(reportDraftKey(baId))
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as ReportDraft
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveReportDraft(baId: string, patch: ReportDraft) {
+  if (!baId) return
+  try {
+    const next = { ...loadReportDraft(baId), ...patch }
+    localStorage.setItem(reportDraftKey(baId), JSON.stringify(next))
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+export function clearReportDraft(baId: string) {
+  try {
+    localStorage.removeItem(reportDraftKey(baId))
+    sessionStorage.removeItem(SESSION_KEYS.stock)
+    sessionStorage.removeItem(SESSION_KEYS.sales)
+    sessionStorage.removeItem(SESSION_KEYS.otherBrands)
+    sessionStorage.removeItem(SESSION_KEYS.salesSkipped)
+    sessionStorage.removeItem(SESSION_KEYS.excelName)
+  } catch {
+    // ignore
+  }
+}
 
 const TEMPLATE_SHEET = 'BA Report'
 const HEADERS = ['Section', 'Item', 'Value', 'Notes', 'Key'] as const
@@ -499,16 +588,22 @@ export async function syncDailyReports() {
   let rows = resultsOf(await portalGet<{ results: StoredDailyReport[] }>('/api/daily-reports/', portal))
   if (!rows) return
   if (portal === 'ba') {
-    // Send every report this BA made on this phone that the server does not have yet.
+    // Only retry reports that never reached the server. Do not re-upload ones MIS/HO deleted.
     const me = currentBaAccountId()
     const onServer = new Set(rows.map((row) => row.id))
-    const missing = reports.filter((r) => r.baId === me && !onServer.has(r.id))
+    const missing = reports.filter((r) => r.baId === me && r.unsent && !onServer.has(r.id))
     for (const entry of missing) await sendReport(entry)
     if (missing.length) rows = resultsOf(await portalGet<{ results: StoredDailyReport[] }>('/api/daily-reports/', portal)) ?? rows
+    const nextOnServer = new Set(rows.map((row) => row.id))
+    commitReports([
+      ...reports.filter((r) => r.baId === me && r.unsent && !nextOnServer.has(r.id)),
+      ...rows,
+    ])
+    return
   }
   const onServer = new Set(rows.map((row) => row.id))
   commitReports([
-    ...reports.filter((r) => !onServer.has(r.id) && (portal === 'ba' || r.unsent || isDemoBa(r.baId))),
+    ...reports.filter((r) => !onServer.has(r.id) && (r.unsent || isDemoBa(r.baId))),
     ...rows,
   ])
 }
@@ -547,6 +642,26 @@ function isSameLocalDay(iso: string, now: Date) {
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate()
   )
+}
+
+/**
+ * Drop this BA's checkout/excel reports for today from the phone cache.
+ * Used when the server no longer has report_submitted_at (e.g. MIS cleared Data filled),
+ * so sync does not re-upload a deleted report.
+ */
+export function forgetTodaysCheckoutReports(baId: string, now = new Date()): boolean {
+  if (!baId) return false
+  const next = reports.filter(
+    (report) =>
+      !(
+        report.baId === baId &&
+        (report.source === 'checkout' || report.source === 'excel') &&
+        isSameLocalDay(report.submittedAt, now)
+      ),
+  )
+  if (next.length === reports.length) return false
+  commitReports(next)
+  return true
 }
 
 /** True when this BA already sent today's stock report through the anytime form. */

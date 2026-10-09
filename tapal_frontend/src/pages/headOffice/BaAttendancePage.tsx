@@ -26,6 +26,7 @@ export type AttendanceRow = {
   city: string
   shift: string
   checkedInAt: string | null
+  attendanceType?: 'store' | 'training' | string | null
   checkedOutAt: string | null
   checkInLat?: number | null
   checkInLng?: number | null
@@ -348,8 +349,20 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                   </div>
                   <div className="rounded-lg bg-slate-50 px-2 py-1.5">
                     <div className="text-[10px] text-slate-500">Report</div>
-                    <div className={r.reportSubmittedAt ? 'font-semibold text-emerald-700' : 'text-slate-400'}>
-                      {r.reportSubmittedAt ? 'Submitted' : 'Not yet'}
+                    <div
+                      className={
+                        r.reportSubmittedAt
+                          ? r.attendanceType === 'training'
+                            ? 'font-semibold text-violet-700'
+                            : 'font-semibold text-emerald-700'
+                          : 'text-slate-400'
+                      }
+                    >
+                      {r.reportSubmittedAt
+                        ? r.attendanceType === 'training'
+                          ? 'On training'
+                          : 'Submitted'
+                        : 'Not yet'}
                     </div>
                   </div>
                 </div>
@@ -442,7 +455,11 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       {r.reportSubmittedAt ? (
-                        <span className="text-emerald-700">Submitted</span>
+                        r.attendanceType === 'training' ? (
+                          <span className="text-violet-700">On training</span>
+                        ) : (
+                          <span className="text-emerald-700">Submitted</span>
+                        )
                       ) : (
                         <span className="text-slate-400">Not submitted</span>
                       )}

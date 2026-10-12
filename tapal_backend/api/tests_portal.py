@@ -1,7 +1,7 @@
 import base64
 import shutil
 import tempfile
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -717,6 +717,50 @@ class OncePerDayTests(PortalTestBase):
                 self.assertIsNone(row.checked_in_at)
                 self.assertIsNone(row.check_in_lat)
                 self.assertEqual(row.attendance_type, 'store')
+
+    def test_stale_yesterday_open_check_in_does_not_block_today_after_check_in(self):
+        """Yesterday left open (Absent) must not block today's checkout/report once checked in today."""
+        yesterday = self.today - timedelta(days=1)
+        ShiftAssignment.objects.create(
+            store=self.store,
+            ambassador=self.ba,
+            date=yesterday,
+            day_key=yesterday.strftime('%a')[:3],
+            shift_label='Full Day',
+            start_time=parse_hhmm('00:00'),
+            end_time=parse_hhmm('23:59'),
+            status=ShiftAssignment.Status.SCHEDULED,
+            checked_in_at=timezone.make_aware(datetime.combine(yesterday, time(10, 0))),
+            attendance_type='training',
+        )
+        self.schedule_ba_today()
+        token = self.ba.invite_token
+
+        blocked = self.anon.post('/api/ba/check-out/', {**GPS, 'token': token}, format='json')
+        self.assertEqual(blocked.status_code, 400, blocked.data)
+        self.assertIn('Checkout closed at 5:00 AM', blocked.data['detail'])
+
+        self.assertEqual(self.anon.post('/api/ba/check-in/', {**GPS, 'token': token}, format='json').status_code, 200)
+        out = self.anon.post('/api/ba/check-out/', {**GPS, 'token': token}, format='json')
+        self.assertEqual(out.status_code, 200, out.data)
+        report = self.anon.post('/api/ba/check-out/', {'token': token, 'report': REPORT}, format='json')
+        self.assertEqual(report.status_code, 200, report.data)
+        self.assertTrue(report.data['shift']['reportSubmitted'])
+
+        stale = ShiftAssignment.objects.get(date=yesterday, ambassador=self.ba)
+        self.assertIsNone(stale.checked_out_at)
+        self.assertIsNone(stale.report_submitted_at)
+        today_row = ShiftAssignment.objects.get(date=self.today, ambassador=self.ba, checked_in_at__isnull=False)
+        self.assertIsNotNone(today_row.checked_out_at)
+        self.assertIsNotNone(today_row.report_submitted_at)
+        att = {
+            r['date']: r['status']
+            for r in self.ho.get(
+                f'/api/attendance/?date_from={yesterday.isoformat()}&date_to={self.today.isoformat()}'
+            ).data['results']
+        }
+        self.assertEqual(att[yesterday.isoformat()], 'Absent')
+        self.assertEqual(att[self.today.isoformat()], 'Present')
 
 
 class LeaderboardTests(PortalTestBase):

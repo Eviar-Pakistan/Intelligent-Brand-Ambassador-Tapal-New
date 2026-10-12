@@ -421,21 +421,25 @@ def ba_check_out(request):
         return Response({'detail': 'Invalid or missing invite token.'}, status=status.HTTP_404_NOT_FOUND)
 
     today = business_today()
-    stale = _open_checked_in_shift(ambassador)
-    if stale and stale.date < today:
-        return Response(
-            {
-                'detail': (
-                    'Checkout closed at 5:00 AM. That work day is marked Absent. '
-                    "Check in for today's shift."
-                ),
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
     shift = _today_shift_for(ambassador)
     if not shift:
         return Response({'detail': 'No shift scheduled for today.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Yesterday left open must not block today's checkout/report once the BA has checked in today.
+    # That prior day stays Absent (no checkout + report). Only refuse when today was never started.
+    if not (shift.date == today and shift.checked_in_at):
+        stale = _open_checked_in_shift(ambassador)
+        if stale and stale.date < today:
+            return Response(
+                {
+                    'detail': (
+                        'Checkout closed at 5:00 AM. That work day is marked Absent. '
+                        "Check in for today's shift."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
     if not shift.checked_in_at:
         return Response({'detail': 'Check in before ending the shift.'}, status=status.HTTP_400_BAD_REQUEST)
     if shift.checked_out_at and shift.report_submitted_at:

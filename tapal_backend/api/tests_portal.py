@@ -12,6 +12,7 @@ from rest_framework.test import APIClient
 from .models import (
     Ambassador,
     AmbassadorComplaint,
+    AmbassadorMonthTarget,
     Consumer,
     DailyReport,
     JourneyVisit,
@@ -274,6 +275,45 @@ class ReportAndInterceptionTests(PortalTestBase):
         self.assertEqual(self.anon.get('/api/daily-reports/').status_code, 401)
         empty = {'token': self.ba.invite_token, 'id': 'rep-2', 'source': 'anytime', 'stock': {}}
         self.assertEqual(self.anon.post('/api/daily-reports/', empty, format='json').status_code, 400)
+
+    def test_mis_can_create_daily_report_for_ba_shift(self):
+        from core.models import HoRole
+        from .shifts import ensure_daily_rows
+
+        self.schedule_ba_today()
+        ensure_daily_rows(self.today, self.ba)
+        shift = ShiftAssignment.objects.get(ambassador=self.ba, date=self.today)
+        mis_user = get_user_model().objects.create_user(
+            username='mis', email='mis@x.com', password='pw', user_type=1, ho_role=HoRole.MIS,
+        )
+        mis = APIClient()
+        mis.force_authenticate(mis_user)
+
+        skus = mis.get(f'/api/ba/report-skus/?ambassador={self.ba.id}&month={self.today.strftime("%Y-%m")}')
+        self.assertEqual(skus.status_code, 200, skus.data)
+        self.assertIn('reportSkus', skus.data)
+
+        refused = self.ho.post(
+            '/api/daily-reports/',
+            {'shiftId': shift.id, **REPORT},
+            format='json',
+        )
+        self.assertEqual(refused.status_code, 403)
+
+        created = mis.post(
+            '/api/daily-reports/',
+            {'shiftId': shift.id, **REPORT},
+            format='json',
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data['baId'], f'api-{self.ba.id}')
+        self.assertEqual(created.data['source'], 'checkout')
+        shift.refresh_from_db()
+        self.assertIsNotNone(shift.report_submitted_at)
+        self.assertEqual(shift.checkout_report.get('stock'), REPORT['stock'])
+        again = mis.post('/api/daily-reports/', {'shiftId': shift.id, **REPORT}, format='json')
+        self.assertEqual(again.status_code, 200, again.data)
+        self.assertEqual(DailyReport.objects.filter(id=f'mis-shift-{shift.id}').count(), 1)
 
     def test_no_sales_confirmation_is_kept_but_never_returned(self):
         self.schedule_ba_today()
@@ -861,6 +901,61 @@ class SupervisorAttendanceTargetsTests(PortalTestBase):
         self.assertEqual(len(self.ho.get('/api/attendance/').data['results']), 2)
         preview = self.ho.get(f'/api/attendance/?supervisor=sup-test').data['results']
         self.assertEqual([r['baName'] for r in preview], ['Ali'])
+
+
+class ReplaceBaTests(PortalTestBase):
+    def test_replace_moves_target_sales_only_and_deactivates_leaving_ba(self):
+        month = self.today.strftime('%Y-%m')
+        self.schedule_ba_today()
+        replacement = Ambassador.objects.create(
+            name='Zara', status=Ambassador.Status.CERTIFIED, city='Lahore', is_active=True,
+        )
+        AmbassadorMonthTarget.objects.create(
+            ambassador=self.ba,
+            store=self.store,
+            month=month,
+            target_total=10,
+            sales_total=0,
+            lines=[{'sku': 'DD 900gm Pouch', 'brand': 'Danedar', 'kg': 10, 'sales': 0}],
+        )
+        DailyReport.objects.create(
+            id='rep-leave',
+            ambassador=self.ba,
+            ba_name=self.ba.name,
+            store=self.store,
+            city='Lahore',
+            source=DailyReport.Source.CHECKOUT,
+            stock={'stock:DD 900gm Pouch': 'In Stock'},
+            sales={'unit:DD 900gm Pouch': '4', 'totalSalesKg': '3.6'},
+            other_brands=[],
+            submitted_at=timezone.make_aware(datetime.combine(self.today, time(12, 0))),
+        )
+
+        res = self.ho.post(
+            '/api/ambassadors/replace/',
+            {
+                'fromAmbassadorId': self.ba.id,
+                'toAmbassadorId': replacement.id,
+                'month': month,
+            },
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.data)
+        self.ba.refresh_from_db()
+        replacement.refresh_from_db()
+        self.assertFalse(self.ba.is_active)
+        self.assertTrue(replacement.is_active)
+        # Shifts stay on the leaving BA — only target / sales move.
+        self.assertTrue(MonthlyShift.objects.filter(ambassador=self.ba, month=month, store=self.store).exists())
+        self.assertFalse(MonthlyShift.objects.filter(ambassador=replacement, month=month).exists())
+        self.assertEqual(res.data.get('shiftsMoved'), 0)
+        incoming = AmbassadorMonthTarget.objects.get(ambassador=replacement, month=month)
+        self.assertEqual(float(incoming.target_total), 10.0)
+        leaving = AmbassadorMonthTarget.objects.get(ambassador=self.ba, month=month)
+        self.assertEqual(float(leaving.target_total), 0.0)
+        report = DailyReport.objects.get(id='rep-leave')
+        self.assertEqual(report.ambassador_id, replacement.id)
+        self.assertGreater(float(incoming.sales_total), 0)
 
 
 class ShopperQrLinkTests(PortalTestBase):

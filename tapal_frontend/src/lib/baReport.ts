@@ -960,3 +960,62 @@ export async function updateDailyReportAsMis(
   commitReports(reports.map((item) => (item.id === id ? { ...item, ...saved } : item)))
   return saved
 }
+
+/** Report SKUs for a BA (target first, else city list) — used when MIS creates a daily report. */
+export async function loadReportSectionsForBa(
+  ambassadorId: number,
+  month: string,
+): Promise<ReportSections> {
+  const [payload, catalogue] = await Promise.all([
+    portalGet<{ monthTarget: BaMonthTarget | null; reportSkus?: CityReportSku[] | null }>(
+      `/api/ba-report-skus/?ambassador=${ambassadorId}&month=${encodeURIComponent(month)}`,
+      'office',
+    ),
+    loadSkuCatalogue(),
+  ])
+  if (!payload) return DEFAULT_SECTIONS
+  const targetSections = sectionsFromTarget(payload.monthTarget, catalogue)
+  if (targetSections.fromTarget) return targetSections
+  if (payload.reportSkus?.length) return sectionsFromCityList(payload.reportSkus, catalogue)
+  return DEFAULT_SECTIONS
+}
+
+/** Empty stock / sales maps from the SKU sections (plus fixed sales fields). */
+export function emptyReportValues(sections: ReportSections): {
+  stock: Record<string, string>
+  sales: Record<string, string>
+} {
+  const stock: Record<string, string> = {}
+  for (const section of sections.stock) {
+    for (const field of section.fields) stock[field.key] = ''
+  }
+  const sales: Record<string, string> = {}
+  for (const section of [...fixedSalesSections, ...sections.skuSales]) {
+    for (const field of section.fields) sales[field.key] = ''
+  }
+  return { stock, sales }
+}
+
+/** MIS Head Office: create (or replace) a daily report for a BA shift day. */
+export async function createDailyReportAsMis(body: {
+  shiftId: number
+  stock: Record<string, string>
+  sales: Record<string, string>
+  otherBrands: OtherBrandRow[]
+}): Promise<StoredDailyReport> {
+  const saved = await portalSend<StoredDailyReport>(
+    '/api/daily-reports/',
+    'POST',
+    {
+      shiftId: body.shiftId,
+      stock: body.stock,
+      sales: body.sales,
+      otherBrands: body.otherBrands,
+    },
+    'office',
+  )
+  if (!saved) throw new Error('Could not create the report.')
+  const rest = reports.filter((item) => item.id !== saved.id)
+  commitReports([{ ...saved }, ...rest])
+  return saved
+}

@@ -28,7 +28,8 @@ import {
   type StoredDailyReport,
 } from '../../lib/baReport'
 import { isMisUser, useDjangoUser } from '../../lib/djangoApi'
-import { Download, Search, Sparkles, Zap } from 'lucide-react'
+import { Download, Plus, Search, Sparkles, Zap } from 'lucide-react'
+import { MisCreateDailyReportModal } from './MisCreateDailyReportModal'
 
 type MetricsPin = StoreMapPin & { status: string }
 
@@ -337,6 +338,7 @@ export function BaDailyReportsPage() {
   const officeUser = useDjangoUser()
   const canEdit = isMisUser(officeUser)
   const [openId, setOpenId] = useState<string | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
   const [nameQuery, setNameQuery] = useState('')
   const openReport = reports.find((report) => report.id === openId) ?? null
 
@@ -369,6 +371,11 @@ export function BaDailyReportsPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {canEdit && (
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus size={14} /> Create Daily Report
+            </Button>
+          )}
           <Button size="sm" variant="secondary" disabled={!filteredReports.length} onClick={() => extract('stock')}>
             <Download size={14} /> Stock Report
           </Button>
@@ -483,6 +490,14 @@ export function BaDailyReportsPage() {
             </div>
           ))}
       </Modal>
+
+      {canEdit && (
+        <MisCreateDailyReportModal
+          open={createOpen}
+          onClose={() => setCreateOpen(false)}
+          onCreated={(report) => setOpenId(report.id)}
+        />
+      )}
     </div>
   )
 }

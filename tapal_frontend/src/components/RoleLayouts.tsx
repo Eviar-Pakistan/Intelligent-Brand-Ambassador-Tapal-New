@@ -62,9 +62,9 @@ export function BaShell() {
               <div className="text-[10px] font-semibold tracking-[0.16em] text-brand-600 uppercase">
                 {brand.productName} · BA
               </div>
-              <div className="truncate text-sm font-bold text-slate-900">
+              {/* <div className="truncate text-sm font-bold text-slate-900">
                 {account.name} · {account.status === 'Certified' ? 'Certified' : 'Training'}
-              </div>
+              </div> */}
             </div>
             <button
               onClick={() => {

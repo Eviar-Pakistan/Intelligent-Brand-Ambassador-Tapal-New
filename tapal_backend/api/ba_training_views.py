@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
+
+from django.db import transaction
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -18,6 +22,7 @@ from .models import (
     AssessmentAnswer,
     AssessmentQuestion,
     AssessmentSession,
+    DailyReport,
     Store,
     TrainingVideo,
 )
@@ -346,6 +351,110 @@ class AmbassadorViewSet(viewsets.ModelViewSet):
         store.save(update_fields=['bas', 'updated_at'])
 
         return Response(AmbassadorSerializer(ambassador, context={'request': request}).data)
+
+    @action(detail=False, methods=['post'], url_path='replace')
+    def replace(self, request):
+        """
+        Transfer a leaving BA's month target + sales to a replacement BA.
+
+        Body: { fromAmbassadorId, toAmbassadorId, month?: YYYY-MM }
+
+        - Adds leaving BA's month target into the replacement's target
+        - Re-attributes that month's daily reports so sales follow the target
+        - Deactivates the leaving BA (kept in DB; shifts / deployment are unchanged)
+        """
+        from .audit import log_mis_action
+        from .city_scope import scope_for
+        from .models import MisAuditLog
+        from .shifts import business_today
+        from .target_sheet import ba_store_for_month, recompute_target_sales, transfer_month_target
+
+        try:
+            from_id = int(request.data.get('fromAmbassadorId') or request.data.get('from_ambassador_id'))
+            to_id = int(request.data.get('toAmbassadorId') or request.data.get('to_ambassador_id'))
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'fromAmbassadorId and toAmbassadorId are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if from_id == to_id:
+            return Response({'detail': 'Choose two different BAs.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        month = str(request.data.get('month') or '').strip()
+        if not re.fullmatch(r'\d{4}-\d{2}', month):
+            month = business_today().strftime('%Y-%m')
+        if month < business_today().strftime('%Y-%m'):
+            return Response({'detail': 'Past months cannot be changed.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        scope = scope_for(request.user)
+        qs = scope.ambassadors(Ambassador.objects.all(), 'id')
+        leaving = qs.filter(pk=from_id).first()
+        incoming = qs.filter(pk=to_id).first()
+        if not leaving or not incoming:
+            return Response({'detail': 'Ambassador not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Leaving BA may already be inactive — still allow transferring targets / sales.
+        if not incoming.is_active:
+            return Response(
+                {'detail': 'The replacement BA must be active (not left/inactive).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            # Re-attribute this month's daily reports so sales follow the replacement BA.
+            year, mon = int(month[:4]), int(month[5:7])
+            start = timezone.make_aware(datetime(year, mon, 1))
+            end = timezone.make_aware(datetime(year + 1, 1, 1) if mon == 12 else datetime(year, mon + 1, 1))
+            reports_moved = DailyReport.objects.filter(
+                ambassador=leaving, submitted_at__gte=start, submitted_at__lt=end
+            ).update(ambassador=incoming, ba_name=incoming.name[:120])
+
+            store = ba_store_for_month(incoming, month) or leaving.store or incoming.store
+            transfer_month_target(leaving.id, incoming.id, month, store=store)
+            recompute_target_sales(incoming.id, month)
+            recompute_target_sales(leaving.id, month)
+
+            # Shifts / store deployment stay as they are — only mark the leaving BA unused.
+            leaving.is_active = False
+            leaving.is_backup = False
+            leaving.save(update_fields=['is_active', 'is_backup', 'updated_at'])
+
+            log_mis_action(
+                actor=request.user,
+                action=MisAuditLog.Action.AMBASSADOR_REPLACE,
+                entity_type='ambassador',
+                entity_id=leaving.id,
+                summary=f'Transferred target/sales from {leaving.name} to {incoming.name} ({month})',
+                before={'fromAmbassadorId': leaving.id, 'fromName': leaving.name, 'is_active': True},
+                after={
+                    'toAmbassadorId': incoming.id,
+                    'toName': incoming.name,
+                    'month': month,
+                    'reportsMoved': reports_moved,
+                    'shiftsMoved': 0,
+                },
+                meta={
+                    'fromBaCode': leaving.ba_code or '',
+                    'toBaCode': incoming.ba_code or '',
+                    'month': month,
+                },
+                request=request,
+            )
+
+        return Response(
+            {
+                'detail': (
+                    f'Target and sales for {month} moved from {leaving.name} to {incoming.name}. '
+                    f'Shifts were not changed.'
+                ),
+                'fromAmbassadorId': leaving.id,
+                'toAmbassadorId': incoming.id,
+                'month': month,
+                'shiftsMoved': 0,
+                'reportsMoved': reports_moved,
+                'from': AmbassadorSerializer(leaving, context={'request': request}).data,
+                'to': AmbassadorSerializer(incoming, context={'request': request}).data,
+            }
+        )
 
 
 @api_view(['GET'])

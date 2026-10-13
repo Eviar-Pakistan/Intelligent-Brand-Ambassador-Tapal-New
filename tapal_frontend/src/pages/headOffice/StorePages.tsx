@@ -392,13 +392,17 @@ function SchedulerPanel() {
       mounted = false
     }
   }, [])
-  const assignable = useMemo(
+  const allServerBas = useMemo(
     () =>
       accounts
         .map((a) => ({ ...a, serverId: serverAmbassadorId(a.id) }))
-        .filter((a): a is typeof a & { serverId: number } => a.serverId !== null)
+        .filter((a): a is typeof a & { serverId: number } => a.serverId !== null && !a.isDemoAccount)
         .sort((a, b) => a.name.localeCompare(b.name)),
     [accounts],
+  )
+  const assignable = useMemo(
+    () => allServerBas.filter((a) => a.isActive !== false),
+    [allServerBas],
   )
   const backupPool = useMemo(
     () => assignable.filter((a) => a.isBackup && !a.isDemoAccount && a.isActive !== false),
@@ -428,6 +432,24 @@ function SchedulerPanel() {
   const [swapSecond, setSwapSecond] = useState('')
   const [swapSaving, setSwapSaving] = useState(false)
   const [swapError, setSwapError] = useState<string | null>(null)
+  const [replaceOpen, setReplaceOpen] = useState(false)
+  const [replaceFromId, setReplaceFromId] = useState('')
+  const [replaceToId, setReplaceToId] = useState('')
+  const [replaceSaving, setReplaceSaving] = useState(false)
+  const [replaceError, setReplaceError] = useState<string | null>(null)
+  const [replaceBas, setReplaceBas] = useState<
+    {
+      id: number
+      name: string
+      baCode: string
+      city: string
+      storeName: string
+      status: string
+      isActive: boolean
+      isDemo: boolean
+    }[]
+  >([])
+  const [replaceBasLoading, setReplaceBasLoading] = useState(false)
   const [coverOpen, setCoverOpen] = useState(false)
   const [coverShift, setCoverShift] = useState<MonthlyShift | null>(null)
   const [coverStartDate, setCoverStartDate] = useState('')
@@ -535,6 +557,88 @@ function SchedulerPanel() {
     }
     setSwapOpen(false)
     flash('BA assignments swapped successfully')
+  }
+
+  async function openReplaceModal() {
+    setReplaceFromId('')
+    setReplaceToId('')
+    setReplaceError(null)
+    setReplaceOpen(true)
+    setReplaceBasLoading(true)
+    try {
+      // Fresh list from the server — avoid empty dropdowns when the local account cache is stale.
+      type ApiBa = {
+        id: number
+        name: string
+        ba_code?: string
+        city?: string
+        store_name?: string | null
+        status?: string
+        is_active?: boolean
+        is_demo?: boolean
+      }
+      const data = await portalGet<ApiBa[] | { results?: ApiBa[] }>('/api/ambassadors/', 'office')
+      const list = Array.isArray(data) ? data : data?.results ?? []
+      // Every BA from the server — no status / active / demo filter.
+      const rows = list
+        .filter((row) => row?.id && row.name)
+        .map((row) => ({
+          id: row.id,
+          name: row.name,
+          baCode: row.ba_code || '',
+          city: row.city || '',
+          storeName: row.store_name || '',
+          status: row.status || '',
+          isActive: row.is_active !== false,
+          isDemo: row.is_demo === true,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+      setReplaceBas(rows)
+    } catch {
+      setReplaceBas([])
+      setReplaceError('Could not load ambassadors. Check that the server is running.')
+    } finally {
+      setReplaceBasLoading(false)
+    }
+  }
+
+  async function confirmReplace() {
+    const fromId = Number(replaceFromId)
+    const toId = Number(replaceToId)
+    if (!fromId || !toId || fromId === toId) {
+      setReplaceError('Choose the leaving BA and a different replacement BA.')
+      return
+    }
+    const fromName = replaceBas.find((a) => a.id === fromId)?.name || 'this BA'
+    const toName = replaceBas.find((a) => a.id === toId)?.name || 'the replacement'
+    if (
+      !window.confirm(
+        `Replace ${fromName} with ${toName} for ${monthLabel || month}?\n\n` +
+          `• ${fromName}'s target and sales for this month move to ${toName}\n` +
+          `• Shifts are not changed\n` +
+          `• ${fromName} stays in the database but is deactivated (left)`,
+      )
+    ) {
+      return
+    }
+    setReplaceSaving(true)
+    setReplaceError(null)
+    try {
+      const result = await portalSend<{ detail?: string }>(
+        '/api/ambassadors/replace/',
+        'POST',
+        { fromAmbassadorId: fromId, toAmbassadorId: toId, month },
+        'office',
+      )
+      await import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())
+      await reload()
+      setReplaceOpen(false)
+      flash(result?.detail || `${fromName} replaced by ${toName}`)
+    } catch (err) {
+      setReplaceError(err instanceof Error ? err.message : 'Could not replace the BA.')
+    } finally {
+      setReplaceSaving(false)
+    }
   }
 
   function openCoverage(slot: MonthlyShift) {
@@ -668,6 +772,9 @@ function SchedulerPanel() {
               }}
             >
               Swap BAs
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => void openReplaceModal()}>
+              Remap Targes & Sales
             </Button>
           </div>
         </div>
@@ -901,6 +1008,99 @@ function SchedulerPanel() {
             </Button>
             <Button onClick={() => void confirmSwap()} disabled={swapSaving || !swapFirst || !swapSecond || swapFirst === swapSecond}>
               {swapSaving ? 'Swapping…' : 'Confirm swap'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={replaceOpen} onClose={() => setReplaceOpen(false)} title={`Replace BA · ${monthLabel || month}`}>
+        <div className="space-y-3">
+          <p className="text-sm text-slate-600">
+            Use this when a BA has left. Only their month target and sales move to the replacement BA. Shifts /
+            deployment are not changed. The leaving BA stays in the database but is deactivated.
+          </p>
+          {replaceBasLoading ? (
+            <p className="text-sm text-slate-500">Loading ambassadors…</p>
+          ) : (
+            <>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium text-slate-700">
+                  Leaving BA{replaceBas.length ? ` (${replaceBas.length})` : ''}
+                </span>
+                <select
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500"
+                  value={replaceFromId}
+                  onChange={(e) => {
+                    setReplaceFromId(e.target.value)
+                    if (e.target.value === replaceToId) setReplaceToId('')
+                  }}
+                >
+                  <option value="">Select BA who is leaving…</option>
+                  {replaceBas.map((ba) => (
+                    <option key={`from-${ba.id}`} value={String(ba.id)}>
+                      {ba.name}
+                      {ba.baCode ? ` · ${ba.baCode}` : ''}
+                      {ba.city ? ` · ${ba.city}` : ''}
+                      {ba.status ? ` · ${ba.status}` : ''}
+                      {ba.isActive ? '' : ' · Left (inactive)'}
+                      {ba.isDemo ? ' · Demo' : ''}
+                      {!ba.storeName ? ' · No store' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium text-slate-700">
+                  Replacement BA
+                  {replaceBas.length
+                    ? ` (${Math.max(0, replaceBas.length - (replaceFromId ? 1 : 0))})`
+                    : ''}
+                </span>
+                <select
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500"
+                  value={replaceToId}
+                  onChange={(e) => setReplaceToId(e.target.value)}
+                >
+                  <option value="">Select BA who takes over…</option>
+                  {replaceBas
+                    .filter((ba) => String(ba.id) !== replaceFromId)
+                    .map((ba) => (
+                      <option key={`to-${ba.id}`} value={String(ba.id)}>
+                        {ba.name}
+                        {ba.baCode ? ` · ${ba.baCode}` : ''}
+                        {ba.city ? ` · ${ba.city}` : ''}
+                        {ba.status ? ` · ${ba.status}` : ''}
+                        {ba.storeName ? ` · ${ba.storeName}` : ''}
+                        {ba.isActive ? '' : ' · Inactive'}
+                        {ba.isDemo ? ' · Demo' : ''}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              {!replaceBasLoading && replaceBas.length === 0 && (
+                <p className="text-sm text-amber-700">No ambassadors returned from the server.</p>
+              )}
+            </>
+          )}
+          <p className="text-xs text-slate-500">Every BA is listed (any status). Shifts are never moved.</p>
+          {replaceError && (
+            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">{replaceError}</p>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="secondary" onClick={() => setReplaceOpen(false)} disabled={replaceSaving}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void confirmReplace()}
+              disabled={
+                replaceSaving ||
+                replaceBasLoading ||
+                !replaceFromId ||
+                !replaceToId ||
+                replaceFromId === replaceToId
+              }
+            >
+              {replaceSaving ? 'Replacing…' : 'Confirm replace'}
             </Button>
           </div>
         </div>

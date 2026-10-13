@@ -16,6 +16,7 @@ export type AttendanceRow = {
   baCode: string
   coveredByName?: string | null
   coverageOfName?: string | null
+  reportOwnerId?: number | null
   reportOwnerName?: string | null
   coverageAssignedByName?: string | null
   coverageAssignedAt?: string | null
@@ -102,7 +103,12 @@ export function useAttendance(dateFrom: string, dateTo: string, ambassadorId?: n
   const [reloadTick, setReloadTick] = useState(0)
 
   useEffect(() => {
-    if (ambassadorId === null) return
+    if (ambassadorId === null) {
+      setData(null)
+      setError(null)
+      setLoading(false)
+      return
+    }
     let cancelled = false
     const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo })
     if (ambassadorId) params.set('ambassador', String(ambassadorId))

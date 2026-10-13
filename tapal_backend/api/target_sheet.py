@@ -824,6 +824,101 @@ def recompute_target_sales(ambassador_id, month: str):
     return target
 
 
+def merge_target_lines(*line_lists: list) -> tuple[list[dict], Decimal]:
+    """Merge SKU target lines from several BAs: same SKU sums kg/unit; brand/grammage kept from first seen."""
+    by_sku: dict[str, dict] = {}
+    order: list[str] = []
+    for lines in line_lists:
+        for raw in lines or []:
+            if not isinstance(raw, dict):
+                continue
+            sku = str(raw.get('sku') or '').strip()
+            if not sku:
+                continue
+            key = sku.lower()
+            try:
+                kg = Decimal(str(raw.get('kg') if raw.get('kg') is not None else raw.get('qty') or 0))
+            except Exception:
+                kg = Decimal('0')
+            unit_raw = raw.get('unit') if raw.get('unit') is not None else raw.get('count')
+            try:
+                unit = Decimal(str(unit_raw)) if unit_raw not in (None, '') else None
+            except Exception:
+                unit = None
+            if key not in by_sku:
+                by_sku[key] = {
+                    'sku': sku,
+                    'brand': str(raw.get('brand') or '').strip(),
+                    'grammage': raw.get('grammage'),
+                    'kg': Decimal('0'),
+                    'unit': Decimal('0') if unit is not None else None,
+                }
+                order.append(key)
+            row = by_sku[key]
+            row['kg'] += kg
+            if unit is not None:
+                row['unit'] = (row['unit'] or Decimal('0')) + unit
+            if not row.get('brand') and raw.get('brand'):
+                row['brand'] = str(raw.get('brand')).strip()
+            if row.get('grammage') in (None, '') and raw.get('grammage') not in (None, ''):
+                row['grammage'] = raw.get('grammage')
+    merged = []
+    total = Decimal('0')
+    for key in order:
+        row = by_sku[key]
+        kg = row['kg'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        total += kg
+        entry = {
+            'sku': row['sku'],
+            'brand': row.get('brand') or '',
+            'kg': float(kg),
+            'sales': 0.0,
+        }
+        if row.get('grammage') not in (None, ''):
+            entry['grammage'] = row['grammage']
+        if row.get('unit') is not None:
+            entry['unit'] = float(row['unit'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+        merged.append(entry)
+    return merged, total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def transfer_month_target(from_ambassador_id: int, to_ambassador_id: int, month: str, store=None):
+    """
+    Add the leaving BA's month target into the replacement BA's target for `month`.
+    Keeps the leaving BA's target row in the DB with zeroed totals (history), unused going forward.
+    """
+    leaving = AmbassadorMonthTarget.objects.filter(ambassador_id=from_ambassador_id, month=month).first()
+    incoming = AmbassadorMonthTarget.objects.filter(ambassador_id=to_ambassador_id, month=month).first()
+    if not leaving and not incoming:
+        return None
+
+    lines, target_total = merge_target_lines(
+        (incoming.lines if incoming else None),
+        (leaving.lines if leaving else None),
+    )
+    store_id = store.id if store else None
+    if store_id is None:
+        store_id = (incoming.store_id if incoming else None) or (leaving.store_id if leaving else None)
+
+    target, _ = AmbassadorMonthTarget.objects.update_or_create(
+        ambassador_id=to_ambassador_id,
+        month=month,
+        defaults={
+            'store_id': store_id,
+            'target_total': target_total,
+            'sales_total': Decimal('0'),
+            'lines': lines,
+        },
+    )
+    if leaving:
+        # Retain the row for audit, but zero it so lists/recompute no longer credit the left BA.
+        leaving.target_total = Decimal('0')
+        leaving.sales_total = Decimal('0')
+        leaving.lines = [{**line, 'kg': 0, 'unit': 0 if line.get('unit') is not None else None, 'sales': 0} for line in (leaving.lines or [])]
+        leaving.save(update_fields=['target_total', 'sales_total', 'lines'])
+    return target
+
+
 # ─── SKUs a city's BAs report on (Stock Report and Daily Sales) ─────────────
 # (brand, name shown to the BA, the matching SKU in SKU_CATALOGUE or None when it has no target SKU).
 # Sales the BA reports are saved under the matching SKU, so they count towards that SKU's target.

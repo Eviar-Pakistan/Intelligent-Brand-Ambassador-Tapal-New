@@ -1138,8 +1138,10 @@ class MisAuditLog(models.Model):
 
     class Action(models.TextChoices):
         DAILY_REPORT_EDIT = 'daily_report.edit', 'Edit daily report'
+        DAILY_REPORT_CREATE = 'daily_report.create', 'Create daily report'
         ATTENDANCE_EDIT = 'attendance.edit', 'Edit attendance'
         AMBASSADOR_EDIT = 'ambassador.edit', 'Edit ambassador'
+        AMBASSADOR_REPLACE = 'ambassador.replace', 'Replace ambassador'
 
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,

@@ -459,7 +459,7 @@ MAX_ATTENDANCE_DAYS = 62
 
 def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_id=None, scope=None) -> dict:
     """Daily attendance rows (made from monthly shifts) with a status for each, plus totals."""
-    from .models import ShiftAssignment
+    from .models import Ambassador, ShiftAssignment
 
     today = business_today()
     date_to = min(date_to, today)
@@ -467,8 +467,16 @@ def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_i
         date_from = date_to
     date_from = max(date_from, date_to - timedelta(days=MAX_ATTENDANCE_DAYS - 1))
 
+    # When filtering one BA, only materialize that BA's days — otherwise a month
+    # range creates rows for every scheduled BA and can time out (500).
+    ensure_for = None
+    if ambassador_id not in (None, ''):
+        try:
+            ensure_for = Ambassador.objects.filter(pk=int(ambassador_id)).first()
+        except (TypeError, ValueError):
+            ensure_for = None
     for day in each_day(date_from, date_to):
-        ensure_daily_rows(day)
+        ensure_daily_rows(day, ensure_for)
 
     qs = (
         ShiftAssignment.objects.filter(date__gte=date_from, date__lte=date_to)
@@ -480,7 +488,7 @@ def build_attendance(date_from: date, date_to: date, ambassador_id=None, store_i
     )
     if scope is not None:
         qs = scope.stores(qs)
-    if ambassador_id:
+    if ambassador_id not in (None, ''):
         qs = qs.filter(ambassador_id=ambassador_id)
     if store_id:
         qs = qs.filter(store_id=store_id)

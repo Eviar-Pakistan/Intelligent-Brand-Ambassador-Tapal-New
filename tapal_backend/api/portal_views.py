@@ -846,13 +846,21 @@ def report_payload(r: DailyReport) -> dict:
     }
 
 
+def _require_mis_office(scope: Scope, request) -> Response | None:
+    """None when the caller is MIS Head Office; otherwise a 403 response."""
+    if not scope.head_office or scope.supervisor is not None:
+        return _forbidden('Only MIS Head Office can manage daily reports.')
+    if not getattr(request.user, 'is_mis', False):
+        return _forbidden('Only MIS can manage daily reports.')
+    return None
+
+
 def _mis_patch_daily_report(request, scope: Scope):
     """MIS may correct stock condition, sales quantities, and competitor prices on an existing report."""
-    if not scope.head_office or scope.supervisor is not None:
-        return _forbidden('Only MIS Head Office can edit daily reports.')
+    denied = _require_mis_office(scope, request)
+    if denied:
+        return denied
     user = request.user
-    if not getattr(user, 'is_mis', False):
-        return _forbidden('Only MIS can edit daily reports.')
 
     report_id = str(request.data.get('id') or '').strip()
     if not report_id:
@@ -958,6 +966,140 @@ def _mis_patch_daily_report(request, scope: Scope):
     return Response(report_payload(report))
 
 
+def _clean_report_parts(data) -> tuple[dict, dict, list] | Response:
+    """Validate stock / sales / otherBrands for MIS create or BA submit. Returns Response on error."""
+    stock = data.get('stock') if isinstance(data.get('stock'), dict) else {}
+    sales = data.get('sales') if isinstance(data.get('sales'), dict) else {}
+    sales = {str(k): str(v or '').strip() for k, v in sales.items()}
+    sales.pop('totalSalesKg', None)
+    others = data.get('otherBrands') if isinstance(data.get('otherBrands'), list) else []
+    if not (stock or sales or others):
+        return Response({'detail': 'The report is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+    stock = {str(k): str(v or '').strip() for k, v in stock.items()}
+    for key, value in sales.items():
+        if str(key).startswith('unit:') and value and not re.fullmatch(r'\d+', value):
+            return Response(
+                {'detail': f'{str(key)[5:]}: sales are in units, so enter a whole number (no decimals).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    sales['totalSalesKg'] = _total_sales_kg(sales)
+    cleaned_others = []
+    for row in others:
+        if not isinstance(row, dict):
+            continue
+        cleaned_others.append(
+            {
+                'id': str(row.get('id') or '')[:64],
+                'name': str(row.get('name') or '').strip()[:120],
+                'price': str(row.get('price') or '').strip()[:40],
+            }
+        )
+    return stock, sales, cleaned_others
+
+
+def _mis_create_daily_report(request, scope: Scope):
+    """
+    MIS creates (or replaces) a daily report for a BA shift day.
+    Body: { shiftId, stock, sales, otherBrands }
+    Sets shift.checkout_report + report_submitted_at so Data Filled matches the inbox.
+    """
+    denied = _require_mis_office(scope, request)
+    if denied:
+        return denied
+
+    try:
+        shift_id = int(request.data.get('shiftId'))
+    except (TypeError, ValueError):
+        return Response({'detail': 'shiftId is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    shift = (
+        ShiftAssignment.objects.select_related(
+            'store', 'ambassador', 'report_owner', 'covered_by', 'coverage_of__ambassador'
+        )
+        .filter(pk=shift_id, coverage_cancelled=False)
+        .first()
+    )
+    if not shift or not shift.ambassador_id:
+        return Response({'detail': 'Shift not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not scope.city.is_all:
+        allowed = (
+            (shift.store_id and scope.city.allows_store(shift.store_id))
+            or scope.city.allows_ambassador(shift.ambassador_id)
+        )
+        if not allowed:
+            return Response({'detail': 'Shift not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    cleaned = _clean_report_parts(request.data)
+    if isinstance(cleaned, Response):
+        return cleaned
+    stock, sales, others = cleaned
+
+    from .shifts import work_datetime_on
+
+    report_owner = (
+        Ambassador.objects.filter(pk=shift.report_owner_id).first()
+        if shift.report_owner_id
+        else shift.ambassador
+    )
+    report_store = shift.store
+    submitted_at = work_datetime_on(shift.date, timezone.now())
+    report_id = f'mis-shift-{shift.id}'
+    checkout_payload = {'stock': stock, 'sales': sales, 'otherBrands': others}
+
+    report, created = DailyReport.objects.update_or_create(
+        id=report_id,
+        defaults={
+            'ambassador': report_owner,
+            'submitted_by': shift.ambassador,
+            'ba_name': (report_owner.name if report_owner else shift.ambassador.name)[:120],
+            'store': report_store,
+            'city': (report_store.city if report_store else (report_owner.city if report_owner else '')) or '',
+            'source': DailyReport.Source.CHECKOUT,
+            'stock': stock,
+            'sales': sales,
+            'other_brands': others,
+            'submitted_at': submitted_at,
+            'no_sales_confirmed': False,
+        },
+    )
+
+    shift.checkout_report = checkout_payload
+    shift.report_submitted_at = submitted_at
+    shift.save(update_fields=['checkout_report', 'report_submitted_at', 'updated_at'])
+
+    from .audit import log_mis_action
+    from .models import MisAuditLog
+    from .target_sheet import recompute_target_sales
+
+    ba_name = report_owner.name if report_owner else shift.ambassador.name
+    log_mis_action(
+        actor=request.user,
+        action=MisAuditLog.Action.DAILY_REPORT_CREATE,
+        entity_type='daily_report',
+        entity_id=report.pk,
+        summary=(
+            f"{'Created' if created else 'Updated'} daily report for {ba_name} "
+            f"({shift.date.isoformat()} · {shift.shift_label})"
+        ),
+        before={},
+        after={'stock': stock, 'sales': sales, 'otherBrands': others},
+        meta={
+            'baId': report_owner.id if report_owner else shift.ambassador_id,
+            'baName': ba_name,
+            'storeId': report_store.id if report_store else None,
+            'storeName': report_store.name if report_store else '',
+            'shiftId': shift.id,
+            'date': shift.date.isoformat(),
+            'created': created,
+        },
+        request=request,
+    )
+    if report.ambassador_id:
+        recompute_target_sales(report.ambassador_id, shift.date.strftime('%Y-%m'))
+    return Response(report_payload(report), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
 def _ba_store(ambassador: Ambassador) -> Store | None:
     """The store the BA works at today (their shift), else the store they are deployed to."""
     today = timezone.localdate()
@@ -1008,7 +1150,7 @@ def _total_sales_kg(sales: dict) -> float:
 @api_view(['GET', 'POST', 'PATCH'])
 @permission_classes([AllowAny])
 def daily_reports(request):
-    """GET reports · POST (BA submit) · PATCH (MIS Head Office edits stock/sales/competitors)."""
+    """GET reports · POST (BA submit or MIS create for a shift) · PATCH (MIS edits)."""
     scope = _scope(request, allow_ba=True)
     if not scope:
         return _denied()
@@ -1024,26 +1166,15 @@ def daily_reports(request):
         return _mis_patch_daily_report(request, scope)
 
     if not scope.ambassador:
-        return _forbidden('Only a BA submits a daily report.')
+        return _mis_create_daily_report(request, scope)
     data = request.data
     source = data.get('source')
     if source not in DailyReport.Source.values:
         return Response({'detail': 'Unknown report source.'}, status=status.HTTP_400_BAD_REQUEST)
-    stock = data.get('stock') if isinstance(data.get('stock'), dict) else {}
-    sales = data.get('sales') if isinstance(data.get('sales'), dict) else {}
-    # Ignore any client-supplied total; it is calculated below from submitted SKU values.
-    sales.pop('totalSalesKg', None)
-    others = data.get('otherBrands') if isinstance(data.get('otherBrands'), list) else []
-    if not (stock or sales or others):
-        return Response({'detail': 'The report is empty.'}, status=status.HTTP_400_BAD_REQUEST)
-    sales['totalSalesKg'] = _total_sales_kg(sales)
-    for key, value in sales.items():
-        # SKU sales are counted in units: whole packs only.
-        if str(key).startswith('unit:') and str(value).strip() and not re.fullmatch(r'\d+', str(value).strip()):
-            return Response(
-                {'detail': f'{str(key)[5:]}: sales are in units, so enter a whole number (no decimals).'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+    cleaned = _clean_report_parts(data)
+    if isinstance(cleaned, Response):
+        return cleaned
+    stock, sales, others = cleaned
     report_id = _client_id(data.get('id'), 'rep')
     from .ba_attendance_views import _today_shift_for
     from .shifts import business_today, work_datetime_on
@@ -1362,6 +1493,14 @@ def competitor_fields(request):
         return _denied()
     if request.method == 'GET':
         qs = CompetitorFieldConfig.objects.filter(is_active=True).select_related('store')
+        store_id = request.query_params.get('storeId')
+        if store_id and not scope.ambassador:
+            store = Store.objects.filter(pk=store_id).first()
+            if store:
+                store_rows = list(qs.filter(scope='STORE', store=store))
+                city_rows = list(qs.filter(scope='CITY', city__iexact=store.city)) if store.city else []
+                rows = store_rows or city_rows or list(qs.filter(scope='ALL'))
+                return Response({'results': [_competitor_config_json(row) for row in rows]})
         if scope.ambassador:
             store = _ba_store(scope.ambassador)
             city = store.city if store else scope.ambassador.city
@@ -1517,6 +1656,54 @@ def training_modules(request):
 
 
 # ─── The BA's own summary (Rewards page, Home goals) ────────────────────────
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def ba_report_skus(request):
+    """
+    GET ?ambassador=<id>&month=YYYY-MM
+    Head Office / MIS: month target SKUs when present, else the BA's city SKU list.
+    Used when MIS creates a daily report for a BA shift.
+    """
+    scope = _scope(request)
+    if not scope or not scope.head_office:
+        return _denied()
+    try:
+        ambassador_id = int(request.query_params.get('ambassador'))
+    except (TypeError, ValueError):
+        return Response({'detail': 'ambassador is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not scope.city.is_all and not scope.city.allows_ambassador(ambassador_id):
+        return Response({'detail': 'Ambassador not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    from .models import AmbassadorMonthTarget
+    from .target_sheet import report_skus_for_city
+    from .views import _target_payload
+
+    ambassador = Ambassador.objects.filter(pk=ambassador_id, is_active=True).select_related('store').first()
+    if not ambassador:
+        return Response({'detail': 'Ambassador not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    month = str(request.query_params.get('month') or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}', month):
+        from .shifts import business_today
+
+        month = business_today().strftime('%Y-%m')
+
+    target = (
+        AmbassadorMonthTarget.objects.filter(ambassador=ambassador, month=month)
+        .select_related('store', 'ambassador')
+        .first()
+    )
+    city = ambassador.city or (ambassador.store.city if ambassador.store_id else '')
+    report_skus = report_skus_for_city(city) or []
+    return Response(
+        {
+            'monthTarget': _target_payload(target) if target else None,
+            'reportSkus': report_skus,
+            'city': city,
+        }
+    )
 
 
 @api_view(['GET'])

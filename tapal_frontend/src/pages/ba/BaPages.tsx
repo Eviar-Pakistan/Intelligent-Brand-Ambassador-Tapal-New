@@ -363,9 +363,9 @@ export function BaHomePage() {
         <div className="mt-1 flex items-start justify-between gap-3">
           <div>
             <h2 className="text-2xl font-bold text-slate-900">{baName} 👋</h2>
-            <p className="mt-1 text-base font-semibold text-brand-600">
+            {/* <p className="mt-1 text-base font-semibold text-brand-600">
               {baStatusLabel(me?.status ?? (account?.status === 'Certified' ? 'Certified' : account?.status))}
-            </p>
+            </p> */}
           </div>
         </div>
       </div>

@@ -1662,9 +1662,11 @@ def training_modules(request):
 @permission_classes([AllowAny])
 def ba_report_skus(request):
     """
-    GET ?ambassador=<id>&month=YYYY-MM
-    Head Office / MIS: month target SKUs when present, else the BA's city SKU list.
-    Used when MIS creates a daily report for a BA shift.
+    GET ?ambassador=<id>&month=YYYY-MM[&shift=<id>]
+    Same SKU source as BA /api/ba/me/ (used by the BA daily-report forms):
+      1) report owner's AmbassadorMonthTarget lines for that month, when present
+      2) else CitySku (and built-in city list) for the report owner's city
+    Optional shift= uses that day's report_owner + store city, matching coverage days.
     """
     scope = _scope(request)
     if not scope or not scope.head_office:
@@ -1680,7 +1682,7 @@ def ba_report_skus(request):
     from .target_sheet import report_skus_for_city
     from .views import _target_payload
 
-    ambassador = Ambassador.objects.filter(pk=ambassador_id, is_active=True).select_related('store').first()
+    ambassador = Ambassador.objects.filter(pk=ambassador_id).select_related('store').first()
     if not ambassador:
         return Response({'detail': 'Ambassador not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1690,18 +1692,54 @@ def ba_report_skus(request):
 
         month = business_today().strftime('%Y-%m')
 
+    # Same report-owner rule as ba_me: covering BAs report against the original BA's target/city SKUs.
+    report_owner = ambassador
+    store = ambassador.store
+    shift_id_raw = request.query_params.get('shift')
+    if shift_id_raw not in (None, ''):
+        try:
+            shift_id = int(shift_id_raw)
+        except (TypeError, ValueError):
+            return Response({'detail': 'shift must be a number.'}, status=status.HTTP_400_BAD_REQUEST)
+        shift = (
+            ShiftAssignment.objects.filter(pk=shift_id, ambassador=ambassador)
+            .select_related('store', 'report_owner', 'report_owner__store')
+            .first()
+        )
+        if not shift:
+            return Response({'detail': 'Shift not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if shift.report_owner_id:
+            report_owner = shift.report_owner
+        store = shift.store
+        month = shift.date.strftime('%Y-%m')
+
     target = (
-        AmbassadorMonthTarget.objects.filter(ambassador=ambassador, month=month)
+        AmbassadorMonthTarget.objects.filter(ambassador=report_owner, month=month)
         .select_related('store', 'ambassador')
         .first()
     )
-    city = ambassador.city or (ambassador.store.city if ambassador.store_id else '')
-    report_skus = report_skus_for_city(city) or []
+    # Same city resolution as ba_me reportSkus.
+    city = (report_owner.city or '').strip() or ((store.city or '').strip() if store else '')
+    report_skus = report_skus_for_city(city)
+    month_target = _target_payload(target) if target else None
+    target_has_skus = bool(
+        month_target
+        and any(isinstance(line, dict) and str(line.get('sku') or '').strip() for line in (month_target.get('lines') or []))
+    )
+    if target_has_skus:
+        sku_source = 'target'
+    elif report_skus:
+        sku_source = 'city'
+    else:
+        sku_source = 'default'
     return Response(
         {
-            'monthTarget': _target_payload(target) if target else None,
+            'monthTarget': month_target,
             'reportSkus': report_skus,
             'city': city,
+            'skuSource': sku_source,
+            'month': month,
+            'reportOwnerId': report_owner.id,
         }
     )
 

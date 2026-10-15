@@ -9,6 +9,7 @@ import {
   isWholeUnits,
   loadReportSectionsForBa,
   STOCK_OPTIONS,
+  type BaReportSkuSource,
   type OtherBrandRow,
   type ReportSections,
   type StoredDailyReport,
@@ -46,6 +47,8 @@ export function MisCreateDailyReportModal({ open, onClose, onCreated }: Props) {
   const [baAccountId, setBaAccountId] = useState('')
   const [shiftId, setShiftId] = useState<string>('')
   const [sections, setSections] = useState<ReportSections | null>(null)
+  const [skuSource, setSkuSource] = useState<BaReportSkuSource | null>(null)
+  const [skuCity, setSkuCity] = useState('')
   const [stock, setStock] = useState<Record<string, string>>({})
   const [sales, setSales] = useState<Record<string, string>>({})
   const [brands, setBrands] = useState<OtherBrandRow[]>(DEFAULT_OTHER_BRANDS)
@@ -75,6 +78,8 @@ export function MisCreateDailyReportModal({ open, onClose, onCreated }: Props) {
       setBaAccountId('')
       setShiftId('')
       setSections(null)
+      setSkuSource(null)
+      setSkuCity('')
       setStock({})
       setSales({})
       setBrands(DEFAULT_OTHER_BRANDS)
@@ -86,6 +91,8 @@ export function MisCreateDailyReportModal({ open, onClose, onCreated }: Props) {
   useEffect(() => {
     setShiftId('')
     setSections(null)
+    setSkuSource(null)
+    setSkuCity('')
     setStock({})
     setSales({})
     setBrands(DEFAULT_OTHER_BRANDS)
@@ -95,21 +102,28 @@ export function MisCreateDailyReportModal({ open, onClose, onCreated }: Props) {
   useEffect(() => {
     if (!selectedShift) {
       setSections(null)
+      setSkuSource(null)
+      setSkuCity('')
       setStock({})
       setSales({})
       setBrands(DEFAULT_OTHER_BRANDS)
       return
     }
-    const ownerId = selectedShift.reportOwnerId ?? selectedShift.baId
+    // Same SKU source as the BA daily-report forms (target → CitySku → default).
+    const baIdForSkus = selectedShift.baId
     let cancelled = false
     setLoadingSkus(true)
     setError(null)
     void (async () => {
       try {
-        const nextSections = await loadReportSectionsForBa(ownerId, monthOf(selectedShift.date))
+        const next = await loadReportSectionsForBa(baIdForSkus, monthOf(selectedShift.date), {
+          shiftId: Number(selectedShift.id),
+        })
         if (cancelled) return
-        setSections(nextSections)
-        const empty = emptyReportValues(nextSections)
+        setSections(next)
+        setSkuSource(next.skuSource)
+        setSkuCity(next.city)
+        const empty = emptyReportValues(next)
         setStock(empty.stock)
         setSales(empty.sales)
 
@@ -140,7 +154,7 @@ export function MisCreateDailyReportModal({ open, onClose, onCreated }: Props) {
     return () => {
       cancelled = true
     }
-  }, [selectedShift?.id])
+  }, [selectedShift?.id, selectedShift?.baId])
 
   async function submit() {
     if (!selectedShift) return
@@ -243,11 +257,13 @@ export function MisCreateDailyReportModal({ open, onClose, onCreated }: Props) {
                   {[selectedShift.storeName, selectedShift.city, selectedShift.shift, selectedShift.attendanceType]
                     .filter(Boolean)
                     .join(' · ')}
-                  {sections
-                    ? sections.fromTarget
-                      ? ' · SKUs from month target'
-                      : ' · SKUs from city list'
-                    : ''}
+                  {skuSource === 'target'
+                    ? ' · SKUs from this BA’s month target'
+                    : skuSource === 'city'
+                      ? ` · SKUs from CitySku${skuCity ? ` (${skuCity})` : ''}`
+                      : skuSource === 'default'
+                        ? ' · Default SKUs (no target / city list)'
+                        : ''}
                 </p>
               </div>
               {selectedShift.reportSubmittedAt ? (

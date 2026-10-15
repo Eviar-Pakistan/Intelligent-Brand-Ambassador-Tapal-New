@@ -232,6 +232,31 @@ export function sectionsFromCityList(list: CityReportSku[], catalogue: SkuRow[] 
 
 let cachedSections: ReportSections | null = null
 
+export type BaReportSkuSource = 'target' | 'city' | 'default'
+
+/**
+ * Shared BA / MIS rule: month-target SKUs when present, else city list, else defaults.
+ * Same decision tree the BA daily-report forms use from /api/ba/me/.
+ */
+function sectionsFromBaSkuPayload(
+  payload: { monthTarget: BaMonthTarget | null; reportSkus?: CityReportSku[] | null },
+  catalogue: SkuRow[] = [],
+): ReportSections {
+  const targetSections = sectionsFromTarget(payload.monthTarget, catalogue)
+  if (targetSections.fromTarget) return targetSections
+  if (payload.reportSkus?.length) return sectionsFromCityList(payload.reportSkus, catalogue)
+  return DEFAULT_SECTIONS
+}
+
+function skuSourceFromSections(
+  sections: ReportSections,
+  reportSkus?: CityReportSku[] | null,
+): BaReportSkuSource {
+  if (sections.fromTarget) return 'target'
+  if (reportSkus?.length) return 'city'
+  return 'default'
+}
+
 /**
  * The signed-in BA's report SKUs from /api/ba/me/: this month's target SKUs when present,
  * else their city's SKU list, else the default list.
@@ -246,12 +271,7 @@ export async function loadReportSections(options?: { force?: boolean }): Promise
     loadSkuCatalogue(),
   ])
   if (me) {
-    const targetSections = sectionsFromTarget(me.monthTarget, catalogue)
-    cachedSections = targetSections.fromTarget
-      ? targetSections
-      : me.reportSkus?.length
-        ? sectionsFromCityList(me.reportSkus, catalogue)
-        : DEFAULT_SECTIONS
+    cachedSections = sectionsFromBaSkuPayload(me, catalogue)
   }
   return cachedSections ?? DEFAULT_SECTIONS
 }
@@ -961,23 +981,39 @@ export async function updateDailyReportAsMis(
   return saved
 }
 
-/** Report SKUs for a BA (target first, else city list) — used when MIS creates a daily report. */
+/**
+ * MIS Create Daily Report: same SKU sections as the BA interface (target → city → default).
+ * Pass shiftId so coverage days use the report owner's target/city, matching /api/ba/me/.
+ */
 export async function loadReportSectionsForBa(
   ambassadorId: number,
   month: string,
-): Promise<ReportSections> {
+  options?: { shiftId?: number },
+): Promise<ReportSections & { skuSource: BaReportSkuSource; city: string }> {
+  const params = new URLSearchParams({
+    ambassador: String(ambassadorId),
+    month,
+  })
+  if (options?.shiftId) params.set('shift', String(options.shiftId))
   const [payload, catalogue] = await Promise.all([
-    portalGet<{ monthTarget: BaMonthTarget | null; reportSkus?: CityReportSku[] | null }>(
-      `/api/ba-report-skus/?ambassador=${ambassadorId}&month=${encodeURIComponent(month)}`,
-      'office',
-    ),
+    portalGet<{
+      monthTarget: BaMonthTarget | null
+      reportSkus?: CityReportSku[] | null
+      city?: string
+      skuSource?: BaReportSkuSource
+    }>(`/api/ba/report-skus/?${params.toString()}`, 'office'),
     loadSkuCatalogue(),
   ])
-  if (!payload) return DEFAULT_SECTIONS
-  const targetSections = sectionsFromTarget(payload.monthTarget, catalogue)
-  if (targetSections.fromTarget) return targetSections
-  if (payload.reportSkus?.length) return sectionsFromCityList(payload.reportSkus, catalogue)
-  return DEFAULT_SECTIONS
+  const city = (payload?.city || '').trim()
+  if (!payload) {
+    return { ...DEFAULT_SECTIONS, skuSource: 'default', city }
+  }
+  const sections = sectionsFromBaSkuPayload(payload, catalogue)
+  return {
+    ...sections,
+    skuSource: skuSourceFromSections(sections, payload.reportSkus),
+    city,
+  }
 }
 
 /** Empty stock / sales maps from the SKU sections (plus fixed sales fields). */

@@ -1,7 +1,7 @@
 import type { ParsedBaReport } from '../../lib/baReport'
 import { portalSend } from '../../lib/serverApi'
 import { useKpiConfig } from '../../lib/kpiConfig'
-import { baStatusLabel, useBaMe } from '../../lib/baMe'
+import {useBaMe } from '../../lib/baMe'
 import { Link, useNavigate } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -73,7 +73,7 @@ function initialsOf(name: string) {
 }
 
 export function BaHomePage() {
-  const me = useBaMe()
+  // const me = useBaMe()
   const { account } = useBaSession()
   const baName = account?.name ?? 'Brand Ambassador'
   const navigate = useNavigate()

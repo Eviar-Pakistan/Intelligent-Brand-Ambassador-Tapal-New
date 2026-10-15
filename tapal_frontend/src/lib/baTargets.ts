@@ -277,8 +277,11 @@ export async function parseTargetFile(file: File, people: TargetPerson[]): Promi
   const additionalSkus: SkuRow[] = [
     { range: 'Danedar', sku: 'DD 1200gm Tea Bag OOH', grammage: 1.2 },
     { range: 'Danedar', sku: 'DD 3IN1 Elaichi 200gm', grammage: 0.2 },
+    { range: 'Danedar', sku: 'DD 40gm Hard Pack', grammage: 0.04 },
+    { range: 'Danedar', sku: 'DD 420gm Pillow Pack', grammage: 0.42 },
     { range: 'Danedar', sku: 'DD Elaichi 100gm Tea Bag Envelope', grammage: 0.1 },
     { range: 'Green Tea', sku: 'Lemon Grass 100gm', grammage: 0.1 },
+    { range: 'Insta Brew', sku: 'Insta Brew 3IN1 Coffee sachet 25gm', grammage: 0.025 },
     { range: 'Insta Brew', sku: 'Tapal Insta Brew 750gm', grammage: 0.75 },
   ]
   for (const item of additionalSkus) {

@@ -370,8 +370,10 @@ SKU_CATALOGUE: list[tuple[str, str, float]] = [
     ('Danedar', 'DD 200gm Tea Bag Envelope', 0.2),
     ('Danedar', 'DD 350gm Pouch', 0.35),
     ('Danedar', 'DD 3IN1 Elachi sachet 20gms', 0.02),
+    ('Danedar', 'DD 40gm Hard Pack', 0.04),
     ('Danedar', 'DD 40gm RTB', 0.04),
     ('Danedar', 'DD 400gm Pillow Pack', 0.4),
+    ('Danedar', 'DD 420gm Pillow Pack', 0.42),
     ('Danedar', 'DD 430gm Pouch', 0.43),
     ('Danedar', 'DD 440gm Jar Pack New', 0.44),
     ('Danedar', 'DD 49gm Hard Pack', 0.049),
@@ -414,6 +416,7 @@ SKU_CATALOGUE: list[tuple[str, str, float]] = [
     ('Tezdum', 'TD 80gm Hard Pack', 0.08),
     ('Tezdum', 'TD 900gm Pouch', 0.9),
     ('Green Tea', 'Tropical Peach 45gm', 0.045),
+    ('Insta Brew', 'Insta Brew 3IN1 Coffee sachet 25gm', 0.025),
     ('Insta Brew', 'Tapal Insta Brew 750gm', 0.75),
 ]
 
@@ -512,6 +515,12 @@ _SKU_INPUT_ALIASES = {
     'danedar 200gm tea bag': 'DD 200gm Tea Bag',
     'danedar 200gm tea bag (envelope)': 'DD 200gm Tea Bag Envelope',
     'danedar 40gm': 'DD 40gm RTB',
+    'danedar 40gm hard pack': 'DD 40gm Hard Pack',
+    'dd 40gm hard pack': 'DD 40gm Hard Pack',
+    'danedar 400gm pillow pack': 'DD 400gm Pillow Pack',
+    'dd 400gm pillow pack': 'DD 400gm Pillow Pack',
+    'danedar 420gm pillow pack': 'DD 420gm Pillow Pack',
+    'dd 420gm pillow pack': 'DD 420gm Pillow Pack',
     'danedar 50gm tea bag': 'DD 50gm Tea Bag',
     'danedar elaichi 100gm tea bag (env)': 'DD Elaichi 100gm Tea Bag Envelope',
     'danedar 1200gm tea bag ooh': 'DD 1200gm Tea Bag OOH',
@@ -541,6 +550,7 @@ _SKU_INPUT_ALIASES = {
     'stawberry 45gm green tea bag': 'Strawberry 45gm',
     'strawberry 45gm green tea bag': 'Strawberry 45gm',
     'tropical peach 45gm green tea bag': 'Tropical Peach 45gm',
+    'insta brew 3in1 coffee sachet 25gm': 'Insta Brew 3IN1 Coffee sachet 25gm',
     'tapal insta brew 750gm': 'Tapal Insta Brew 750gm',
     'tezdum 170gm hard pack': 'TD 170gm Hard Pack',
     'tezdum 80gm hard pack': 'TD 80gm Hard Pack',
@@ -938,7 +948,9 @@ _LAHORE_SKUS: list[tuple[str, str, str | None]] = [
     ('Danedar', 'Danedar 200gm X 20 RTB', 'DD 200gm RTB'),
     ('Danedar', 'Danedar 200gm X 20 Tea Bag', 'DD 200gm Tea Bag'),
     ('Danedar', 'Danedar 200gm X 20 Tea Bag (Envelope)', 'DD 200gm Tea Bag Envelope'),
+    ('Danedar', 'Danedar 40gm X 80 Hard Pack', 'DD 40gm Hard Pack'),
     ('Danedar', 'Danedar 40gm X 80 RTB', 'DD 40gm RTB'),
+    ('Danedar', 'Danedar 420gm Pillow Pack', 'DD 420gm Pillow Pack'),
     ('Danedar', 'Danedar 50gm x 80 Tea Bag', 'DD 50gm Tea Bag'),
     ('Danedar', 'Danedar Elaichi 100gm X 36 Tea Bag (Env)', 'DD Elaichi 100gm Tea Bag Envelope'),
     ('Danedar', 'Danedar 1200gm Tea Bag OOH', 'DD 1200gm Tea Bag OOH'),
@@ -960,6 +972,7 @@ _LAHORE_SKUS: list[tuple[str, str, str | None]] = [
     ('Green Tea', 'SOG 48gm X 40 Green Tea Bag', 'SOG 48gm'),
     ('Green Tea', 'Stawberry 45gm x 40 Green Tea Bag', 'Strawberry 45gm'),
     ('Green Tea', 'Tropical Peach 45gm x 40 Green Tea Bag', 'Tropical Peach 45gm'),
+    ('Insta Brew', 'Insta Brew 3IN1 Coffee sachet 25gm', 'Insta Brew 3IN1 Coffee sachet 25gm'),
     ('Insta Brew', 'Tapal Insta Brew 750gm x 16 Boxes', 'Tapal Insta Brew 750gm'),
     ('Tezdum', 'Tezdum 170gm X 60 Hard Pack', 'TD 170gm Hard Pack'),
     ('Tezdum', 'Tezdum 80gm X 120 Hard Pack', 'TD 80gm Hard Pack'),
@@ -971,7 +984,8 @@ _LAHORE_SKUS: list[tuple[str, str, str | None]] = [
 _MULTAN_CATALOGUE_SKUS = [
     'DD 100gm Tea Bag', 'DD 100gm Tea Bag Envelope', 'DD 170gm Hard Pack', 'DD 1750gm Pouch',
     'DD 200gm RTB', 'DD 200gm Tea Bag', 'DD 200gm Tea Bag Envelope', 'DD 350gm Pouch',
-    'DD 3IN1 Elachi Box 200gm', 'DD 40gm RTB', 'DD 430gm Pouch', 'DD 440gm Jar Pack New',
+    'DD 3IN1 Elachi Box 200gm', 'DD 40gm Hard Pack', 'DD 40gm RTB', 'DD 420gm Pillow Pack',
+    'DD 430gm Pouch', 'DD 440gm Jar Pack New',
     'DD 49gm Hard Pack', 'DD 50gm Tea Bag', 'DD 85gm Hard Pack', 'DD 900gm Pouch',
     'DD 900gm Collectible Pack',
     'DD Elaichi 100gm Tea Bag Envelope', 'DD Elaichi 170gm Hard Pack', 'DD Elaichi 80gm Hard Pack',
@@ -993,6 +1007,17 @@ CITY_REPORT_SKUS: dict[str, list[tuple[str, str, str | None]]] = {
     'multan': [(BRAND[sku], sku, sku) for sku in _MULTAN_CATALOGUE_SKUS if sku in BRAND],
 }
 
+# Cities that share another city's CitySku / built-in report list.
+CITY_SKU_ALIASES: dict[str, str] = {
+    'sahiwal': 'Faisalabad',
+}
+
+
+def _city_sku_lookup_name(city: str) -> str:
+    """Resolve city aliases for CitySku (e.g. Sahiwal → Faisalabad)."""
+    key = (city or '').strip().lower()
+    return CITY_SKU_ALIASES.get(key) or (city or '').strip()
+
 
 def _city_sku_row(name: str) -> tuple[str, str, str | None]:
     """(brand, name shown to the BA, target SKU) for a SKU typed into the City SKU table."""
@@ -1007,10 +1032,11 @@ def report_skus_for_city(city: str) -> list[dict] | None:
     """The SKUs a BA of this city reports on, or None when the city has no list of its own.
 
     The City SKU table (Django admin) wins; a city with no rows there uses the built-in list.
+    Sahiwal uses Faisalabad's CitySku rows (and built-in list if any).
     """
     from .models import CitySku
 
-    city = (city or '').strip()
+    city = _city_sku_lookup_name(city)
     city_rows = CitySku.objects.filter(city__iexact=city).values_list('sku', 'brand')
     rows = []
     for raw_name, raw_brand in city_rows:

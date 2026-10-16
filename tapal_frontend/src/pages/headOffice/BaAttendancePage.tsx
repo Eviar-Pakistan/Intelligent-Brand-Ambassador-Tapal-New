@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Download } from 'lucide-react'
 import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
-import { Button, Card, PageHeader, SearchInput, StatusBadge, TableScroll, Tabs } from '../../components/ui'
+import { Button, Card, ListPager, PageHeader, SearchInput, StatusBadge, TableScroll, Tabs, usePagedList } from '../../components/ui'
 import { portalFetch } from '../../lib/serverApi'
 
 export type AttendanceStatus = 'Present' | 'On shift' | 'Not checked in' | 'Absent'
@@ -200,6 +200,7 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
         (!q || [r.baName, r.baCode, r.storeName, r.storeCode, r.city].some((v) => (v ?? '').toLowerCase().includes(q))),
     )
   }, [data, status, query])
+  const attendancePage = usePagedList(rows, `${dateFrom}|${dateTo}|${status}|${query}`)
 
   const summary = data?.summary
   const cards = [
@@ -300,7 +301,7 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
         ) : (
           <>
           <ul className="divide-y divide-slate-100 sm:hidden">
-            {rows.map((r) => (
+            {attendancePage.rows.map((r) => (
               <li key={r.id} className="px-4 py-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex min-w-0 items-start gap-3">
@@ -402,7 +403,7 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {attendancePage.rows.map((r) => (
                   <tr key={r.id} className="border-t border-slate-100 align-top">
                     <td className="px-4 py-3 whitespace-nowrap">
                       <div className="font-medium">{dateLabel(r.date)}</div>
@@ -499,6 +500,14 @@ export function BaAttendancePage({ storeIds }: { storeIds?: number[] } = {}) {
               </tbody>
             </table>
           </TableScroll>
+          <ListPager
+            page={attendancePage.page}
+            pageCount={attendancePage.pageCount}
+            from={attendancePage.from}
+            to={attendancePage.to}
+            total={attendancePage.total}
+            onPage={attendancePage.setPage}
+          />
           </>
         )}
       </Card>

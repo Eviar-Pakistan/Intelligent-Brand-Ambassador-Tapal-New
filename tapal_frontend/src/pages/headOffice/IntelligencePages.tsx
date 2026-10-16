@@ -260,7 +260,7 @@ export function LeaderboardPage() {
         }
       />
       <p className="text-xs text-slate-500">
-        Conversion = that BA&apos;s productive UserInterceptions ÷ all of their UserInterceptions × 100. Points: 50 per
+        Conversion = productive interceptions whose previous brand is not Tapal ÷ all of their interceptions × 100. Points: 50 per
         day present · 20 per day only checked in · 10 per call this week · 15 per productive call this week · 2 × this
         month&apos;s target achievement % (max 150%) · 20 × shopper rating.
       </p>

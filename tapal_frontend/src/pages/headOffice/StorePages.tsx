@@ -12,8 +12,10 @@ import {
   ProgressBar,
   SearchInput,
   Select,
+  ListPager,
   StatusBadge,
   TableScroll,
+  usePagedList,
 } from '../../components/ui'
 import { BookCheck, CalendarClock, CalendarPlus, ChevronLeft, ChevronRight, FileSpreadsheet, Plus } from 'lucide-react'
 import { serverAmbassadorId, useSchedule, type MonthlyShift } from '../../context/ScheduleContext'
@@ -33,6 +35,7 @@ export function StoresPage() {
   const [bulkOpen, setBulkOpen] = useState(false)
   const [competitorFormSetOpen, setCompetitorFormSetOpen] = useState(false)
   useCreatedStores()
+  const storePage = usePagedList(stores, stores.length)
   useEffect(() => {
     void import('../../lib/djangoSync').then(({ syncDjango }) => syncDjango())
   }, [])
@@ -83,14 +86,14 @@ export function StoresPage() {
                 </td>
               </tr>
             )}
-            {stores.map((s) => (
+            {storePage.rows.map((s) => (
               <tr key={s.id} className="border-t border-slate-100 hover:bg-slate-50/70">
                 <td className="px-4 py-3 font-semibold tracking-wide text-slate-800">{s.storeCode || '—'}</td>
                 <td className="px-4 py-3">
                   <Link to={`${base}/stores/${s.id}`} className="font-semibold text-brand-600 hover:underline">
                     #{s.id} {s.name}
                   </Link>
-                  <div className="text-xs text-slate-400">{s.city}</div>
+                  <div className="text-xs text-slate-400">{[s.city, s.subtown].filter(Boolean).join(' · ')}</div>
                 </td>
                 <td className="px-4 py-3">
                   <StatusBadge status={s.footfall} />
@@ -117,6 +120,14 @@ export function StoresPage() {
           </tbody>
         </table>
         </TableScroll>
+        <ListPager
+          page={storePage.page}
+          pageCount={storePage.pageCount}
+          from={storePage.from}
+          to={storePage.to}
+          total={storePage.total}
+          onPage={storePage.setPage}
+        />
       </Card>
       <BulkStoreModal open={bulkOpen} onClose={() => setBulkOpen(false)} />
       <CompetitorFormModal open={competitorFormSetOpen} onClose={() => setCompetitorFormSetOpen(false)} />
@@ -226,6 +237,7 @@ export function StoreDetailPage() {
             <h2 className="mt-2 text-2xl font-bold">{store.storeCode || `STORE #${store.id}`}</h2>
             <p className="text-slate-600">
               {store.name} · {store.city}
+              {store.subtown ? ` · ${store.subtown}` : ''}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -253,6 +265,7 @@ export function StoreDetailPage() {
         <Card>
           <h3 className="mb-3 font-semibold">Store details</h3>
           <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <Detail label="Subtown" value={record.subtown} />
             <Detail label="Address" value={record.address} />
             <Detail label="Footfall" value={record.footfall} />
             <Detail
@@ -479,6 +492,7 @@ function SchedulerPanel() {
       [s.storeName, s.storeCode, s.city, s.baName, s.baCode].some((v) => (v ?? '').toLowerCase().includes(q)),
     )
   }, [schedule, query])
+  const shiftPage = usePagedList(rows, `${monthLabel}|${query}`)
   const openCount = schedule.filter((s) => s.status === 'Open').length
   const filledCount = schedule.filter((s) => s.status === 'Scheduled').length
   const conflictCount = schedule.filter((s) => s.status === 'Conflict').length
@@ -798,6 +812,7 @@ function SchedulerPanel() {
             {schedule.length === 0 ? `No shifts for ${monthLabel || 'this month'}.` : 'No shifts match your search.'}
           </div>
         ) : (
+          <>
           <TableScroll minWidth={720}>
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
@@ -810,7 +825,7 @@ function SchedulerPanel() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((slot) => (
+                {shiftPage.rows.map((slot) => (
                   <tr key={slot.id} className="border-t border-slate-100">
                     <td className="px-4 py-3">
                       <div className="font-medium">{slot.storeName}</div>
@@ -900,6 +915,15 @@ function SchedulerPanel() {
               </tbody>
             </table>
           </TableScroll>
+          <ListPager
+            page={shiftPage.page}
+            pageCount={shiftPage.pageCount}
+            from={shiftPage.from}
+            to={shiftPage.to}
+            total={shiftPage.total}
+            onPage={shiftPage.setPage}
+          />
+          </>
         )}
       </Card>
 

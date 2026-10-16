@@ -351,6 +351,7 @@ def build_supervisor_overview(sup: Supervisor, request=None, *, shared=None) -> 
     """Stores assigned to the supervisor, the BAs working in them today, and their headline numbers."""
     from .intelligence import build_ba_leaderboard, build_store_map_pins
     from .shifts import ensure_daily_rows
+    from .store_live import ba_call_counts, interception_counts
 
     today = timezone.localdate()
     if shared is None:
@@ -358,6 +359,9 @@ def build_supervisor_overview(sup: Supervisor, request=None, *, shared=None) -> 
         shared = {
             'pins': {p['id']: p for p in build_store_map_pins()},
             'ranked': {row['id']: row for row in build_ba_leaderboard()['results']},
+            # [converted, total] and [total, productive] for that ambassador only.
+            'conversion_by_ba': interception_counts()[1],
+            'calls_by_ba': ba_call_counts(),
             'sessions': dict(
                 UserInterception.objects.filter(created_at__date__gte=today - timedelta(days=today.weekday()), ambassador__isnull=False)
                 .values_list('ambassador_id')
@@ -396,6 +400,8 @@ def build_supervisor_overview(sup: Supervisor, request=None, *, shared=None) -> 
     for (ba_pk, store_id), ba in sorted(pairs.items(), key=lambda item: item[1].name):
         state = 'Active' if (ba_pk, store_id) in on_shift else 'Offline'
         rank = ranked.get(ba_pk, {})
+        converted, total = shared['conversion_by_ba'].get(ba_pk, [0, 0])
+        call_total, productive = shared['calls_by_ba'].get(ba_pk, [0, 0])
         bas.append(
             {
                 'id': _ba_id(ba_pk),
@@ -403,7 +409,11 @@ def build_supervisor_overview(sup: Supervisor, request=None, *, shared=None) -> 
                 'storeId': store_id,
                 'store': store_names[store_id],
                 'state': state,
-                'conversion': rank.get('conversion', 0.0),
+                'conversion': round((converted / total) * 100, 1) if total else 0.0,
+                'totalInterceptions': call_total,
+                'productiveCalls': productive,
+                'nonProductiveCalls': call_total - productive,
+                'convertedCalls': converted,
                 'points': rank.get('points', 0),
                 'sessions': sessions.get(ba_pk, 0),
                 'score': round(float(ba.overall_score or 0), 1),
@@ -434,14 +444,15 @@ def build_supervisor_overview(sup: Supervisor, request=None, *, shared=None) -> 
             }
         )
 
-    unique = {b['id']: b for b in bas}.values()
-    conversions = [b['conversion'] for b in unique]
+    unique = list({b['id']: b for b in bas}.values())
+    total_calls = sum(b.get('totalInterceptions') or 0 for b in unique)
+    converted_calls = sum(b.get('convertedCalls') or 0 for b in unique)
     mean = lambda xs: round(sum(xs) / len(xs), 1) if xs else 0.0  # noqa: E731
     return {
         'supervisor': supervisor_payload(sup),
         'stores': store_rows,
         'bas': bas,
-        'teamConversion': mean(conversions),
+        'teamConversion': round((converted_calls / total_calls) * 100, 1) if total_calls else 0.0,
         'coverage': mean(coverage_values),
         'todayFootfall': sum(int(s.today_footfall or 0) for s in stores),
     }
@@ -464,12 +475,15 @@ def supervisor_overviews(request):
         return _denied()
     from .intelligence import build_ba_leaderboard, build_store_map_pins
     from .shifts import ensure_daily_rows
+    from .store_live import ba_call_counts, interception_counts
 
     today = timezone.localdate()
     ensure_daily_rows(today)
     shared = {
         'pins': {p['id']: p for p in build_store_map_pins()},
         'ranked': {row['id']: row for row in build_ba_leaderboard()['results']},
+        'conversion_by_ba': interception_counts()[1],
+        'calls_by_ba': ba_call_counts(),
         'sessions': dict(
             UserInterception.objects.filter(created_at__date__gte=today - timedelta(days=today.weekday()), ambassador__isnull=False)
             .values_list('ambassador_id')
@@ -1289,6 +1303,8 @@ def interception_payload(r: UserInterception) -> dict:
         'baName': r.ba_name,
         'storeId': r.store_id,
         'storeName': r.store_name,
+        'storeCity': r.store.city if r.store_id and r.store else '',
+        'storeSubtown': (r.store.subtown if r.store_id and r.store else '') or '',
         'name': r.name,
         'contact': r.contact,
         'cityArea': r.city_area,
@@ -1311,14 +1327,82 @@ def interceptions(request):
     if not scope:
         return _denied()
     if request.method == 'GET':
-        qs = _ba_visible(UserInterception.objects.all(), scope)
+        qs = _ba_visible(UserInterception.objects.select_related('store'), scope)
         date_from, date_to = _date_param(request, 'date_from'), _date_param(request, 'date_to')
         if date_from:
             qs = qs.filter(created_at__date__gte=date_from)
         if date_to:
             qs = qs.filter(created_at__date__lte=date_to)
-        limit = 5000 if (date_from or date_to) else 1000
-        return Response({'results': [interception_payload(r) for r in qs[:limit]]})
+        city = (request.query_params.get('city') or '').strip()
+        subtown = (request.query_params.get('subtown') or '').strip()
+        query = (request.query_params.get('q') or '').strip()
+        switched_only = (request.query_params.get('switched') or '').strip() in ('1', 'true', 'yes')
+        if city:
+            qs = qs.filter(store__city__iexact=city)
+        if subtown:
+            qs = qs.filter(store__subtown__iexact=subtown)
+        if query:
+            qs = qs.filter(
+                Q(ba_name__icontains=query)
+                | Q(store_name__icontains=query)
+                | Q(name__icontains=query)
+                | Q(contact__icontains=query)
+                | Q(previous_brand__icontains=query)
+                | Q(current_sku__icontains=query)
+                | Q(city_area__icontains=query)
+                | Q(store__city__icontains=query)
+                | Q(store__subtown__icontains=query)
+            )
+        page_raw = (request.query_params.get('page') or '').strip()
+        if page_raw:
+            try:
+                page = max(1, int(page_raw))
+            except ValueError:
+                page = 1
+            try:
+                page_size = int(request.query_params.get('page_size') or 50)
+            except ValueError:
+                page_size = 50
+            page_size = min(200, max(1, page_size))
+            from .store_live import is_converted_interception
+
+            summary_only = (request.query_params.get('summary') or '').strip() in ('1', 'true', 'yes')
+            if switched_only or summary_only:
+                matched = 0
+                matched_ids = []
+                for row_id, status_value, sku, brand in qs.values_list(
+                    'id', 'status', 'current_sku', 'previous_brand'
+                ).iterator(chunk_size=2000):
+                    if is_converted_interception(status_value, sku, brand):
+                        matched += 1
+                        if switched_only:
+                            matched_ids.append(row_id)
+                if summary_only and not switched_only:
+                    return Response({'count': qs.count(), 'switched': matched})
+                total = matched
+                start = (page - 1) * page_size
+                page_ids = matched_ids[start:start + page_size]
+                by_id = {row.pk: row for row in qs.filter(pk__in=page_ids)}
+                page_rows = [by_id[row_id] for row_id in page_ids if row_id in by_id]
+                switched = total
+            else:
+                total = qs.count()
+                start = (page - 1) * page_size
+                page_rows = list(qs[start:start + page_size])
+                switched = None
+            body = {
+                'results': [interception_payload(r) for r in page_rows],
+                'count': total,
+                'page': page,
+                'page_size': page_size,
+            }
+            if switched is not None:
+                body['switched'] = switched
+            return Response(body)
+        # A chosen period, Head Office, and a supervisor's own stores return every matching row.
+        # The BA app's open list stays capped. Pass page= to load one slice instead.
+        rows = qs if (date_from or date_to or scope.supervisor or scope.head_office) else qs[:1000]
+        return Response({'results': [interception_payload(r) for r in rows]})
 
     if not scope.ambassador:
         return _forbidden('Only a BA records an interception.')
@@ -1806,17 +1890,16 @@ def ba_me(request):
         )
         return outcome == 'productive'
 
-    # Conversion = productive UserInterceptions ÷ total UserInterceptions for this BA × 100.
-    total_calls = mine_qs.count()
-    if total_calls:
-        productive_calls = (
-            mine_qs.filter(status='productive').count()
-            + mine_qs.filter(status='').exclude(current_sku='').count()
-            + mine_qs.filter(status__isnull=True).exclude(current_sku='').count()
-        )
-        conversion = round((productive_calls / total_calls) * 100, 1)
-    else:
-        conversion = 0.0
+    # Conversion = this BA's productive non-Tapal interceptions ÷ this BA's interceptions.
+    from .store_live import is_converted_interception
+
+    total_calls = 0
+    converted_calls = 0
+    for row in mine_qs.only('status', 'current_sku', 'previous_brand'):
+        total_calls += 1
+        if is_converted_interception(row.status, row.current_sku, row.previous_brand):
+            converted_calls += 1
+    conversion = round((converted_calls / total_calls) * 100, 1) if total_calls else 0.0
 
     productive_today = sum(1 for r in today_rows if _is_productive(r))
     week_goal = KpiConfig.normalize(KpiConfig.get_solo().config)['sessionTarget']

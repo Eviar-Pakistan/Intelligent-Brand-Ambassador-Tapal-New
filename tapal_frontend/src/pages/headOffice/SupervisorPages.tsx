@@ -40,7 +40,9 @@ import {
   SupervisorIncentiveCard,
   SupervisorStoreCards,
   SupervisorSummary,
+  supervisorCallTotals,
 } from '../supervisor/SupervisorViews'
+import { useUserInterceptions } from '../../lib/userInterceptions'
 import { useRoleBase } from './StoreCreation'
 
 const fieldClass =
@@ -513,6 +515,7 @@ async function downloadSupervisorLogins(list: Supervisor[]) {
 export function SupervisorsPage() {
   const base = useRoleBase()
   const supervisors = useSupervisors()
+  const interceptions = useUserInterceptions()
   useCreatedStores()
   const isMis = isMisUser(useDjangoUser())
   const [addOpen, setAddOpen] = useState(false)
@@ -561,7 +564,6 @@ export function SupervisorsPage() {
                 <th className="px-4 py-3">This week’s journey</th>
                 <th className="px-4 py-3">BAs</th>
                 <th className="px-4 py-3">Team conversion</th>
-                <th className="px-4 py-3">Coverage</th>
                 <th className="px-4 py-3">Actions</th>
               </tr>
             </thead>
@@ -590,8 +592,7 @@ export function SupervisorsPage() {
                       <JourneyPlanCell supervisorId={s.id} />
                     </td>
                     <td className="px-4 py-3">{new Set(o.bas.map((b) => b.id)).size}</td>
-                    <td className="px-4 py-3 font-semibold">{o.teamConversion}%</td>
-                    <td className="px-4 py-3 font-semibold">{o.coverage}%</td>
+                    <td className="px-4 py-3 font-semibold">{supervisorCallTotals(o.bas, interceptions).conversion}%</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1.5">
                         <Button size="sm" variant="secondary" onClick={() => setEditing(s.id)}>
@@ -614,7 +615,7 @@ export function SupervisorsPage() {
               })}
               {supervisors.length === 0 && (
                 <tr className="border-t border-slate-100">
-                  <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-400">
+                  <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
                     No supervisors yet. Use “Add supervisor” to create one.
                   </td>
                 </tr>

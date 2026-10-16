@@ -13,6 +13,7 @@ export type StoreInput = {
   storeCode: string
   name: string
   city: string
+  subtown: string
   footfall: Footfall
   address: string
   latitude: number | null
@@ -69,6 +70,7 @@ export type ApiStoreRow = {
   id: number
   name: string
   city: string
+  subtown?: string
   address?: string
   footfall?: string
   peak?: string[]
@@ -106,6 +108,7 @@ function remember(row: ApiStoreRow) {
     storeCode: (row.store_code || '').trim().toUpperCase(),
     name: row.name,
     city: row.city,
+    subtown: (row.subtown || '').trim(),
     footfall,
     address: row.address ?? '',
     latitude: Number.isFinite(latitude) ? latitude : null,
@@ -122,6 +125,7 @@ function remember(row: ApiStoreRow) {
     storeCode: record.storeCode,
     name: row.name,
     city: row.city,
+    subtown: (row.subtown || '').trim(),
     footfall,
     bas: row.bas ?? 0,
     coverage: row.coverage ?? 0,
@@ -235,6 +239,7 @@ export async function createStores(inputs: StoreInput[]): Promise<CreatedStore[]
         store_code: input.storeCode.trim().toUpperCase(),
         name: input.name.trim(),
         city: input.city.trim(),
+        subtown: input.subtown.trim(),
         address: input.address.trim(),
         footfall: input.footfall,
         peak_hours: input.peakHours,
@@ -337,6 +342,7 @@ const COLUMNS = [
   { key: 'storeCode', header: 'Store code', width: 16 },
   { key: 'name', header: 'Store name *', width: 30 },
   { key: 'city', header: 'City *', width: 16 },
+  { key: 'subtown', header: 'Subtown', width: 18 },
   { key: 'footfall', header: 'Footfall', width: 12 },
   { key: 'address', header: 'Address', width: 36 },
   { key: 'latitude', header: 'Latitude', width: 12 },
@@ -365,7 +371,7 @@ export async function downloadStoreTemplate() {
   const XLSX = await import('xlsx')
   const sheet = sheetWithPasteRoom(XLSX, [
     COLUMNS.map((c) => c.header),
-    ['', EXAMPLE_STORE, 'Lahore', 'High', 'Paste your stores over this row, or start on the next row', '', '', '5 PM - 9 PM', '', ''],
+    ['', EXAMPLE_STORE, 'Lahore', '', 'High', 'Paste your stores over this row, or start on the next row', '', '', '5 PM - 9 PM', '', ''],
   ])
   sheet['!cols'] = COLUMNS.map((c) => ({ wch: c.width }))
 
@@ -381,7 +387,7 @@ export async function downloadStoreTemplate() {
     ['6. Save the file, then upload it on the Stores page. Each store gets its own shopper QR code.'],
     [],
     COLUMNS.map((c) => c.header),
-    ['ST-4K7M2Q', 'Carrefour Johar Town', 'Lahore', 'High', 'Main Boulevard, Johar Town', 31.4697, 74.2728, '5 PM — 9 PM', 'Ali Raza', '0300-1234567'],
+    ['ST-4K7M2Q', 'Carrefour Johar Town', 'Lahore', 'Johar Town', 'High', 'Main Boulevard, Johar Town', 31.4697, 74.2728, '5 PM — 9 PM', 'Ali Raza', '0300-1234567'],
   ])
   help['!cols'] = COLUMNS.map((c) => ({ wch: c.width }))
 
@@ -480,6 +486,7 @@ export async function parseStoreFile(file: File): Promise<StoreParseResult> {
         storeCode,
         name,
         city,
+        subtown: cell(r, 'subtown'),
         footfall: footfall ?? 'Medium',
         address: cell(r, 'address'),
         latitude,

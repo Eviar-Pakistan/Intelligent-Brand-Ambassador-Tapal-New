@@ -5,9 +5,11 @@ import {
   Card,
   Modal,
   PageHeader,
+  ListPager,
   StatusBadge,
   TableScroll,
   Tabs,
+  usePagedList,
 } from '../../components/ui'
 import { useComplaints } from '../../context/ComplaintsContext'
 import {
@@ -48,6 +50,7 @@ export function ComplaintsPage() {
     if (tab === 'All') return byType
     return byType.filter((c) => c.status === tab)
   }, [byType, tab])
+  const complaintPage = usePagedList(filtered, `${typeTab}|${tab}`)
 
   const counts = useMemo(
     () => ({
@@ -166,7 +169,7 @@ export function ComplaintsPage() {
               )}
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filtered.map((c) => (
+              {complaintPage.rows.map((c) => (
                 <tr key={c.id} className="hover:bg-slate-50/80">
                   <td className="px-4 py-3 font-mono text-xs text-slate-500">{c.id}</td>
                   {c.kind === 'customer' && kind === 'customer' ? (
@@ -254,6 +257,14 @@ export function ComplaintsPage() {
             </tbody>
           </table>
         </TableScroll>
+        <ListPager
+          page={complaintPage.page}
+          pageCount={complaintPage.pageCount}
+          from={complaintPage.from}
+          to={complaintPage.to}
+          total={complaintPage.total}
+          onPage={complaintPage.setPage}
+        />
       </Card>
 
       <Modal

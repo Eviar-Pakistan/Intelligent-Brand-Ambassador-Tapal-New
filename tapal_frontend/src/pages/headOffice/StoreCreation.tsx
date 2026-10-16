@@ -89,6 +89,7 @@ export function CreateStorePage() {
           storeCode: form.storeCode.trim(),
           name,
           city: form.city,
+          subtown: '',
           footfall: form.footfall,
           address: form.address.trim(),
           latitude,

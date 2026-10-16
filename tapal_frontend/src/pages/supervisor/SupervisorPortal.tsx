@@ -5,7 +5,7 @@ import { BaAttendancePage } from '../headOffice/BaAttendancePage'
 import { SupervisorTargets } from './SupervisorTargets'
 import { SupervisorSales } from './SupervisorSales'
 import { EarlyCheckoutsCard } from '../../components/EarlyCheckoutsCard'
-import { Card, Modal, PageHeader, StatusBadge, TableScroll, Tabs } from '../../components/ui'
+import { Card, ListPager, Modal, PageHeader, StatusBadge, TableScroll, Tabs, usePagedList } from '../../components/ui'
 import { useComplaints } from '../../context/ComplaintsContext'
 import { formatComplaintDate, type Complaint } from '../../data/complaints'
 import { labeledSales, labeledStock, useDailyReports, type StoredDailyReport } from '../../lib/baReport'
@@ -64,7 +64,7 @@ export function SupervisorHomePage() {
 }
 
 export function SupervisorStoresPage() {
-  const { supervisor, header } = usePortal('Store Characteristics', 'coverage, footfall and peak hours')
+  const { supervisor, header } = usePortal('Store Characteristics', 'footfall and peak hours')
   return (
     <div className="space-y-5">
       {header}
@@ -107,13 +107,14 @@ function SupervisorComplaintList({ supervisor }: { supervisor: Supervisor }) {
     if (tab === 'Customer') return mine.filter((c) => c.kind === 'customer')
     return mine.filter((c) => c.kind === 'ba')
   }, [mine, tab])
+  const page = usePagedList(filtered, tab)
 
   return (
     <>
       <Tabs tabs={['All', 'Customer', 'BA']} value={tab} onChange={setTab} />
       <Card padding={false}>
         <ul className="divide-y divide-slate-100 sm:hidden">
-          {filtered.map((c) => (
+          {page.rows.map((c) => (
             <li key={c.id} className="space-y-2 px-4 py-3">
               <div className="flex min-w-0 items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -147,7 +148,7 @@ function SupervisorComplaintList({ supervisor }: { supervisor: Supervisor }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filtered.map((c) => (
+              {page.rows.map((c) => (
                 <tr key={c.id} className="hover:bg-slate-50/80">
                   <td className="px-4 py-3 font-medium text-slate-800">
                     {c.kind === 'customer' ? 'Customer' : 'BA'}
@@ -185,6 +186,14 @@ function SupervisorComplaintList({ supervisor }: { supervisor: Supervisor }) {
             </tbody>
           </table>
         </TableScroll>
+        <ListPager
+          page={page.page}
+          pageCount={page.pageCount}
+          from={page.from}
+          to={page.to}
+          total={page.total}
+          onPage={page.setPage}
+        />
       </Card>
 
       <Modal
@@ -282,13 +291,14 @@ export function SupervisorSubmissionsPage() {
     return reports.filter((report) => ids.has(report.baId))
   }, [reports, supervisor])
   const openReport = rows.find((report) => report.id === openId) ?? null
+  const page = usePagedList(rows, rows.length)
 
   return (
     <div className="space-y-5">
       {header}
       <Card padding={false}>
         <ul className="divide-y divide-slate-100 sm:hidden">
-          {rows.map((report) => (
+          {page.rows.map((report) => (
             <li key={report.id}>
               <button
                 type="button"
@@ -325,7 +335,7 @@ export function SupervisorSubmissionsPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((report) => (
+              {page.rows.map((report) => (
                 <tr key={report.id} className="border-t border-slate-100">
                   <td className="px-4 py-3 text-xs text-slate-500">{formatComplaintDate(report.submittedAt)}</td>
                   <td className="px-4 py-3 font-medium text-slate-900">
@@ -357,6 +367,14 @@ export function SupervisorSubmissionsPage() {
             </tbody>
           </table>
         </TableScroll>
+        <ListPager
+          page={page.page}
+          pageCount={page.pageCount}
+          from={page.from}
+          to={page.to}
+          total={page.total}
+          onPage={page.setPage}
+        />
       </Card>
       <Modal
         open={openReport != null}

@@ -381,6 +381,11 @@ export type SupervisorBa = {
   store: string
   state: 'Active' | 'Break' | 'Offline'
   conversion: number
+  totalInterceptions?: number
+  productiveCalls?: number
+  nonProductiveCalls?: number
+  /** Productive interceptions whose previous brand is not Tapal. */
+  convertedCalls?: number
   points: number
   sessions: number
   score: number

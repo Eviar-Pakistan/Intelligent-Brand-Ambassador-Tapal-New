@@ -1,21 +1,44 @@
-import { Avatar, Card, CardHeader, KpiCard, ProgressBar, StatusBadge, TableScroll } from '../../components/ui'
+import { Avatar, Card, CardHeader, KpiCard, ListPager, StatusBadge, TableScroll, usePagedList } from '../../components/ui'
 import { calculateSupervisorIncentive, formatPkr } from '../../lib/incentives'
 import { useKpiConfig } from '../../lib/kpiConfig'
 import { findCreatedStore, useCreatedStores } from '../../lib/storeRegistry'
-import { supervisorOverview, type Supervisor } from '../../lib/supervisors'
+import { supervisorOverview, type Supervisor, type SupervisorBa } from '../../lib/supervisors'
+import { baInterceptionStats, useUserInterceptions } from '../../lib/userInterceptions'
 
 /** The sections of a supervisor's view. Used in their own portal and on Head Office's supervisor page. */
 
+export function supervisorCallTotals(bas: SupervisorBa[], interceptions: ReturnType<typeof useUserInterceptions>) {
+  const unique = [...new Map(bas.map((ba) => [ba.id, withCallCounts(ba, interceptions)])).values()]
+  const fromServer = unique.length > 0 && unique.every((ba) => typeof ba.totalInterceptions === 'number' && typeof ba.convertedCalls === 'number')
+  if (fromServer) {
+    const totalInterceptions = unique.reduce((sum, ba) => sum + (ba.totalInterceptions ?? 0), 0)
+    const productiveCalls = unique.reduce((sum, ba) => sum + (ba.productiveCalls ?? 0), 0)
+    const nonProductiveCalls = unique.reduce((sum, ba) => sum + (ba.nonProductiveCalls ?? 0), 0)
+    const converted = unique.reduce((sum, ba) => sum + (ba.convertedCalls ?? 0), 0)
+    return {
+      totalInterceptions,
+      productiveCalls,
+      nonProductiveCalls,
+      conversion: totalInterceptions ? Math.round((converted / totalInterceptions) * 1000) / 10 : 0,
+    }
+  }
+  const ids = new Set(unique.map((ba) => ba.id))
+  return baInterceptionStats(interceptions.filter((row) => ids.has(row.baId)))
+}
+
 export function SupervisorSummary({ supervisor }: { supervisor: Supervisor }) {
   useCreatedStores()
+  const interceptions = useUserInterceptions()
   const o = supervisorOverview(supervisor)
+  const calls = supervisorCallTotals(o.bas, interceptions)
   return (
-    <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
       <KpiCard label="Stores" value={o.stores.length} />
       <KpiCard label="Ambassadors" value={new Set(o.bas.map((b) => b.id)).size} />
-      <KpiCard label="Team conversion" value={`${o.teamConversion}%`} hint="Average of their BAs" />
-      <KpiCard label="Store coverage" value={`${o.coverage}%`} hint="Average of their stores" />
-      <KpiCard label="Today's footfall" value={o.todayFootfall.toLocaleString()} />
+      <KpiCard label="Total interceptions" value={calls.totalInterceptions.toLocaleString()} hint="All of their BAs" />
+      <KpiCard label="Productive calls" value={calls.productiveCalls.toLocaleString()} />
+      <KpiCard label="Non-productive" value={calls.nonProductiveCalls.toLocaleString()} />
+      <KpiCard label="Team conversion" value={`${calls.conversion}%`} hint="Productive, previous brand not Tapal, divided by all their interceptions" />
     </div>
   )
 }
@@ -51,17 +74,8 @@ export function SupervisorStoreCards({ supervisor }: { supervisor: Supervisor })
               </div>
             </div>
 
-            <div className="mt-4">
-              <div className="mb-1 flex justify-between text-xs text-slate-500">
-                <span>BA coverage</span>
-                <span className="font-semibold text-slate-800">{s.coverage}%</span>
-              </div>
-              <ProgressBar value={s.coverage} />
-            </div>
-
-            <div className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-3">
+            <div className="mt-4 grid grid-cols-2 gap-2 text-center">
               <Stat label="Engagement" value={`${s.engagement}%`} />
-              <Stat label="Conversion" value={`${s.conversion}%`} />
               <Stat label="Footfall today" value={s.todayFootfall.toLocaleString()} />
             </div>
 
@@ -82,10 +96,18 @@ export function SupervisorStoreCards({ supervisor }: { supervisor: Supervisor })
   )
 }
 
+function withCallCounts(ba: SupervisorBa, interceptions: ReturnType<typeof useUserInterceptions>): SupervisorBa {
+  if (typeof ba.totalInterceptions === 'number') return ba
+  const stats = baInterceptionStats(interceptions.filter((row) => row.baId === ba.id))
+  return { ...ba, ...stats }
+}
+
 export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
   useCreatedStores()
+  const interceptions = useUserInterceptions()
   const { bas } = supervisorOverview(supervisor)
-  const sorted = [...bas].sort((a, b) => b.conversion - a.conversion)
+  const sorted = bas.map((ba) => withCallCounts(ba, interceptions)).sort((a, b) => b.conversion - a.conversion)
+  const page = usePagedList(sorted, sorted.map((ba) => ba.id).join())
 
   return (
     <Card padding={false}>
@@ -93,7 +115,7 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
         <CardHeader title="BA performance" subtitle="Ambassadors working in your stores" />
       </div>
       <ul className="divide-y divide-slate-100 sm:hidden">
-        {sorted.map((b) => (
+        {page.rows.map((b) => (
           <li key={`${b.id}-${b.storeId}`} className="px-4 py-3">
             <div className="flex items-start justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2">
@@ -105,7 +127,10 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
               </div>
               <StatusBadge status={b.state} />
             </div>
-            <div className="mt-2 grid grid-cols-1 gap-2 text-center">
+            <div className="mt-2 grid grid-cols-2 gap-2 text-center">
+              <Stat label="Total interceptions" value={String(b.totalInterceptions ?? 0)} />
+              <Stat label="Productive calls" value={String(b.productiveCalls ?? 0)} />
+              <Stat label="Non-productive" value={String(b.nonProductiveCalls ?? 0)} />
               <Stat label="Conversion" value={`${b.conversion}%`} />
             </div>
           </li>
@@ -114,18 +139,21 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
           <li className="px-4 py-6 text-center text-sm text-slate-400">No ambassadors are assigned to these stores yet.</li>
         )}
       </ul>
-      <TableScroll minWidth={640} className="hidden sm:block">
+      <TableScroll minWidth={960} className="hidden sm:block">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
             <tr>
               <th className="px-4 py-3">BA</th>
               <th className="px-4 py-3">Store</th>
               <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Total interceptions</th>
+              <th className="px-4 py-3">Productive calls</th>
+              <th className="px-4 py-3">Non-productive</th>
               <th className="px-4 py-3">Conversion</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.map((b) => (
+            {page.rows.map((b) => (
               <tr key={`${b.id}-${b.storeId}`} className="border-t border-slate-100">
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
@@ -137,12 +165,15 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
                 <td className="px-4 py-3">
                   <StatusBadge status={b.state} />
                 </td>
+                <td className="px-4 py-3 tabular-nums">{b.totalInterceptions ?? 0}</td>
+                <td className="px-4 py-3 tabular-nums">{b.productiveCalls ?? 0}</td>
+                <td className="px-4 py-3 tabular-nums">{b.nonProductiveCalls ?? 0}</td>
                 <td className="px-4 py-3 font-semibold">{b.conversion}%</td>
               </tr>
             ))}
             {sorted.length === 0 && (
               <tr className="border-t border-slate-100">
-                <td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-400">
+                <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-400">
                   No ambassadors are assigned to these stores yet.
                 </td>
               </tr>
@@ -150,6 +181,14 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
           </tbody>
         </table>
       </TableScroll>
+      <ListPager
+        page={page.page}
+        pageCount={page.pageCount}
+        from={page.from}
+        to={page.to}
+        total={page.total}
+        onPage={page.setPage}
+      />
     </Card>
   )
 }
@@ -157,24 +196,26 @@ export function SupervisorBaTable({ supervisor }: { supervisor: Supervisor }) {
 export function SupervisorIncentiveCard({ supervisor }: { supervisor: Supervisor }) {
   const config = useKpiConfig()
   useCreatedStores()
+  const interceptions = useUserInterceptions()
   const pay = calculateSupervisorIncentive(supervisor, config)
+  const conversion = supervisorCallTotals(supervisorOverview(supervisor).bas, interceptions).conversion
+  const conversionPay = config.supConversionTarget
+    ? Math.round((conversion / config.supConversionTarget) * config.supConversionAmount)
+    : 0
+  const total = pay.base + conversionPay
 
   return (
     <Card>
       <CardHeader title="Supervisor incentive" subtitle="This week · calculated from the KPIs set by Head Office" />
       <div className="rounded-xl bg-navy-900 px-4 py-3 text-white">
         <div className="text-xs text-emerald-200">Total this week</div>
-        <div className="text-2xl font-black">{formatPkr(pay.totalPkr)}</div>
+        <div className="text-2xl font-black">{formatPkr(total)}</div>
       </div>
       <div className="mt-3 text-sm">
         <PayRow label="Base pay" value={formatPkr(pay.base)} />
         <PayRow
-          label={`Team conversion (${pay.teamConversion}% of ${config.supConversionTarget}% → ${formatPkr(config.supConversionAmount)})`}
-          value={formatPkr(pay.conversionPay)}
-        />
-        <PayRow
-          label={`Store coverage (${pay.coverage}% of ${config.supCoverageTarget}% → ${formatPkr(config.supCoverageAmount)})`}
-          value={formatPkr(pay.coveragePay)}
+          label={`Team conversion (${conversion}% of ${config.supConversionTarget}% → ${formatPkr(config.supConversionAmount)})`}
+          value={formatPkr(conversionPay)}
         />
       </div>
     </Card>

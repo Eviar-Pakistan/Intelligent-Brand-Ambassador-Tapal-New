@@ -409,6 +409,61 @@ export function PageHeader({
   )
 }
 
+export const LIST_PAGE_SIZE = 50
+
+/** Slice a loaded list into pages. `resetKey` returns to page 1 when the filter changes. */
+export function usePagedList<T>(items: T[], resetKey: unknown = items.length) {
+  const [page, setPage] = useState(1)
+  const pageCount = Math.max(1, Math.ceil(items.length / LIST_PAGE_SIZE))
+  const safePage = Math.min(page, pageCount)
+  useEffect(() => {
+    setPage(1)
+  }, [resetKey])
+  const start = (safePage - 1) * LIST_PAGE_SIZE
+  return {
+    page: safePage,
+    setPage,
+    pageCount,
+    rows: items.slice(start, start + LIST_PAGE_SIZE),
+    from: items.length ? start + 1 : 0,
+    to: Math.min(start + LIST_PAGE_SIZE, items.length),
+    total: items.length,
+  }
+}
+
+export function ListPager({
+  page,
+  pageCount,
+  from,
+  to,
+  total,
+  onPage,
+}: {
+  page: number
+  pageCount: number
+  from: number
+  to: number
+  total: number
+  onPage: (page: number) => void
+}) {
+  if (total <= LIST_PAGE_SIZE) return null
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 text-sm text-slate-600">
+      <span>
+        {from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()}
+      </span>
+      <div className="flex gap-2">
+        <Button variant="secondary" disabled={page <= 1} onClick={() => onPage(Math.max(1, page - 1))}>
+          Previous
+        </Button>
+        <Button variant="secondary" disabled={page >= pageCount} onClick={() => onPage(page + 1)}>
+          Next
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 /** Horizontal scroll wrapper for data tables. */
 export function TableScroll({
   children,

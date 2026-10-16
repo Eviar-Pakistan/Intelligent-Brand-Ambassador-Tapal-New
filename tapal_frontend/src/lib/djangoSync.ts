@@ -108,6 +108,7 @@ export function pushStores(inputs: StoreInput[]) {
         store_code: input.storeCode,
         name: input.name,
         city: input.city,
+        subtown: input.subtown,
         address: input.address,
         footfall: input.footfall,
         peak_hours: input.peakHours,

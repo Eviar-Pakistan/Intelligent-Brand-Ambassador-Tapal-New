@@ -83,7 +83,7 @@ def build_intelligence_overview(scope: CityScope = ALL) -> dict:
         switch_answers = answers_by_qid.get(str(switch_q.id), [])
     yes = sum(1 for a in switch_answers if a.lower().startswith('yes'))
     maybe = sum(1 for a in switch_answers if 'maybe' in a.lower())
-    # HO conversion: productive UserInterceptions ÷ total UserInterceptions × 100.
+    # HO conversion: productive non-Tapal previous brands ÷ total UserInterceptions × 100.
     from .store_live import interception_counts
 
     _i_store, _i_ba, i_by_day, (i_productive, i_total) = interception_counts(
@@ -309,7 +309,8 @@ def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
     Rank every active BA on what they did in the field this week (all BAs are deployed; training
     is for retraining, so certification status does not affect the ranking):
 
-      conversion = (UserInterception status=productive count ÷ that BA's total UserInterception count) × 100
+      conversion = (productive UserInterceptions whose previous brand is not Tapal
+                    ÷ that BA's total UserInterception count) × 100
 
       points = 50 per day Present (checked in + report + checked out)
              + 20 per day only checked in
@@ -357,12 +358,18 @@ def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
             week_sessions[row.ambassador_id][1] += 1
 
     # Conversion for each BA: all of their UserInterception rows (not limited to this week).
-    # lifetime[ba_id] = [total_calls, productive_calls]
-    lifetime: dict[int, list[int]] = defaultdict(lambda: [0, 0])
-    for row in UserInterception.objects.filter(ambassador_id__in=ids).only('ambassador_id', 'status', 'current_sku'):
+    # lifetime[ba_id] = [total_calls, productive_calls, converted_calls]
+    from .store_live import is_converted_interception
+
+    lifetime: dict[int, list[int]] = defaultdict(lambda: [0, 0, 0])
+    for row in UserInterception.objects.filter(ambassador_id__in=ids).only(
+        'ambassador_id', 'status', 'current_sku', 'previous_brand'
+    ):
         lifetime[row.ambassador_id][0] += 1
         if _is_productive(row.status, row.current_sku):
             lifetime[row.ambassador_id][1] += 1
+        if is_converted_interception(row.status, row.current_sku, row.previous_brand):
+            lifetime[row.ambassador_id][2] += 1
 
     # This month's target achievement
     targets = {
@@ -394,8 +401,8 @@ def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
         days_present = len(present[ba.id])
         days_in_only = len(checked_in[ba.id] - present[ba.id])
         week_total, week_productive = week_sessions.get(ba.id, [0, 0])
-        total_calls, productive_calls = lifetime.get(ba.id, [0, 0])
-        conversion = _pct(productive_calls, total_calls) if total_calls else 0.0
+        total_calls, productive_calls, converted_calls = lifetime.get(ba.id, [0, 0, 0])
+        conversion = _pct(converted_calls, total_calls) if total_calls else 0.0
         target = targets.get(ba.id)
         achievement = (
             round(float(target.sales_total) / float(target.target_total) * 100, 1)
@@ -432,8 +439,8 @@ def build_ba_leaderboard(scope: CityScope = ALL) -> dict:
                 'interactions': week_total,
                 'productive': productive_calls,
                 'totalCalls': total_calls,
-                # Kept for older clients; productive count used in conversion numerator.
-                'switched': productive_calls,
+                # Kept for older clients. Conversion uses converted calls, not this count.
+                'switched': converted_calls,
                 'conversion': conversion,
                 'target_achievement': achievement,
                 'customer_rating': rating,
@@ -489,7 +496,7 @@ def _operations_today(scope: CityScope = ALL) -> dict:
 
 
 def _conversion_between(start, end, switch_id: str | None, scope: CityScope = ALL) -> float:
-    """Period conversion: productive ÷ total UserInterceptions (fallback: survey Yes)."""
+    """Period conversion: productive non-Tapal previous brands ÷ total UserInterceptions (fallback: survey Yes)."""
     from .store_live import interception_counts
 
     _s, _b, _d, (i_productive, i_total) = interception_counts(

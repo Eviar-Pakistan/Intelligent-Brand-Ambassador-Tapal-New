@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import { Card, SearchInput, TableScroll } from '../../components/ui'
+import { Card, ListPager, SearchInput, TableScroll, usePagedList } from '../../components/ui'
 import { achievementPct, currentMonthKey, formatTargetMonth, type BaMonthTarget } from '../../lib/baTargets'
 import { portalGet } from '../../lib/serverApi'
 
@@ -52,6 +52,7 @@ export function SupervisorTargets() {
       (r) => !q || [r.baName, r.baCode, r.storeName, r.storeCode].some((v) => (v ?? '').toLowerCase().includes(q)),
     )
   }, [rows, query])
+  const page = usePagedList(visible, `${month}|${query}`)
 
   const totalTarget = visible.reduce((sum, r) => sum + r.targetKg, 0)
   const totalSales = visible.reduce((sum, r) => sum + r.salesKg, 0)
@@ -101,7 +102,7 @@ export function SupervisorTargets() {
         ) : (
           <>
           <ul className="divide-y divide-slate-100 sm:hidden">
-            {visible.map((r) => {
+            {page.rows.map((r) => {
               const pct = achievementPct(r.targetKg, r.salesKg)
               const lines = r.lines ?? []
               const expanded = open === r.id
@@ -161,7 +162,7 @@ export function SupervisorTargets() {
                 </tr>
               </thead>
               <tbody>
-                {visible.map((r) => {
+                {page.rows.map((r) => {
                   const pct = achievementPct(r.targetKg, r.salesKg)
                   const lines = r.lines ?? []
                   const expanded = open === r.id
@@ -230,6 +231,14 @@ export function SupervisorTargets() {
               </tbody>
             </table>
           </TableScroll>
+          <ListPager
+            page={page.page}
+            pageCount={page.pageCount}
+            from={page.from}
+            to={page.to}
+            total={page.total}
+            onPage={page.setPage}
+          />
           </>
         )}
       </Card>

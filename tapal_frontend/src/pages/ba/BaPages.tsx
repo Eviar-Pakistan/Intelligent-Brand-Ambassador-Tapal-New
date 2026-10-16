@@ -43,7 +43,7 @@ import { FaceCheckInModal } from '../../components/FaceCheckInModal'
 import { Modal } from '../../components/ui'
 import { useBaSession } from '../../lib/baAccounts'
 import { recordEarlyCheckout } from '../../lib/earlyCheckouts'
-import { useUserInterceptions } from '../../lib/userInterceptions'
+import { countsTowardConversion, useUserInterceptions } from '../../lib/userInterceptions'
 import { BaOnboarding } from './BaOnboarding'
 import { loadSkuCatalogue, type SkuRow } from '../../lib/skuCatalogue'
 
@@ -1214,6 +1214,13 @@ export function BaPerformancePage() {
   const me = useBaMe()
   const { account } = useBaSession()
   const reports = useDailyReports()
+  const interceptions = useUserInterceptions()
+  const conversion = useMemo(() => {
+    const mine = interceptions.filter((row) => row.baId === (account?.id ?? ''))
+    if (!mine.length) return me?.conversion ?? 0
+    const converted = mine.filter((row) => countsTowardConversion(row)).length
+    return Math.round((converted / mine.length) * 1000) / 10
+  }, [interceptions, account?.id, me?.conversion])
   const [period, setPeriod] = useState<RewardPeriod>('month')
   const [catalogue, setCatalogue] = useState<SkuRow[]>([])
   useEffect(() => { void loadSkuCatalogue().then(setCatalogue) }, [])
@@ -1240,7 +1247,7 @@ export function BaPerformancePage() {
   // Pay: base + conversion and session incentives, from the KPI settings Head Office set.
   const pay = me
     ? calculateIncentive(
-        { baId: '', name: me.name, city: me.city, rank: me.rank ?? 0, conversion: me.conversion, sessions: me.weekSessions },
+        { baId: '', name: me.name, city: me.city, rank: me.rank ?? 0, conversion, sessions: me.weekSessions },
         kpi,
       )
     : null
@@ -1278,7 +1285,7 @@ export function BaPerformancePage() {
       <div className="grid grid-cols-3 gap-2">
         <BaStatPill label="Rating" value={me?.rating != null ? `${me.rating} ★` : '—'} />
         <BaStatPill label="Days worked" value={me ? String(me.daysWorked) : '—'} />
-        <BaStatPill label="Conversion" value={me ? `${me.conversion}%` : '—'} />
+        <BaStatPill label="Conversion" value={me ? `${conversion}%` : '—'} />
       </div>
 
       <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
@@ -1318,7 +1325,7 @@ export function BaPerformancePage() {
         <div className="text-sm font-bold text-slate-900">PKR breakdown</div>
         <div className="mt-3 space-y-2.5">
           <BaPayRow label="Base pay" value={pay?.base ?? 0} />
-          <BaPayRow label={`Conversion (${me?.conversion ?? 0}%)`} value={pay?.conversionPay ?? 0} />
+          <BaPayRow label={`Conversion (${conversion}%)`} value={pay?.conversionPay ?? 0} />
           <BaPayRow label={`Sessions (${me?.weekSessions ?? 0} this week)`} value={pay?.sessionPay ?? 0} />
         </div>
         <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">

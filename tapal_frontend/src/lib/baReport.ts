@@ -912,6 +912,136 @@ export function reportSalesInRange(
   return totals
 }
 
+/**
+ * Kilograms sold per SKU in a date range. Same reports, filters, and unit→kg rules as reportSalesInRange.
+ */
+export function reportSalesKgBySku(
+  reports: StoredDailyReport[],
+  range: { start: Date; end: Date },
+  options?: {
+    towns?: string[]
+    stores?: string[]
+    skus?: string[]
+    baIds?: string[]
+    catalogue?: SkuRow[]
+    targetLinesByBa?: Map<string, { sku: string; grammage?: number }[]>
+  },
+) {
+  const startKey = localDayKey(range.start)
+  const endKey = localDayKey(range.end)
+  const towns = options?.towns ?? []
+  const stores = options?.stores ?? []
+  const baIds = options?.baIds?.length ? new Set(options.baIds) : null
+  const wanted = new Set((options?.skus ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean))
+  const catalogue = options?.catalogue ?? []
+  const byDayBa = new Map<string, StoredDailyReport>()
+
+  for (const report of [...reports].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))) {
+    if (!report.baId || isDemoBa(report.baId)) continue
+    if (baIds && !baIds.has(report.baId)) continue
+    const day = localDayKey(report.submittedAt)
+    if (day < startKey || day > endKey) continue
+    if (towns.length && !towns.some((t) => t.toLowerCase() === (report.city ?? '').trim().toLowerCase())) continue
+    if (stores.length && !stores.includes(report.storeName?.trim() || '')) continue
+    const skuLines = labeledSales(report.sales).filter((line) => line.section.toLowerCase().includes('sales'))
+    const hasSalesSubmission =
+      report.source === 'checkout' ||
+      (report.source === 'excel' && skuLines.some((line) => Number(line.value) > 0))
+    if (!hasSalesSubmission) continue
+    byDayBa.set(`${report.baId}|${day}`, report)
+  }
+
+  const totals = new Map<string, { label: string; kg: number }>()
+  for (const report of byDayBa.values()) {
+    const targetLines = options?.targetLinesByBa?.get(report.baId) ?? []
+    const fromUnits = new Map<string, { label: string; kg: number }>()
+    const fromKg = new Map<string, { label: string; kg: number }>()
+    for (const line of labeledSales(report.sales).filter((row) => row.section.toLowerCase().includes('sales'))) {
+      const section = line.section.toLowerCase()
+      const amount = Number(line.value)
+      if (!Number.isFinite(amount) || amount <= 0) continue
+      const label = canonicalSkuName(line.item.trim())
+      if (!label) continue
+      if (wanted.size && !wanted.has(label.toLowerCase())) continue
+      const key = label.toLowerCase()
+      const bucket = section.includes('(units)') ? fromUnits : fromKg
+      const grams = packKgForSales(label, catalogue, targetLines)
+      const kg = section.includes('(units)') ? grams * amount : amount
+      if (kg <= 0) continue
+      const current = bucket.get(key) ?? { label, kg: 0 }
+      current.kg += kg
+      bucket.set(key, current)
+    }
+    // One kilogram figure per SKU. A kg line wins; otherwise packs × kg per pack.
+    const keys = new Set([...fromKg.keys(), ...fromUnits.keys()])
+    for (const key of keys) {
+      const chosen = fromKg.get(key) ?? fromUnits.get(key)
+      if (!chosen || chosen.kg <= 0) continue
+      const current = totals.get(key) ?? { label: chosen.label, kg: 0 }
+      current.kg += chosen.kg
+      totals.set(key, current)
+    }
+  }
+  return totals
+}
+
+/** Kilograms sold on each calendar day. Same reports, filters, and unit→kg rules as reportSalesInRange. */
+export function reportSalesKgByDay(
+  reports: StoredDailyReport[],
+  range: { start: Date; end: Date },
+  options?: {
+    towns?: string[]
+    stores?: string[]
+    skus?: string[]
+    baIds?: string[]
+    catalogue?: SkuRow[]
+    targetLinesByBa?: Map<string, { sku: string; grammage?: number }[]>
+  },
+) {
+  const startKey = localDayKey(range.start)
+  const endKey = localDayKey(range.end)
+  const towns = options?.towns ?? []
+  const stores = options?.stores ?? []
+  const baIds = options?.baIds?.length ? new Set(options.baIds) : null
+  const wanted = new Set((options?.skus ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean))
+  const catalogue = options?.catalogue ?? []
+  const byDayBa = new Map<string, StoredDailyReport>()
+
+  for (const report of [...reports].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))) {
+    if (!report.baId || isDemoBa(report.baId)) continue
+    if (baIds && !baIds.has(report.baId)) continue
+    const day = localDayKey(report.submittedAt)
+    if (day < startKey || day > endKey) continue
+    if (towns.length && !towns.some((t) => t.toLowerCase() === (report.city ?? '').trim().toLowerCase())) continue
+    if (stores.length && !stores.includes(report.storeName?.trim() || '')) continue
+    const skuLines = labeledSales(report.sales).filter((line) => line.section.toLowerCase().includes('sales'))
+    const hasSalesSubmission =
+      report.source === 'checkout' ||
+      (report.source === 'excel' && skuLines.some((line) => Number(line.value) > 0))
+    if (!hasSalesSubmission) continue
+    byDayBa.set(`${report.baId}|${day}`, report)
+  }
+
+  const totals = new Map<string, number>()
+  for (const report of byDayBa.values()) {
+    const day = localDayKey(report.submittedAt)
+    const targetLines = options?.targetLinesByBa?.get(report.baId) ?? []
+    let kg = 0
+    for (const line of labeledSales(report.sales).filter((row) => row.section.toLowerCase().includes('sales'))) {
+      const amount = Number(line.value)
+      if (!Number.isFinite(amount) || amount <= 0) continue
+      const label = line.item.trim()
+      if (!label) continue
+      if (wanted.size && !wanted.has(label.toLowerCase())) continue
+      const grams = packKgForSales(label, catalogue, targetLines)
+      kg += line.section.toLowerCase().includes('(units)') ? grams * amount : amount
+    }
+    if (kg <= 0) continue
+    totals.set(day, (totals.get(day) ?? 0) + kg)
+  }
+  return totals
+}
+
 /** Single-BA helper used by the BA Rewards screen (same math as reportSalesInRange). */
 export function baSalesForPeriod(
   reports: StoredDailyReport[],

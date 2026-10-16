@@ -10,9 +10,11 @@ import {
   ProgressRing,
   ScoreBars,
   SearchInput,
+  ListPager,
   StatusBadge,
   TableScroll,
   Tabs,
+  usePagedList,
 } from '../../components/ui'
 import { Check, Copy, Download, ExternalLink, Eye, FileSpreadsheet, Upload, UserPlus, X } from 'lucide-react'
 import { djangoFetch, djangoToken, isMisUser, useDjangoUser } from '../../lib/djangoApi'
@@ -727,6 +729,7 @@ export function AmbassadorsPage() {
     const query = q.toLowerCase()
     return matchTab && (a.name.toLowerCase().includes(query) || (a.storeName ?? '').toLowerCase().includes(query))
   })
+  const accountPage = usePagedList(filteredAccounts, `${q}|${tab}`)
 
   return (
     <div>
@@ -785,7 +788,7 @@ export function AmbassadorsPage() {
             </tr>
           </thead>
           <tbody>
-            {filteredAccounts.map((a) => (
+            {accountPage.rows.map((a) => (
               <tr key={a.id} className="border-t border-slate-100 hover:bg-slate-50/70">
                 <td className="px-4 py-3 font-mono text-sm font-semibold text-slate-800">{a.baCode || '—'}</td>
                 <td className="px-4 py-3">
@@ -878,6 +881,14 @@ export function AmbassadorsPage() {
           </tbody>
         </table>
         </TableScroll>
+        <ListPager
+          page={accountPage.page}
+          pageCount={accountPage.pageCount}
+          from={accountPage.from}
+          to={accountPage.to}
+          total={accountPage.total}
+          onPage={accountPage.setPage}
+        />
       </Card>
 
       <CreateAmbassadorModal

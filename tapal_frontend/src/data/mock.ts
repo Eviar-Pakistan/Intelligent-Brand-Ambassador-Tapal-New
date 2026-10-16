@@ -425,6 +425,7 @@ export type Store = {
   storeCode: string
   name: string
   city: string
+  subtown: string
   footfall: 'High' | 'Medium' | 'Low'
   bas: number
   coverage: number

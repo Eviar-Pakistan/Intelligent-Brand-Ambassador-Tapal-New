@@ -13,7 +13,7 @@ import { aiRecommendations } from '../../data/mock'
 import { useBrand } from '../../context/BrandContext'
 import { LiveStoreMap, type StoreMapPin } from '../../components/LiveStoreMap'
 import { djangoFetch, djangoToken } from '../../lib/djangoApi'
-import { Button, Card, CardHeader, KpiCard, Modal, ProgressBar } from '../../components/ui'
+import { Button, Card, CardHeader, KpiCard, ListPager, Modal, ProgressBar, usePagedList } from '../../components/ui'
 import {
   downloadReportExtract,
   labeledSales,
@@ -350,6 +350,7 @@ export function BaDailyReportsPage() {
         return name.includes(query) || code.includes(query)
       })
     : reports
+  const reportPage = usePagedList(filteredReports, nameQuery)
 
   function extract(kind: ExtractKind) {
     if (filteredReports.length === 0) return
@@ -419,7 +420,7 @@ export function BaDailyReportsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredReports.map((report) => (
+                    {reportPage.rows.map((report) => (
                       <tr key={report.id} className="border-t border-slate-100">
                         <td className="py-2.5 pr-3">
                           <div className="font-semibold text-slate-900">{report.baName}</div>
@@ -451,6 +452,14 @@ export function BaDailyReportsPage() {
                 </table>
               </div>
             )}
+            <ListPager
+              page={reportPage.page}
+              pageCount={reportPage.pageCount}
+              from={reportPage.from}
+              to={reportPage.to}
+              total={reportPage.total}
+              onPage={reportPage.setPage}
+            />
           </>
         )}
       </Card>

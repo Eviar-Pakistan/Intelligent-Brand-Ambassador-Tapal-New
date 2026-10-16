@@ -518,7 +518,7 @@ class LiveStoreTests(PortalTestBase):
     def test_conversion_and_engagement_include_interceptions(self):
         from .models import UserInterception
 
-        # Conversion = productive ÷ total UserInterceptions (not previous-brand switch).
+        # Conversion = productive and previous brand is not Tapal ÷ total interceptions.
         statuses = ['productive', 'productive', 'non_productive', 'productive']
         for i, status in enumerate(statuses):
             UserInterception.objects.create(

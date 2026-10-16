@@ -9,6 +9,7 @@ import { baCurrentStore, useCreatedStores } from '../../lib/storeRegistry'
 import { portalGet } from '../../lib/serverApi'
 import {
   INTERCEPTION_STATUSES,
+  PREVIOUS_BRANDS,
   submitUserInterception,
   type InterceptionStatus,
   type PurchasedSkuQty,
@@ -214,12 +215,14 @@ export function BaInterceptionPage() {
           />
         </Field>
         <Field label="Previous brand usership">
-          <input
-            className={fieldClass}
-            value={form.previousBrand}
-            onChange={set('previousBrand')}
-            placeholder="Lipton"
-          />
+          <select className={fieldClass} value={form.previousBrand} onChange={set('previousBrand')}>
+            <option value="">Select brand</option>
+            {PREVIOUS_BRANDS.map((brand) => (
+              <option key={brand} value={brand}>
+                {brand}
+              </option>
+            ))}
+          </select>
         </Field>
         <Field label="Previous SKU usership">
           <input

@@ -1,8 +1,8 @@
-import { useUserInterceptions } from '../../lib/userInterceptions'
+import { baInterceptionStats, useUserInterceptions } from '../../lib/userInterceptions'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
 import { Download, RotateCcw, Search } from 'lucide-react'
-import { Button, Card, CardHeader, cn, KpiCard, TableScroll } from '../../components/ui'
+import { Button, Card, CardHeader, cn, KpiCard, ListPager, TableScroll, usePagedList } from '../../components/ui'
 import {
   aggregateBaPerformance,
   MONTH_ORDER,
@@ -11,7 +11,6 @@ import {
   type BaPerformanceRecord,
 } from '../../data/baPerformance'
 import {
-  categoryColors,
   chartGold,
   chartGreen,
   chartGreenLight,
@@ -22,12 +21,30 @@ import {
 import type { ChartData, ChartOptions } from 'chart.js'
 import { achievementPct, useBaTargets } from '../../lib/baTargets'
 import { isDemoBa, useBaAccounts } from '../../lib/baAccounts'
-import { reportSalesInRange, syncDailyReports, useDailyReports } from '../../lib/baReport'
+import { reportSalesInRange, reportSalesKgByDay, reportSalesKgBySku, syncDailyReports, useDailyReports } from '../../lib/baReport'
 import { syncBaTargets } from '../../lib/djangoSync'
 import { useDjangoUser } from '../../lib/djangoApi'
 import { loadSkuCatalogue, type SkuRow } from '../../lib/skuCatalogue'
+import { canonicalSkuName } from '../../lib/skuNames'
 import { useCreatedStores } from '../../lib/storeRegistry'
 import { stores as allStores } from '../../data/mock'
+
+const SALES_BRANDS = ['Danedar', 'Family Mixture', 'Tezdum', 'Green Tea'] as const
+const BRAND_COLORS: Record<(typeof SALES_BRANDS)[number], string> = {
+  Danedar: '#dc2626',
+  'Family Mixture': '#f87171',
+  Tezdum: '#fbbf24',
+  'Green Tea': '#16a34a',
+}
+
+/** One of the four sales brands, or null when the SKU belongs to another range. */
+function brandForSku(label: string, catalogue: SkuRow[], brandBySku: Map<string, string>) {
+  const name = canonicalSkuName(label).trim()
+  const key = name.toLowerCase()
+  const listed = catalogue.find((row) => canonicalSkuName(row.sku).trim().toLowerCase() === key)
+  const raw = (listed?.range?.trim() || brandBySku.get(key) || '').toLowerCase()
+  return SALES_BRANDS.find((brand) => brand.toLowerCase() === raw) ?? null
+}
 
 function EmptyRow({ cols }: { cols: number }) {
   return (
@@ -177,6 +194,14 @@ function monthNameFromDate(d: Date) {
   return MONTH_ORDER[d.getMonth()]
 }
 
+/** Monday of the week that contains this date (local calendar). */
+function startOfWeekMonday(date: Date) {
+  const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const weekday = monday.getDay()
+  monday.setDate(monday.getDate() - (weekday === 0 ? 6 : weekday - 1))
+  return monday
+}
+
 function monthsTouched(start: Date, end: Date) {
   const names: string[] = []
   for (let d = new Date(start); d <= end; d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)) {
@@ -277,6 +302,7 @@ export function BaPerformanceDashboardPage() {
   const snapshotRef = useRef<HTMLDivElement>(null)
   const [downloading, setDownloading] = useState(false)
   const [towns, setTowns] = useState<string[]>([])
+  const [subtowns, setSubtowns] = useState<string[]>([])
   const [months, setMonths] = useState<string[]>(() => {
     const month = monthForPreset('mtd')
     return month ? [month] : []
@@ -308,12 +334,18 @@ export function BaPerformanceDashboardPage() {
   const inTowns = (city: string | undefined) =>
     towns.length === 0 || towns.some((town) => town.toLowerCase() === (city ?? '').trim().toLowerCase())
   const totalAmbassadors = accounts.filter((a) => !isDemoBa(a.id) && a.isActive !== false && inTowns(a.city)).length
+  const inSubtowns = (subtown: string | undefined) =>
+    subtowns.length === 0 || subtowns.some((name) => name.toLowerCase() === (subtown ?? '').trim().toLowerCase())
   const totalStores = useMemo(
-    () => allStores.filter((store) => inTowns(store.city)).length,
+    () => allStores.filter((store) => inTowns(store.city) && inSubtowns(store.subtown)).length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [knownStores, towns],
+    [knownStores, towns, subtowns],
   )
-  const countScope = towns.length ? towns.join(', ') : officeUser?.city || 'All cities'
+  const countScope = subtowns.length
+    ? subtowns.join(', ')
+    : towns.length
+      ? towns.join(', ')
+      : officeUser?.city || 'All cities'
   const interceptions = useUserInterceptions()
   const liveRecords = useMemo(() => recordsFromTargets(baTargets, interceptions), [baTargets, interceptions])
   /** Monthly target rows, optionally narrowed to selected SKUs (target kg/units only). */
@@ -386,16 +418,48 @@ export function BaPerformanceDashboardPage() {
     return fromRange.filter((month) => months.includes(month))
   }, [range, months])
 
+  const subtownOptions = useMemo(() => {
+    const names = new Set<string>()
+    for (const store of knownStores) {
+      if (!store.subtown.trim()) continue
+      if (towns.length && !towns.some((town) => town.toLowerCase() === store.city.trim().toLowerCase())) continue
+      names.add(store.subtown.trim())
+    }
+    return [...names].sort((a, b) => a.localeCompare(b))
+  }, [knownStores, towns])
+
+  /** Store names implied by the subtown filter. Null means subtown is not narrowing stores. */
+  const storesInSubtowns = useMemo(() => {
+    if (!subtowns.length) return null
+    const wanted = new Set(subtowns.map((name) => name.trim().toLowerCase()))
+    const names = new Set<string>()
+    for (const store of knownStores) {
+      if (!wanted.has(store.subtown.trim().toLowerCase())) continue
+      if (towns.length && !towns.some((town) => town.toLowerCase() === store.city.trim().toLowerCase())) continue
+      if (store.name.trim()) names.add(store.name.trim())
+    }
+    return names
+  }, [knownStores, subtowns, towns])
+
+  const storeFilter = useMemo(() => {
+    if (!storesInSubtowns) return stores
+    const allowed = [...storesInSubtowns]
+    if (!stores.length) return allowed.length ? allowed : ['__no_store__']
+    const picked = stores.filter((name) => storesInSubtowns.has(name))
+    return picked.length ? picked : ['__no_store__']
+  }, [stores, storesInSubtowns])
+
   const storeOptions = useMemo(() => {
     const names = liveRecords
       .filter(
         (record) =>
           (towns.length === 0 || towns.includes(record.town)) &&
-          (coveredMonths.length === 0 || coveredMonths.includes(record.month)),
+          (coveredMonths.length === 0 || coveredMonths.includes(record.month)) &&
+          (!storesInSubtowns || storesInSubtowns.has(record.store)),
       )
       .map((record) => record.store)
     return [...new Set(names)].sort((a, b) => a.localeCompare(b))
-  }, [liveRecords, towns, coveredMonths])
+  }, [liveRecords, towns, coveredMonths, storesInSubtowns])
 
   const scopeTown = towns.length === 0 ? null : towns.length === 1 ? towns[0] : towns.join(', ')
 
@@ -418,12 +482,12 @@ export function BaPerformanceDashboardPage() {
     if (!range) return new Map<string, { kg: number; units: number; city: string; store: string }>()
     return reportSalesInRange(dailyReports, range, {
       towns,
-      stores,
+      stores: storeFilter,
       skus,
       catalogue,
       targetLinesByBa,
     })
-  }, [dailyReports, range, towns, stores, skus, catalogue, targetLinesByBa])
+  }, [dailyReports, range, towns, storeFilter, skus, catalogue, targetLinesByBa])
 
   /**
    * Target = monthly BA SKU target table (full month).
@@ -436,7 +500,7 @@ export function BaPerformanceDashboardPage() {
     )
     const monthRows = periods.flatMap((period) => {
       if (!period.month) return []
-      return filterLiveRecords(skuLiveRecords, { towns, stores, months: [period.month] }).map((record) => ({
+      return filterLiveRecords(skuLiveRecords, { towns, stores: storeFilter, months: [period.month] }).map((record) => ({
         ...record,
         salesKg: 0,
         salesPacks: 0,
@@ -457,7 +521,7 @@ export function BaPerformanceDashboardPage() {
         salesPacks: fromReports.units,
       }
     })
-  }, [range, skuLiveRecords, towns, stores, months, salesByBa])
+  }, [range, skuLiveRecords, towns, storeFilter, months, salesByBa])
 
   const data = useMemo(
     () => aggregateBaPerformance(scopedRecords, scopeTown, { rankBy: 'target' }),
@@ -510,6 +574,30 @@ export function BaPerformanceDashboardPage() {
       }))
       .sort((a, b) => a.baName.localeCompare(b.baName))
   }, [scopedRecords])
+
+  const interceptionsByBa = useMemo(() => {
+    const start = range ? range.start.getFullYear() * 10000 + (range.start.getMonth() + 1) * 100 + range.start.getDate() : null
+    const end = range ? range.end.getFullYear() * 10000 + (range.end.getMonth() + 1) * 100 + range.end.getDate() : null
+    const grouped = new Map<string, typeof interceptions>()
+    for (const row of interceptions) {
+      if (start != null && end != null) {
+        const created = new Date(row.createdAt)
+        const day = created.getFullYear() * 10000 + (created.getMonth() + 1) * 100 + created.getDate()
+        if (day < start || day > end) continue
+      }
+      const list = grouped.get(row.baId) ?? []
+      list.push(row)
+      grouped.set(row.baId, list)
+    }
+    const stats = new Map<string, ReturnType<typeof baInterceptionStats>>()
+    for (const [baId, rows] of grouped) stats.set(baId, baInterceptionStats(rows))
+    return stats
+  }, [interceptions, range])
+
+  const targetPage = usePagedList(
+    targetRows,
+    `${towns.join()}|${subtowns.join()}|${stores.join()}|${skus.join()}|${customFrom}|${customTo}|${datePreset}`,
+  )
 
   const cityRows = useMemo(() => {
     const grouped = new Map<
@@ -692,6 +780,7 @@ export function BaPerformanceDashboardPage() {
         ['From', from],
         ['To', to],
         ['Towns', towns.length ? towns.join(', ') : 'All'],
+        ['Subtowns', subtowns.length ? subtowns.join(', ') : 'All'],
         ['Months', months.length ? months.join(', ') : coveredMonths.join(', ') || 'All'],
         ['Stores', stores.length ? stores.join(', ') : 'All'],
         ['SKUs', skus.length ? skus.join(', ') : 'All'],
@@ -760,19 +849,24 @@ export function BaPerformanceDashboardPage() {
       ])
       byStore['!cols'] = [14, 28, 12, 14, 12, 14, 14].map((wch) => ({ wch }))
 
-      const skuMap = new Map<string, number>()
-      for (const record of scopedRecords) {
-        for (const line of record.skuSales) {
-          skuMap.set(line.sku, (skuMap.get(line.sku) ?? 0) + line.sales)
-        }
-      }
+      const skuSales = range
+        ? [...reportSalesKgBySku(dailyReports, range, {
+            towns,
+            stores: storeFilter,
+            skus,
+            baIds: [...new Set(scopedRecords.map((record) => record.baId).filter((id): id is string => Boolean(id)))],
+            catalogue,
+            targetLinesByBa,
+          }).values()]
+        : []
       const bySku = XLSX.utils.aoa_to_sheet([
-        ['SKU', 'Sales (kg)'],
-        ...[...skuMap.entries()]
-          .map(([sku, sales]) => [sku, Math.round(sales * 10) / 10])
-          .sort((a, b) => Number(b[1]) - Number(a[1])),
+        ['SKU', 'Sales (Kg)'],
+        ...skuSales
+          .filter((row) => row.kg > 0)
+          .map((row) => [row.label, Math.round(row.kg * 10) / 10])
+          .sort((a, b) => Number(b[1]) - Number(a[1]) || String(a[0]).localeCompare(String(b[0]))),
       ])
-      bySku['!cols'] = [{ wch: 36 }, { wch: 12 }]
+      bySku['!cols'] = [{ wch: 36 }, { wch: 14 }]
 
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, summary, 'Summary')
@@ -790,6 +884,12 @@ export function BaPerformanceDashboardPage() {
 
   function handleTownChange(next: string[]) {
     setTowns(next)
+    setSubtowns([])
+    setStores([])
+  }
+
+  function handleSubtownChange(next: string[]) {
+    setSubtowns(next)
     setStores([])
   }
 
@@ -823,34 +923,43 @@ export function BaPerformanceDashboardPage() {
   const scopeLabel = data.townTargetVsSales.town
 
   const categoryChart = useMemo<ChartData<'doughnut'>>(() => {
-    const totals = { Danedar: 0, 'Family Mixture': 0, 'Tea bags': 0, Other: 0 }
-    for (const record of scopedRecords) {
-      for (const line of record.skuSales) {
-        const sku = line.sku.toLowerCase()
-        const tea = sku.includes('tea bag') || sku.includes('rtb')
-        const name = tea
-          ? 'Tea bags'
-          : sku.includes('family')
-            ? 'Family Mixture'
-            : sku.includes('danedar')
-              ? 'Danedar'
-              : 'Other'
-        totals[name] += line.sales
+    const totals = new Map<string, number>()
+    const brandBySku = new Map<string, string>()
+    for (const row of baTargets) {
+      for (const line of row.lines ?? []) {
+        const brand = line.brand?.trim()
+        const sku = canonicalSkuName(line.sku).trim().toLowerCase()
+        if (brand && sku && !brandBySku.has(sku)) brandBySku.set(sku, brand)
       }
     }
-    const entries = (Object.entries(totals) as [string, number][]).filter(([, value]) => value > 0)
+    const baIds = [...new Set(scopedRecords.map((record) => record.baId).filter((id): id is string => Boolean(id)))]
+    if (range && baIds.length) {
+      for (const sold of reportSalesKgBySku(dailyReports, range, {
+        towns,
+        stores: storeFilter,
+        skus,
+        baIds,
+        catalogue,
+        targetLinesByBa,
+      }).values()) {
+        const brand = brandForSku(sold.label, catalogue, brandBySku)
+        if (!brand) continue
+        totals.set(brand, (totals.get(brand) ?? 0) + sold.kg)
+      }
+    }
+    const entries = SALES_BRANDS.map((brand) => [brand, totals.get(brand) ?? 0] as const).filter(([, value]) => value > 0)
     return {
       labels: entries.map(([name]) => name),
       datasets: [
         {
-          data: entries.map(([, value]) => Math.round(value)),
-          backgroundColor: [...categoryColors, '#94a3b8'],
+          data: entries.map(([, value]) => Math.round(value * 10) / 10),
+          backgroundColor: entries.map(([name]) => BRAND_COLORS[name]),
           borderColor: '#fff',
           borderWidth: 2,
         },
       ],
     }
-  }, [scopedRecords])
+  }, [scopedRecords, range, dailyReports, towns, storeFilter, skus, catalogue, targetLinesByBa, baTargets])
 
   const categoryOptions = useMemo<ChartOptions<'doughnut'>>(
     () => ({
@@ -891,86 +1000,94 @@ export function BaPerformanceDashboardPage() {
     [],
   )
 
-  const trendRecords = useMemo(() => {
-    if (salesTrend === 'wow') return scopedRecords
-    const monthsForTrend = monthOptions
-    if (!range) return []
-    const periods = periodsForCalendarRange(range.start, range.end).filter(
-      (period) => period.month != null && monthsForTrend.includes(period.month),
-    )
-    // MoM / YoY: use full months inside the selected year span (sales from target rows / reports).
-    if (salesTrend === 'mom' || salesTrend === 'yoy') {
-      return filterLiveRecords(skuLiveRecords, {
-        towns,
-        stores,
-        months: periods.map((p) => p.month!).filter(Boolean),
-      })
+  /** Same BAs as the Sales (kg) card: only ambassadors who have a target in the selected months. */
+  const trendBaIds = useMemo(
+    () => [...new Set(scopedRecords.map((record) => record.baId).filter((id): id is string => Boolean(id)))],
+    [scopedRecords],
+  )
+
+  /** Daily sales kg for the selected range. Target stays the full monthly kg. */
+  const salesKgByDay = useMemo(() => {
+    if (!range || trendBaIds.length === 0) return new Map<string, number>()
+    return reportSalesKgByDay(dailyReports, range, {
+      towns,
+      stores: storeFilter,
+      skus,
+      baIds: trendBaIds,
+      catalogue,
+      targetLinesByBa,
+    })
+  }, [dailyReports, range, towns, storeFilter, skus, trendBaIds, catalogue, targetLinesByBa])
+
+  const monthlyTargetKg = useMemo(() => {
+    const totals = new Map<string, number>()
+    for (const record of filterLiveRecords(skuLiveRecords, { towns, stores: storeFilter, months: coveredMonths })) {
+      totals.set(record.month, (totals.get(record.month) ?? 0) + record.targetKg)
     }
-    return scopedRecords
-  }, [salesTrend, scopedRecords, monthOptions, skuLiveRecords, towns, stores, range])
+    return totals
+  }, [skuLiveRecords, towns, storeFilter, coveredMonths])
 
   const trendSeries = useMemo(() => {
+    const empty = { labels: [] as string[], sales: [] as number[], target: [] as number[] }
+    if (!range || coveredMonths.length === 0) return empty
+    const round1 = (value: number) => Math.round(value * 10) / 10
+
     if (salesTrend === 'wow') {
-      const buckets = new Map<string, { sales: number; target: number; order: number }>()
-      for (const record of trendRecords) {
-        const weeks = [...record.weekSales].sort((a, b) => a.week - b.week)
-        if (!weeks.length) continue
-        const weekTarget = record.targetKg / weeks.length
-        const monthIndex = MONTH_ORDER.indexOf(record.month)
-        for (const week of weeks) {
-          const key = `${record.month.slice(0, 3)} W${week.week}`
-          const current = buckets.get(key) ?? { sales: 0, target: 0, order: monthIndex * 10 + week.week }
-          current.sales += week.sales
-          current.target += weekTarget
-          buckets.set(key, current)
+      const buckets = new Map<string, { label: string; sales: number; month: string; order: number }>()
+      for (let d = new Date(range.start); d <= range.end; d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)) {
+        const month = MONTH_ORDER[d.getMonth()]
+        if (!coveredMonths.includes(month)) continue
+        const monday = startOfWeekMonday(d)
+        const key = dateInputValue(monday)
+        const current = buckets.get(key) ?? {
+          // Label the first day that is actually in the filter, so an October week is not titled 28 Sept.
+          label: d.toLocaleDateString('en-PK', { day: 'numeric', month: 'short' }),
+          sales: 0,
+          month,
+          order: monday.getTime(),
         }
+        current.sales += salesKgByDay.get(dateInputValue(d)) ?? 0
+        buckets.set(key, current)
       }
-      const points = [...buckets.entries()].sort((a, b) => a[1].order - b[1].order)
+      const points = [...buckets.values()].sort((a, b) => a.order - b.order)
       return {
-        labels: points.map(([label]) => label),
-        sales: points.map(([, point]) => Math.round(point.sales * 10) / 10),
-        target: points.map(([, point]) => Math.round(point.target * 10) / 10),
+        labels: points.map((point) => point.label),
+        sales: points.map((point) => round1(point.sales)),
+        // Full month target on every week of that month — not split into weekly units.
+        target: points.map((point) => round1(monthlyTargetKg.get(point.month) ?? 0)),
       }
     }
 
-    const buckets = new Map<string, { sales: number; target: number }>()
-    for (const record of trendRecords) {
-      const current = buckets.get(record.month) ?? { sales: 0, target: 0 }
-      current.sales += record.salesKg
-      current.target += record.targetKg
-      buckets.set(record.month, current)
+    const points = coveredMonths.map((month) => ({ month, sales: 0, target: monthlyTargetKg.get(month) ?? 0 }))
+    for (const [day, kg] of salesKgByDay) {
+      const month = MONTH_ORDER[Number(day.slice(5, 7)) - 1]
+      const point = points.find((row) => row.month === month)
+      if (point) point.sales += kg
     }
-    const points = monthOptions
-      .filter((month) => buckets.has(month))
-      .map((month) => ({ month, ...buckets.get(month)! }))
     if (salesTrend === 'yoy') {
-      let sales = 0
-      let target = 0
+      let running = 0
       return {
         labels: points.map((point) => point.month.slice(0, 3)),
         sales: points.map((point) => {
-          sales += point.sales
-          return Math.round(sales * 10) / 10
+          running += point.sales
+          return round1(running)
         }),
-        target: points.map((point) => {
-          target += point.target
-          return Math.round(target * 10) / 10
-        }),
+        target: points.map((point) => round1(point.target)),
       }
     }
     return {
       labels: points.map((point) => point.month.slice(0, 3)),
-      sales: points.map((point) => Math.round(point.sales * 10) / 10),
-      target: points.map((point) => Math.round(point.target * 10) / 10),
+      sales: points.map((point) => round1(point.sales)),
+      target: points.map((point) => round1(point.target)),
     }
-  }, [trendRecords, salesTrend, monthOptions])
+  }, [range, coveredMonths, salesTrend, salesKgByDay, monthlyTargetKg])
 
   const weekChart = useMemo<ChartData<'line'>>(
     () => ({
       labels: trendSeries.labels,
       datasets: [
         {
-          label: 'Sales',
+          label: 'Sales (kg)',
           data: trendSeries.sales,
           borderColor: chartGreen,
           backgroundColor: chartGreen,
@@ -981,7 +1098,7 @@ export function BaPerformanceDashboardPage() {
           borderWidth: 2,
         },
         {
-          label: 'Target',
+          label: 'Target (kg)',
           data: trendSeries.target,
           borderColor: chartGold,
           backgroundColor: chartGold,
@@ -1011,35 +1128,57 @@ export function BaPerformanceDashboardPage() {
     [],
   )
 
-  const topStoresChart = useMemo<ChartData<'bar'>>(
-    () => ({
-      labels: data.topStores.map((s) => s.store),
+  const topStoresChart = useMemo<ChartData<'bar'>>(() => {
+    const byStore = new Map<string, number>()
+    for (const record of scopedRecords) {
+      if (record.salesKg <= 0) continue
+      const store = record.store?.trim() || 'Store'
+      byStore.set(store, (byStore.get(store) ?? 0) + record.salesKg)
+    }
+    const rows = [...byStore.entries()]
+      .map(([store, kg]) => ({ store, kg: Math.round(kg * 10) / 10 }))
+      .sort((a, b) => b.kg - a.kg)
+      .slice(0, 10)
+    return {
+      labels: rows.map((row) => row.store),
       datasets: [
         {
-          data: data.topStores.map((s) => s.sales),
+          data: rows.map((row) => row.kg),
           backgroundColor: chartGreenLight,
           borderRadius: 3,
           maxBarThickness: 18,
         },
       ],
-    }),
-    [data.topStores],
-  )
+    }
+  }, [scopedRecords])
 
-  const topSkusChart = useMemo<ChartData<'bar'>>(
-    () => ({
-      labels: data.topSkus.map((s) => s.sku),
+  const topSkusChart = useMemo<ChartData<'bar'>>(() => {
+    if (!range || trendBaIds.length === 0) {
+      return { labels: [], datasets: [{ data: [], backgroundColor: chartGreenLight, borderRadius: 3, maxBarThickness: 18 }] }
+    }
+    const rows = [...reportSalesKgBySku(dailyReports, range, {
+      towns,
+      stores: storeFilter,
+      skus,
+      baIds: trendBaIds,
+      catalogue,
+      targetLinesByBa,
+    }).values()]
+      .map((row) => ({ sku: row.label, kg: Math.round(row.kg * 10) / 10 }))
+      .sort((a, b) => b.kg - a.kg)
+      .slice(0, 10)
+    return {
+      labels: rows.map((row) => row.sku),
       datasets: [
         {
-          data: data.topSkus.map((s) => s.sales),
+          data: rows.map((row) => row.kg),
           backgroundColor: chartGreenLight,
           borderRadius: 3,
           maxBarThickness: 18,
         },
       ],
-    }),
-    [data.topSkus],
-  )
+    }
+  }, [range, trendBaIds, dailyReports, towns, storeFilter, skus, catalogue, targetLinesByBa])
 
   const horizontalBarOptions = useMemo<ChartOptions<'bar'>>(
     () => ({
@@ -1139,13 +1278,14 @@ export function BaPerformanceDashboardPage() {
       <div className="grid gap-4 lg:grid-cols-[12rem_minmax(0,1fr)] lg:grid-rows-[auto_auto]">
         <aside className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:flex lg:min-h-0 lg:flex-col">
           <FilterPanel title="Town" options={townOptions} value={towns} onChange={handleTownChange} />
+          <FilterPanel title="Subtown" options={subtownOptions} value={subtowns} onChange={handleSubtownChange} />
           <FilterPanel title="Month" options={monthOptions} value={months} onChange={handleMonthChange} />
           <FilterPanel title="Store" options={storeOptions} value={stores} onChange={setStores} />
           <FilterPanel title="SKU List" options={skuOptions} value={skus} onChange={setSkus} fill />
         </aside>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:col-start-2 lg:row-start-1 lg:items-stretch">
-          <ChartCard title="Category-wise target">
+          <ChartCard title="Sales by brand (kg)">
             <Doughnut data={categoryChart} options={categoryOptions} />
           </ChartCard>
 
@@ -1158,10 +1298,10 @@ export function BaPerformanceDashboardPage() {
           <ChartCard
             title={
               salesTrend === 'wow'
-                ? 'Week-wise target (units)'
+                ? 'Week-wise (kg)'
                 : salesTrend === 'mom'
-                  ? 'Month-wise target (units)'
-                  : 'Year-to-date target (units)'
+                  ? 'Month-wise (kg)'
+                  : 'Year-to-date (kg)'
             }
             action={
               <div className="flex gap-1 rounded-lg bg-slate-100 p-0.5">
@@ -1190,11 +1330,11 @@ export function BaPerformanceDashboardPage() {
             <Line data={weekChart} options={weekOptions} />
           </ChartCard>
 
-          <ChartCard title="Top 10 stores by target" plotClassName="h-[320px]">
+          <ChartCard title="Top 10 stores by sales (kg)" plotClassName="h-[320px]">
             <Bar data={topStoresChart} options={horizontalBarOptions} />
           </ChartCard>
 
-          <ChartCard title="Top 10 SKU targets" plotClassName="h-[320px]">
+          <ChartCard title="Top 10 SKUs by sales (kg)" plotClassName="h-[320px]">
             <Bar data={topSkusChart} options={horizontalBarOptions} />
           </ChartCard>
         </div>
@@ -1207,9 +1347,9 @@ export function BaPerformanceDashboardPage() {
             subtitle={`${dateRangeLabel} · Target from monthly BA SKU targets · Sales from daily sales reports`}
           />
         </div>
-        <TableScroll minWidth={640}>
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
+        <div className="max-h-[70vh] overflow-auto">
+          <table className="w-full min-w-[1280px] text-left text-sm">
+            <thead className="sticky top-0 z-10 bg-slate-50 text-xs text-slate-500 uppercase shadow-[0_1px_0_0_#e2e8f0]">
               <tr>
                 <th className="px-4 py-3">Ambassador</th>
                 <th className="px-4 py-3">Store</th>
@@ -1218,11 +1358,21 @@ export function BaPerformanceDashboardPage() {
                 <th className="px-4 py-3">Sales (kg)</th>
                 <th className="px-4 py-3">Sales (units)</th>
                 <th className="px-4 py-3">Achievement (kg)</th>
+                <th className="px-4 py-3">Total interceptions</th>
+                <th className="px-4 py-3">Productive calls</th>
+                <th className="px-4 py-3">Non-productive</th>
+                <th className="px-4 py-3">Conversion</th>
               </tr>
             </thead>
             <tbody>
-              {targetRows.map((row) => {
+              {targetPage.rows.map((row) => {
                 const pct = achievementPct(row.targetKg, row.salesKg)
+                const calls = interceptionsByBa.get(row.baId) ?? {
+                  totalInterceptions: 0,
+                  productiveCalls: 0,
+                  nonProductiveCalls: 0,
+                  conversion: 0,
+                }
                 return (
                   <tr key={row.baId} className="border-t border-slate-100">
                     <td className="px-4 py-3 font-medium text-slate-900">
@@ -1247,13 +1397,25 @@ export function BaPerformanceDashboardPage() {
                         {pct}%
                       </span>
                     </td>
+                    <td className="px-4 py-3 tabular-nums">{calls.totalInterceptions.toLocaleString()}</td>
+                    <td className="px-4 py-3 tabular-nums">{calls.productiveCalls.toLocaleString()}</td>
+                    <td className="px-4 py-3 tabular-nums">{calls.nonProductiveCalls.toLocaleString()}</td>
+                    <td className="px-4 py-3 font-semibold tabular-nums">{calls.conversion}%</td>
                   </tr>
                 )
               })}
-              {targetRows.length === 0 && <EmptyRow cols={7} />}
+              {targetRows.length === 0 && <EmptyRow cols={11} />}
             </tbody>
           </table>
-        </TableScroll>
+        </div>
+        <ListPager
+          page={targetPage.page}
+          pageCount={targetPage.pageCount}
+          from={targetPage.from}
+          to={targetPage.to}
+          total={targetPage.total}
+          onPage={targetPage.setPage}
+        />
       </Card>
 
       <Card padding={false}>

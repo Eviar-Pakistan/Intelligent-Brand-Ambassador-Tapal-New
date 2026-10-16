@@ -67,6 +67,7 @@ class StoreSerializer(serializers.ModelSerializer):
             'store_code',
             'name',
             'city',
+            'subtown',
             'address',
             'footfall',
             'peak_hours',
@@ -191,7 +192,7 @@ class StoreSerializer(serializers.ModelSerializer):
         return cache['interceptions']
 
     def get_conversion(self, obj):
-        # Same rule as BA conversion: productive UserInterceptions ÷ total UserInterceptions × 100.
+        # Same rule as BA conversion: productive non-Tapal previous brands ÷ total UserInterceptions × 100.
         productive, total = self._interceptions().get(obj.pk, [0, 0])
         if total:
             return _pct(productive, total)

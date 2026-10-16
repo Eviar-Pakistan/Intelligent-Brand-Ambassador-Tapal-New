@@ -21,7 +21,7 @@ export type BaMe = {
   daysWorked: number
   rating: number | null
   ratingCount: number
-  /** Conversion on Rewards = productive ÷ total calls this week. Today uses productive/interceptions. */
+  /** Lifetime conversion from /api/ba/me/: productive, previous brand filled in and not Tapal, ÷ all interceptions. */
   today: { interceptions: number; productive?: number; switched: number; dailyGoal: number }
 }
 

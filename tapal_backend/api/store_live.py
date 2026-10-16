@@ -3,16 +3,37 @@ Live store numbers worked out from what actually happens, instead of stored coun
 
   status / coverage / BAs / assigned  — from this month's shifts, deployments and today's check-ins
   footfall                            — entered daily (by the BA or Head Office); resets each day
-  conversion                          — productive UserInterceptions ÷ total UserInterceptions
-                                        (status = productive), per store / BA
+  conversion                          — productive UserInterceptions whose previous brand is not Tapal
+                                        ÷ total UserInterceptions, per store / BA
 """
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import date
 
 from django.utils import timezone
+
+# Typed spellings of Tapal, then competitor names, then Tapal products written without the word Tapal.
+_TAPAL_SPELLING = re.compile(
+    r'tapal|tapl|tapla|tapql|yapal|tspal|ta\s*pal|taapl|tapa',
+    re.IGNORECASE,
+)
+_COMPETITOR_BRAND = re.compile(
+    r'lipton|liptan|liptom|liton|lupton|lioton|tipton|\blip\b|'
+    r'vital|vitap|vutal|\bvita\b|\bvit\b|'
+    r'supreme|suprem|\bsup\b|'
+    r'deer|dear|qamar|meezan|mezan|meeza|nayab|lose\s*tea|ultra\s*rich|green\s*leaf|sleem|zeba',
+    re.IGNORECASE,
+)
+_TAPAL_PRODUCT = re.compile(
+    r'daned|danad|danced|dandar|'
+    r'tezdum|tez\s*dum|taz\s*dum|tazdum|texdum|tezdam|'
+    r'family\s*mix|famil\s*mix|\bfm\b|\btdd\b|\bdd\b|\bgt\b|\btb\b|'
+    r'green\s*tea|teabag|tea\s*bag',
+    re.IGNORECASE,
+)
 
 
 # ─── Footfall ────────────────────────────────────────────────────────────────
@@ -48,24 +69,45 @@ def switched_to_tapal(previous_brand: str) -> bool:
     return bool(brand) and 'tapal' not in brand
 
 
+def is_tapal_previous_brand(previous_brand: str | None) -> bool:
+    """True when free text or a dropdown value is Tapal or a Tapal product."""
+    brand = (previous_brand or '').strip()
+    if not brand:
+        return False
+    if _TAPAL_SPELLING.search(brand):
+        return True
+    if _COMPETITOR_BRAND.search(brand):
+        return False
+    return bool(_TAPAL_PRODUCT.search(brand))
+
+
 def is_productive_interception(status: str | None, current_sku: str | None = None) -> bool:
-    """A call counts as converted when UserInterception.status is productive."""
+    """A call is productive when UserInterception.status is productive."""
     outcome = (status or '').strip()
     if not outcome:
         outcome = 'productive' if (current_sku or '').strip() else 'non_productive'
     return outcome == 'productive'
 
 
+def is_converted_interception(status: str | None, current_sku: str | None, previous_brand: str | None) -> bool:
+    """Productive, and the previous brand is filled in and is not Tapal."""
+    brand = (previous_brand or '').strip()
+    if not brand or is_tapal_previous_brand(brand):
+        return False
+    return is_productive_interception(status, current_sku)
+
+
 def interception_counts(store_ids=None, start: date | None = None, end: date | None = None):
     """
-    Conversion buckets use productive ÷ total UserInterceptions:
-    (per store {id: [productive, total]}, per BA {id: [productive, total]},
-     per day {date: productive}, totals [productive, total])
+    Conversion buckets use converted ÷ total UserInterceptions.
+    Converted = productive and previous brand is not Tapal.
+    (per store {id: [converted, total]}, per BA {id: [converted, total]},
+     per day {date: converted}, totals [converted, total])
     """
     from .models import UserInterception
 
     qs = UserInterception.objects.only(
-        'store_id', 'ambassador_id', 'status', 'current_sku', 'created_at'
+        'store_id', 'ambassador_id', 'status', 'current_sku', 'previous_brand', 'created_at'
     )
     if store_ids is not None:
         qs = qs.filter(store_id__in=store_ids)
@@ -78,18 +120,33 @@ def interception_counts(store_ids=None, start: date | None = None, end: date | N
     by_day: dict[date, int] = defaultdict(int)
     totals = [0, 0]
     for row in qs:
-        productive = is_productive_interception(row.status, row.current_sku)
+        converted = is_converted_interception(row.status, row.current_sku, row.previous_brand)
         for bucket in (
             by_store[row.store_id] if row.store_id else None,
             by_ba[row.ambassador_id] if row.ambassador_id else None,
             totals,
         ):
             if bucket is not None:
-                bucket[0] += productive
+                bucket[0] += converted
                 bucket[1] += 1
-        if productive:
+        if converted:
             by_day[timezone.localtime(row.created_at).date()] += 1
     return by_store, by_ba, by_day, totals
+
+
+def ba_call_counts():
+    """Each BA's own interceptions: {ambassador_id: [total, productive]}. Non-productive is total minus productive."""
+    from .models import UserInterception
+
+    by_ba: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    for row in UserInterception.objects.only('ambassador_id', 'status', 'current_sku'):
+        if not row.ambassador_id:
+            continue
+        bucket = by_ba[row.ambassador_id]
+        bucket[0] += 1
+        if is_productive_interception(row.status, row.current_sku):
+            bucket[1] += 1
+    return by_ba
 
 
 # ─── Status, coverage, BAs ───────────────────────────────────────────────────

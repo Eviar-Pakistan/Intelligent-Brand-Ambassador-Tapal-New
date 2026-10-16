@@ -24,6 +24,7 @@ class Store(models.Model):
     name = models.CharField(max_length=200)
     store_code = models.CharField(max_length=32, unique=True, blank=True)
     city = models.CharField(max_length=100)
+    subtown = models.CharField(max_length=100, blank=True)
     address = models.TextField()
     footfall = models.CharField(
         max_length=20,

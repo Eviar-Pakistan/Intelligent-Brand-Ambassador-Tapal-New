@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, StatusBadge } from '../../components/ui'
 import { djangoFetch, djangoToken } from '../../lib/djangoApi'
-import { CITIES, FOOTFALLS, type CreatedStore } from '../../lib/storeRegistry'
+import { CITIES, FOOTFALLS, upsertApiStores, useCreatedStores, type CreatedStore } from '../../lib/storeRegistry'
 
 const field = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500'
 
@@ -85,11 +85,13 @@ export function StoreFootfallCard({ storeId, today }: { storeId: number; today: 
 
 export function StoreSettingsCard({ record, inactive }: { record: CreatedStore; inactive: boolean }) {
   const navigate = useNavigate()
+  const knownStores = useCreatedStores()
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({
     store_code: record.storeCode,
     name: record.name,
     city: record.city,
+    subtown: record.subtown,
     address: record.address,
     footfall: record.footfall,
     peak_hours: record.peakHours,
@@ -127,6 +129,27 @@ export function StoreSettingsCard({ record, inactive }: { record: CreatedStore; 
             </select>
           </label>
           <label className="block text-sm">
+            <span className="mb-1 block font-medium text-slate-700">Subtown</span>
+            <input
+              value={form.subtown}
+              onChange={set('subtown')}
+              list="store-subtowns"
+              placeholder="Add a subtown"
+              className={field}
+            />
+            <datalist id="store-subtowns">
+              {[...new Set(
+                knownStores
+                  .filter((store) => store.city.toLowerCase() === form.city.toLowerCase() && store.subtown.trim())
+                  .map((store) => store.subtown.trim()),
+              )]
+                .sort((a, b) => a.localeCompare(b))
+                .map((name) => (
+                  <option key={name} value={name} />
+                ))}
+            </datalist>
+          </label>
+          <label className="block text-sm">
             <span className="mb-1 block font-medium text-slate-700">Footfall level</span>
             <select value={form.footfall} onChange={set('footfall')} className={field}>
               {FOOTFALLS.map((f) => (
@@ -147,12 +170,14 @@ export function StoreSettingsCard({ record, inactive }: { record: CreatedStore; 
               disabled={busy || !form.name.trim() || !form.store_code.trim() || !form.address.trim()}
               onClick={() =>
                 void run(async () => {
-                  await call(`/api/stores/${record.id}/`, 'PATCH', {
+                  const saved = await call<Parameters<typeof upsertApiStores>[0][number]>(`/api/stores/${record.id}/`, 'PATCH', {
                     ...form,
                     store_code: form.store_code.trim().toUpperCase(),
+                    subtown: form.subtown.trim(),
                     latitude: form.latitude === '' ? null : Number(form.latitude),
                     longitude: form.longitude === '' ? null : Number(form.longitude),
                   })
+                  upsertApiStores([saved])
                   await refreshStores()
                   setEditing(false)
                 }, 'Store details saved.')
